@@ -1,0 +1,118 @@
+{
+  "touch_summarize_blocks": [
+    557.8670469866695,
+    57.604280641089886
+  ],
+  "touch_prepare_sessions": [
+    562.9468828260906,
+    173.74018672897532
+  ],
+  "spatial_map_single_touch": [
+    1462.397362122439,
+    349.97128050236927
+  ],
+  "touch_compute_series": [
+    1057.9227453177552,
+    98.09076006071624
+  ],
+  "spatial_set_camera": [
+    1523.0565920703507,
+    -322.4103681009643
+  ],
+  "spatial_map_baseline": [
+    2206.7716569885984,
+    435.478763687294
+  ],
+  "spatial_configure_slim_uv": [
+    1839.1825399938525,
+    874.5882214251294
+  ],
+  "spatial_precompute_slim_uv": [
+    2211.5162181688943,
+    870.1633303457
+  ],
+  "spatial_extract_boundaries": [
+    2618.8099362518437,
+    864.3564351261018
+  ],
+  "spatial_compare_boundaries": [
+    3120.6379365479324,
+    733.0846286941584
+  ],
+  "spatial_compare_proximal_distal": [
+    3084.210553124999,
+    841.6157568750003
+  ],
+  "spatial_compare_tap_stroke": [
+    3124.469051649806,
+    940.3750633040759
+  ],
+  "spatial_extract_rf_profiles": [
+    3143.0768268749976,
+    1040.3478318749999
+  ],
+  "stimulus_extract_features": [
+    1466.4651289972085,
+    98.96554240088636
+  ],
+  "stimulus_render_radar": [
+    2110.80742647688,
+    231.16738129179237
+  ],
+  "stimulus_compare_sessions": [
+    2106.9304903114144,
+    332.7712320404891
+  ],
+  "stimulus_response_tuning": [
+    2168.195369022047,
+    548.2619569803205
+  ],
+  "stimulus_response_instruction_tuning": [
+    2059.3940531179696,
+    664.5717418819229
+  ],
+  "spatial_tuning_rf_metrics": [
+    3147.0206465624997,
+    624.6933556250002
+  ],
+  "cross_map_feature_grid": [
+    1908.4365314129127,
+    -173.8326722133159
+  ],
+  "cross_extract_grid_metrics": [
+    2261.3818598567755,
+    -383.1298441636627
+  ],
+  "cross_render_grid_metrics": [
+    2605.3423484042787,
+    -383.62084872312005
+  ],
+  "cross_render_sessions": [
+    1897.0171635842476,
+    -469.6903878988431
+  ],
+  "stimulus_cluster_touches": [
+    2081.61357134852,
+    24.443255213016194
+  ],
+  "stimulus_compare_clusters": [
+    2459.985673702577,
+    66.22841845742056
+  ],
+  "stimulus_analyse_efficacy": [
+    2071.1029119890727,
+    134.3969473089491
+  ],
+  "cross_extract_cluster_rf": [
+    2517.213844388901,
+    -193.1353078620217
+  ],
+  "cross_compute_cluster_metrics": [
+    2975.197218895196,
+    -189.40804742255992
+  ],
+  "cross_render_cluster_rf": [
+    3043.074459983213,
+    -311.9933830775803
+  ]
+}

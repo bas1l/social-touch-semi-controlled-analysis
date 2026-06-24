@@ -1,0 +1,110 @@
+import multiprocessing
+
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+from matplotlib.colors import ListedColormap
+from typing import Optional
+from multiprocessing import Queue
+from queue import Empty as QueueEmpty
+
+STATUS_MAPPING = {'SUCCESS': 2, 'RUNNING': 1, 'FAILURE': 0, 'PENDING': -1}
+cmap = ListedColormap(['#c7c7c7', '#d62728', '#ffbf00', '#2ca02c'])
+
+def _plot_process_target(queue: Queue):
+    fig, ax = plt.subplots(figsize=(12, 8))
+    ax.text(0.5, 0.5, "Waiting for data...", ha='center', va='center', fontsize=16)
+    plt.title("Live Pipeline Status Dashboard")
+
+    plt_pause_interval = 0.1
+    vmin, vmax = -1, 3
+
+    is_running = True
+    last_df = None
+
+    while is_running:
+        try:
+            df = None
+            while not queue.empty():
+                df = queue.get_nowait()
+
+            if df is None and last_df is None:
+                try:
+                    df = queue.get(timeout=plt_pause_interval)
+                except QueueEmpty:
+                    pass
+
+            if df is None and queue.empty():
+                df = last_df
+
+            if df is None:
+                 pass
+            elif isinstance(df, pd.DataFrame):
+                 last_df = df
+
+            if not plt.fignum_exists(fig.number):
+                is_running = False
+                continue
+
+            if last_df is not None and not last_df.empty:
+                ax.clear()
+                df_plot = last_df.set_index('dataset')
+
+                df_numeric = df_plot.map(
+                    lambda x: STATUS_MAPPING.get(str(x).split(':')[0], -1) if pd.notna(x) else -1
+                )
+                df_status_annotations = df_plot.map(
+                    lambda x: str(x).split(':')[0] if pd.notna(x) else ''
+                )
+
+                sns.heatmap(
+                    df_numeric, ax=ax, annot=df_status_annotations, fmt='s', cmap=cmap,
+                    linewidths=.5, linecolor='black', cbar=False, vmin=vmin, vmax=vmax
+                )
+
+                norm = plt.Normalize(vmin=vmin, vmax=vmax)
+                status_color_map = {status: cmap(norm(value)) for status, value in STATUS_MAPPING.items()}
+                sorted_statuses = sorted(status_color_map.keys(), key=lambda status: STATUS_MAPPING[status])
+                patches = [plt.Rectangle((0,0),1,1, color=status_color_map[status]) for status in sorted_statuses]
+                ax.legend(patches, sorted_statuses, bbox_to_anchor=(1.02, 1), loc='upper left')
+
+                ax.set_title("Live Pipeline Status Dashboard", fontsize=16)
+                plt.xticks(rotation=45, ha='right'); plt.yticks(rotation=0)
+                fig.tight_layout(rect=[0, 0, 0.9, 1])
+
+        except Exception:
+            pass
+
+        backend = plt.get_backend()
+        if backend.lower() != "agg":
+            plt.pause(plt_pause_interval)
+        else:
+            import time
+            time.sleep(plt_pause_interval)
+
+    plt.close(fig)
+
+class LivePlotter:
+    def __init__(self, data_queue: Queue):
+        self._queue = data_queue
+        self._plot_process: Optional[multiprocessing.Process] = None
+
+    def start(self):
+        if self._plot_process and self._plot_process.is_alive():
+            return
+        self._plot_process = multiprocessing.Process(target=_plot_process_target, args=(self._queue,))
+        try:
+            self._plot_process.start()
+        except (PermissionError, OSError) as e:
+            print(f"Live dashboard unavailable (process spawn failed: {e}). "
+                  "Pipeline will continue — status is saved to the Excel report.")
+            self._plot_process = None
+
+    def stop(self, block: bool = False):
+        if not self.is_running():
+            return
+        self._plot_process.terminate()
+        self._plot_process.join(timeout=3 if block else 1)
+
+    def is_running(self) -> bool:
+        return self._plot_process is not None and self._plot_process.is_alive()

@@ -1,0 +1,23 @@
+# AnalysisRunnerGUI configuration — single source of truth for workflow entries.
+#
+# Each entry declares a workflow button with a display name, category, script path,
+# and dag_config path. All paths are relative to the project root.
+#
+# To add a new workflow:
+#   1. Add an entry under the appropriate category (or add a new category block).
+#   2. Set `script` to the Python script path (relative to project root).
+#   3. Set `dag_config` to the DAG YAML path (relative to project root).
+#   4. Restart AnalysisRunnerGUI — no Python code changes required.
+#
+# If `dag_config` is omitted, the task panel and kinect selector are hidden for
+# that workflow (reserved for future scripts that don't use DAG configs).
+
+categories:
+  - name: Analysis
+    workflows:
+      - name: Analysis [Processing]
+        script: scripts/analysis_workflow_processing.py
+        dag_config: configs/analyse_workflow_processing_dag.yaml
+      - name: Analysis [Viewers]
+        script: scripts/analysis_workflow_viewers.py
+        dag_config: configs/analyse_workflow_viewers_dag.yaml
