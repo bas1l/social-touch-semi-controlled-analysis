@@ -28,6 +28,20 @@ What each figure shows
          shows the ridge clinging to the flank of the bell.
   Fig 5  3D forearm mesh coloured by the heatmap, with the gradient-ridge
          contour back-projected onto the surface (real anatomical view).
+  Fig 6  "Foot of the mountain" candidates vs the gradient ridge.  Three
+         foot detectors are prototyped to trace the *base* of the response
+         (where the flat background bends upward into the peak), rather than
+         the inflection ring the gradient ridge catches:
+           - curvature foot — per-ray maximum upward (concave-up) profile
+             curvature beyond the inflection (√3·σ ≈ 1.73σ for a Gaussian);
+           - kneedle foot — inline chord-deviation knee on the decreasing
+             response profile (dependency-free Kneedle);
+           - threshold foot — a non-radial iso-level reference ring at a low
+             fraction (~20%) of the peak.
+         Left panel overlays all four contours on grid_z with the data
+         boundary; right panel shows sample-ray z(r) profiles with each
+         method's foot marked plus the z''(r) curvature trace; a text panel
+         reports per-method mean radius and height (% of peak).
 
 Display
 -------
@@ -63,6 +77,7 @@ import matplotlib.pyplot as plt
 # runtime in main() via _ensure_interactive_backend(), which must run AFTER them.
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection  # noqa: F401  (registers 3d)
 from scipy.ndimage import map_coordinates
+from scipy.signal import savgol_filter
 from skimage.measure import find_contours
 
 from analysis.receptive_field_mapping.metrics.rf_inflection_boundary import (
@@ -269,6 +284,267 @@ def sample_ray(field: np.ndarray, peak_rc, angle: float):
         return np.array([]), np.array([])
     values = map_coordinates(filled, np.array([rows, cols]), order=1, mode="nearest")
     return radii, values
+
+
+# =============================================================================
+# "Foot of the mountain" extractors (Phase 1)
+# =============================================================================
+#
+# Each extractor mirrors the structure of
+# ``rf_gradient_boundary._extract_ridge_via_radial_profiling``: cast ``n_angles``
+# rays from the peak, choose one radius per ray, smooth the radii circularly with
+# Savitzky-Golay, and return an (N, 2) array of (row, col) contour points (the
+# UV conversion is done by the caller with ``contour_pixels_to_uv``, exactly as
+# the gradient-ridge orchestrator does).  Only the *per-ray selection rule*
+# differs.  Per the fail-fast convention, an all-degenerate field (no ray yields
+# a foot beyond the inflection) raises ``ValueError`` rather than returning a
+# default ring; per-ray degeneracy mirrors the ridge code (radius floored to a
+# sentinel and flagged), and if *every* ray is degenerate the whole field is
+# rejected.
+
+
+def _smooth_radii_circular(
+    best_radii: np.ndarray,
+    savgol_window: int | None,
+    savgol_polyorder: int = 3,
+) -> np.ndarray:
+    """Circular Savitzky-Golay smoothing of a per-angle radius profile.
+
+    Identical to the smoothing block in ``_extract_ridge_via_radial_profiling``:
+    circular padding by ``savgol_window // 2`` on each side, then ``savgol_filter``.
+    """
+    if savgol_window is not None and len(best_radii) >= savgol_window:
+        pad = savgol_window // 2
+        padded = np.concatenate([best_radii[-pad:], best_radii, best_radii[:pad]])
+        smoothed_radii = savgol_filter(padded, savgol_window, savgol_polyorder)
+        best_radii = smoothed_radii[pad:-pad]
+    return best_radii
+
+
+def extract_foot_curvature(
+    grid_z: np.ndarray,
+    smoothed: np.ndarray,
+    peak_rc,
+    n_angles: int = 360,
+    savgol_window: int | None = 31,
+    profile_savgol_window: int = 11,
+    profile_savgol_polyorder: int = 3,
+) -> np.ndarray:
+    """Foot via maximum *upward* (concave-up) profile curvature beyond the inflection.
+
+    For a Gaussian ``A·exp(-r²/2σ²)`` the radial profile ``z(r)`` has its steepest
+    slope (inflection, max ``|z'|``) at ``r = σ`` and its maximum positive (concave
+    up) curvature at ``r = √3·σ ≈ 1.73σ`` — the "toe of the slope" where the flank
+    flattens into the background.  This selects, per ray, the radius of maximum
+    ``z''(r)`` restricted to radii *beyond* the per-ray inflection.
+
+    ``z''(r)`` is computed with ``savgol_filter(deriv=2)`` on the ``smoothed``
+    profile sampled along each ray.  Rays are clipped at the last valid (non-NaN
+    in ``grid_z``) sample so a foot is never placed on the data-mask edge.
+
+    Returns (N, 2) (row, col) contour points.  Raises ``ValueError`` if no ray
+    yields a valid foot.
+    """
+    if profile_savgol_window % 2 == 0:
+        raise ValueError(
+            f"profile_savgol_window must be odd, got {profile_savgol_window}"
+        )
+
+    peak_r, peak_c = peak_rc
+    angles = np.linspace(0, 2 * np.pi, n_angles, endpoint=False)
+    best_radii = np.zeros(n_angles)
+    found = np.zeros(n_angles, dtype=bool)
+
+    for i, angle in enumerate(angles):
+        radii, zvals = sample_ray(smoothed, peak_rc, angle)
+        if radii.size == 0:
+            continue
+
+        # Clip at the last valid (non-NaN) sample of the RAW field so the foot is
+        # never placed on the Gaussian halo beyond the data mask.
+        _, zraw = sample_ray(grid_z, peak_rc, angle)
+        valid_raw = ~np.isnan(zraw)
+        if not np.any(valid_raw):
+            continue
+        last_valid = int(np.max(np.nonzero(valid_raw)[0]))
+        radii = radii[: last_valid + 1]
+        zvals = zvals[: last_valid + 1]
+
+        if radii.size < profile_savgol_window:
+            continue
+
+        # First and second derivatives of z(r) along the ray.
+        dz = savgol_filter(
+            zvals, profile_savgol_window, profile_savgol_polyorder, deriv=1
+        )
+        d2z = savgol_filter(
+            zvals, profile_savgol_window, profile_savgol_polyorder, deriv=2
+        )
+
+        # Per-ray inflection = radius of steepest descent (max |z'|).  On the
+        # decreasing flank z' < 0, so the inflection is argmin(dz).
+        infl_idx = int(np.argmin(dz))
+
+        # Beyond the inflection, pick the maximum positive (concave-up) curvature.
+        beyond = np.arange(infl_idx + 1, len(d2z))
+        if beyond.size == 0:
+            continue
+        d2z_beyond = d2z[beyond]
+        if float(np.max(d2z_beyond)) <= 0.0:
+            # No concave-up shoulder beyond the inflection on this ray.
+            continue
+        sel = beyond[int(np.argmax(d2z_beyond))]
+        best_radii[i] = float(radii[sel])
+        found[i] = True
+
+    if not np.any(found):
+        raise ValueError(
+            "extract_foot_curvature: no ray yielded a concave-up foot beyond the "
+            "inflection — field too flat/degenerate to define a foot of the mountain"
+        )
+
+    # Fill degenerate rays with the median found radius so the contour stays closed
+    # (the radii are then circularly smoothed, mirroring the ridge code).
+    best_radii[~found] = float(np.median(best_radii[found]))
+    best_radii = _smooth_radii_circular(best_radii, savgol_window)
+
+    contour_rows = peak_r + best_radii * np.cos(angles)
+    contour_cols = peak_c + best_radii * np.sin(angles)
+    return np.column_stack([contour_rows, contour_cols])
+
+
+def extract_foot_kneedle(
+    grid_z: np.ndarray,
+    peak_rc,
+    n_angles: int = 360,
+    savgol_window: int | None = 31,
+) -> np.ndarray:
+    """Foot via an inline Kneedle knee-point on the decreasing response profile.
+
+    For each ray, take the monotone-decreasing portion of ``z(r)`` from the peak,
+    normalise both ``r`` and ``z`` to ``[0, 1]``, subtract the straight chord from
+    first→last sample, and take the radius of maximum deviation (``argmax``) — the
+    knee of a convex, decreasing curve.  This is the dependency-free Kneedle rule
+    (no ``kneed`` import).
+
+    Rays are clipped at the last valid (non-NaN) sample of ``grid_z`` so the knee
+    cannot land on the data-mask edge.  Returns (N, 2) (row, col) contour points;
+    raises ``ValueError`` if no ray yields a valid knee.
+    """
+    peak_r, peak_c = peak_rc
+    angles = np.linspace(0, 2 * np.pi, n_angles, endpoint=False)
+    best_radii = np.zeros(n_angles)
+    found = np.zeros(n_angles, dtype=bool)
+
+    for i, angle in enumerate(angles):
+        radii, zvals = sample_ray(grid_z, peak_rc, angle)
+        if radii.size == 0:
+            continue
+
+        valid = ~np.isnan(zvals)
+        if not np.any(valid):
+            continue
+        last_valid = int(np.max(np.nonzero(valid)[0]))
+        radii = radii[: last_valid + 1]
+        zvals = zvals[: last_valid + 1]
+
+        # Monotone-decreasing portion from the peak: keep up to (and including)
+        # the first sample that reaches the profile minimum, so the chord-deviation
+        # is taken over a convex, decreasing curve.
+        end = int(np.argmin(zvals)) + 1
+        if end < 3:
+            continue
+        r_seg = radii[:end]
+        z_seg = zvals[:end]
+
+        r_span = float(r_seg[-1] - r_seg[0])
+        z_span = float(z_seg[0] - z_seg[-1])
+        if r_span <= 0.0 or z_span <= 0.0:
+            continue
+
+        r_norm = (r_seg - r_seg[0]) / r_span
+        z_norm = (z_seg - z_seg[-1]) / z_span  # 1 at peak end, 0 at far end.
+        # Straight chord from first (1.0) to last (0.0): chord = 1 - r_norm.
+        chord = 1.0 - r_norm
+        deviation = z_norm - chord
+        if float(np.max(deviation)) <= 0.0:
+            continue
+        knee = int(np.argmax(deviation))
+        best_radii[i] = float(r_seg[knee])
+        found[i] = True
+
+    if not np.any(found):
+        raise ValueError(
+            "extract_foot_kneedle: no ray yielded a knee — response profiles are "
+            "not convex-decreasing enough to define a foot of the mountain"
+        )
+
+    best_radii[~found] = float(np.median(best_radii[found]))
+    best_radii = _smooth_radii_circular(best_radii, savgol_window)
+
+    contour_rows = peak_r + best_radii * np.cos(angles)
+    contour_cols = peak_c + best_radii * np.sin(angles)
+    return np.column_stack([contour_rows, contour_cols])
+
+
+def extract_foot_threshold(
+    grid_z: np.ndarray,
+    peak_rc,
+    frac: float = 0.2,
+) -> np.ndarray:
+    """Foot as a simple iso-level reference ring at ``frac * peak``.
+
+    Not radial: fills NaNs to the field minimum, runs
+    ``skimage.measure.find_contours`` at ``frac * peak``, and selects the contour
+    whose polygon encloses the peak.  A reference ring only.
+
+    Returns (N, 2) (row, col) contour points; raises ``ValueError`` if no
+    iso-contour at the requested level encloses the peak.
+    """
+    if not (0.0 < frac < 1.0):
+        raise ValueError(f"frac must be in (0, 1), got {frac}")
+
+    peak_r, peak_c = peak_rc
+    peak_val = float(np.nanmax(grid_z))
+    if not np.isfinite(peak_val) or peak_val <= 0.0:
+        raise ValueError(
+            f"extract_foot_threshold: peak value non-positive/non-finite "
+            f"({peak_val}) — cannot threshold"
+        )
+
+    level = frac * peak_val
+    filled = np.where(np.isnan(grid_z), np.nanmin(grid_z), grid_z)
+    contours = find_contours(filled, level=level)
+    if not contours:
+        raise ValueError(
+            f"extract_foot_threshold: find_contours found no contour at level "
+            f"{level:.4f} ({100 * frac:.0f}% of peak)"
+        )
+
+    # Select the contour whose polygon encloses the peak (point-in-polygon),
+    # preferring the largest enclosing one if several qualify.
+    from matplotlib.path import Path as MplPath
+
+    enclosing = []
+    for c in contours:
+        if len(c) < 3:
+            continue
+        poly = MplPath(np.column_stack([c[:, 0], c[:, 1]]))
+        if poly.contains_point((peak_r, peak_c)):
+            area = 0.5 * abs(
+                np.dot(c[:, 0], np.roll(c[:, 1], 1))
+                - np.dot(c[:, 1], np.roll(c[:, 0], 1))
+            )
+            enclosing.append((area, c))
+
+    if not enclosing:
+        raise ValueError(
+            f"extract_foot_threshold: no iso-contour at {100 * frac:.0f}% of peak "
+            f"encloses the peak at (row,col)={peak_rc}"
+        )
+
+    enclosing.sort(key=lambda t: t[0])
+    return enclosing[-1][1]
 
 
 def contour_height(grid_z: np.ndarray, contour_rc: np.ndarray) -> np.ndarray:
@@ -526,6 +802,168 @@ def fig5_forearm_3d(g, grad_contour_uv, infl_contour_uv, out_dir):
     _emit(fig, out_dir, "fig5_forearm_3d.png")
 
 
+def fig6_foot_methods(g, smoothed, peak_rc, grad_contour_rc, n_angles,
+                      savgol_window, out_dir, n_show=6,
+                      profile_savgol_window=11, profile_savgol_polyorder=3,
+                      threshold_frac=0.2):
+    """Compare the three "foot of the mountain" candidates vs the gradient ridge.
+
+    Left panel: ``grid_z`` heatmap + the white-dashed data boundary (reused from
+    fig2) + four overlaid pixel-space contours — gradient ridge (lime, the
+    reference inflection ring), curvature foot, kneedle foot, threshold foot —
+    plus the peak marker and a legend.
+
+    Right panel: ``n_show`` sample-ray response profiles ``z(r)`` (from
+    ``sample_ray`` on ``grid_z``) with each method's chosen foot radius marked on
+    the profile, and the ``z''(r)`` curvature trace (the curvature method's
+    target) drawn on a twin axis.
+
+    Text annotation: per-method mean radius (px) and mean height as % of peak
+    (via ``contour_height``).  Expected: foot heights ~20-25% of peak vs the
+    gradient ridge ~60%.
+
+    The foot extractors are called directly; if a field is degenerate they raise
+    ``ValueError`` (fail-fast) and that propagates out of this figure, exactly as
+    the other sandbox figures let their errors propagate.
+    """
+    grid_z = g["grid_z"]
+    jet = plt.cm.jet.copy()
+    jet.set_bad("lightgrey")
+    peak_val = float(np.nanmax(grid_z))
+
+    # --- Extract the three foot candidates (fail-fast, no silent skip) --------
+    foot_curv_rc = extract_foot_curvature(
+        grid_z, smoothed, peak_rc, n_angles=n_angles, savgol_window=savgol_window,
+        profile_savgol_window=profile_savgol_window,
+        profile_savgol_polyorder=profile_savgol_polyorder,
+    )
+    foot_knee_rc = extract_foot_kneedle(
+        grid_z, peak_rc, n_angles=n_angles, savgol_window=savgol_window,
+    )
+    foot_thr_rc = extract_foot_threshold(grid_z, peak_rc, frac=threshold_frac)
+
+    # (label, contour_rc, color) — gradient ridge first as the reference ring.
+    methods = [
+        ("gradient ridge", grad_contour_rc, "lime"),
+        ("curvature foot", foot_curv_rc, "deepskyblue"),
+        ("kneedle foot", foot_knee_rc, "magenta"),
+        (f"threshold foot ({100*threshold_frac:.0f}%)", foot_thr_rc, "orange"),
+    ]
+
+    fig = plt.figure(figsize=(16, 8))
+    ax_map = fig.add_subplot(1, 2, 1)
+    ax_prof = fig.add_subplot(1, 2, 2)
+
+    # ----------------------------- Left panel --------------------------------
+    ax_map.imshow(np.ma.masked_invalid(grid_z), cmap=jet, origin="upper")
+
+    # White-dashed data boundary (same overlay pattern as fig2).
+    nan_boundary_segments = find_contours(
+        (~np.isnan(grid_z)).astype(float), level=0.5
+    )
+    for i, seg in enumerate(nan_boundary_segments):
+        label = "data boundary" if i == 0 else "_nolegend_"
+        ax_map.plot(seg[:, 1], seg[:, 0], "--", color="white",
+                    lw=0.8, alpha=0.6, label=label)
+
+    for label, c_rc, col in methods:
+        if c_rc is None:
+            continue
+        closed = np.vstack([c_rc, c_rc[:1]])
+        ax_map.plot(closed[:, 1], closed[:, 0], "-", color=col, lw=1.8, label=label)
+    ax_map.plot(peak_rc[1], peak_rc[0], "kx", ms=12, mew=2, label="peak")
+    ax_map.legend(fontsize=7, loc="upper right")
+    ax_map.set_title("Foot-of-mountain candidates vs gradient ridge\n"
+                     "(feet should sit outside the lime ring, inside the data boundary)")
+
+    # ----------------------------- Right panel -------------------------------
+    show_angles = np.linspace(0, 2 * np.pi, n_show, endpoint=False)
+    colors = plt.cm.tab10(np.linspace(0, 1, n_show))
+    ax_curv = ax_prof.twinx()
+
+    # Per-method foot radius as a function of angle, so each ray's foot can be
+    # marked on its own profile.  (Radii are recovered from the contour points.)
+    def _radii_of(c_rc):
+        if c_rc is None:
+            return None
+        return np.hypot(c_rc[:, 0] - peak_rc[0], c_rc[:, 1] - peak_rc[1])
+
+    # The radial methods produce one point per ray angle (n_angles, matching the
+    # method angle grid); map a shown angle to its nearest radial index.
+    method_angles = np.linspace(0, 2 * np.pi, n_angles, endpoint=False)
+
+    for angle, col in zip(show_angles, colors):
+        radii, zvals = sample_ray(grid_z, peak_rc, angle)
+        if radii.size == 0:
+            continue
+        valid = ~np.isnan(zvals)
+        if not np.any(valid):
+            continue
+        last_valid = int(np.max(np.nonzero(valid)[0]))
+        radii = radii[: last_valid + 1]
+        zvals = zvals[: last_valid + 1]
+        znorm = zvals / max(peak_val, 1e-12)
+        deg = int(round(math.degrees(angle)))
+        ax_prof.plot(radii, znorm, "-", color=col, lw=1.2, label=f"z(r) {deg}°")
+
+        # z''(r) curvature trace (the curvature method's target) on the twin axis.
+        _, zsm = sample_ray(smoothed, peak_rc, angle)
+        zsm = zsm[: last_valid + 1]
+        if zsm.size >= profile_savgol_window:
+            d2z = savgol_filter(
+                zsm, profile_savgol_window, profile_savgol_polyorder, deriv=2
+            )
+            ax_curv.plot(radii[: len(d2z)], d2z, ":", color=col, lw=0.9, alpha=0.7)
+
+        # Mark each radial method's foot radius on this ray's profile.
+        ang_idx = int(np.argmin(np.abs(method_angles - angle)))
+        for _label, c_rc, mcol in methods:
+            r_of = _radii_of(c_rc)
+            if r_of is None:
+                continue
+            # Threshold foot is not radial (its point count != n_angles); skip
+            # the per-ray marker for it (it has no per-ray radius along this ray).
+            if len(r_of) != n_angles:
+                continue
+            r_foot = float(r_of[ang_idx])
+            # Sample the profile height at that radius for the marker y-value.
+            if radii.size and radii[0] <= r_foot <= radii[-1]:
+                z_at = float(np.interp(r_foot, radii, znorm))
+                ax_prof.plot(r_foot, z_at, "o", color=mcol, ms=6,
+                             mec="black", mew=0.5)
+
+    ax_prof.axhline(0.0, color="grey", lw=0.6, alpha=0.5)
+    ax_prof.set_xlabel("radius from peak (px)")
+    ax_prof.set_ylabel("normalised response z(r)")
+    ax_curv.set_ylabel("z''(r) curvature (dotted)")
+    ax_prof.set_title("Solid = response z(r); dotted = z''(r) curvature trace\n"
+                      "● = each radial method's foot on that ray")
+    ax_prof.legend(fontsize=7, ncol=2, loc="upper right")
+    ax_prof.grid(alpha=0.3)
+
+    # --------------------------- Text annotation -----------------------------
+    lines = [f"peak grid_z value : {peak_val:.3f}", ""]
+    for label, c_rc, _col in methods:
+        if c_rc is None:
+            lines.append(f"{label:>22}: <none>")
+            continue
+        h = contour_height(grid_z, c_rc)
+        r = np.hypot(c_rc[:, 0] - peak_rc[0], c_rc[:, 1] - peak_rc[1])
+        lines.append(
+            f"{label:>22}: mean r={r.mean():5.1f}px  "
+            f"height={100 * h.mean() / max(peak_val, 1e-12):4.0f}% of peak"
+        )
+    ax_map.text(0.02, 0.02, "\n".join(lines), va="bottom", ha="left",
+                family="monospace", fontsize=8, color="white",
+                transform=ax_map.transAxes,
+                bbox=dict(boxstyle="round", fc="black", alpha=0.55))
+
+    fig.suptitle(f"{g['session_id']} — foot-of-mountain boundary candidates",
+                 fontsize=13)
+    fig.tight_layout()
+    _emit(fig, out_dir, "fig6_foot_methods.png")
+
+
 # =============================================================================
 # Main
 # =============================================================================
@@ -548,13 +986,14 @@ def main() -> None:
     GESTURE = "all"        # one of: all, stroke, tap, stroke_proximal, stroke_distal
 
     # ----------------------- TUNABLE METHOD PARAMETERS -----------------------
-    MIN_OVERLAP_PCT: float = 50.0       # % of gesture touches a vertex must be contacted by
+    MIN_OVERLAP_PCT: float = 5.0       # % of gesture touches a vertex must be contacted by
     INFLECTION_SIGMA = 5.0              # Gaussian smoothing sigma (matches pipeline inflection_sigma)
     MEDIAN_FILTER_SIZE: int | None = 5  # median filter on grid_z (None = no extra filtering)
     N_ANGLES = 360                      # radial rays
     SAVGOL_WINDOW = 31     # contour smoothing window (None to disable)
     SIGMA_SWEEP = [2.0, 3.0, 4.0, 5.0, 7.0, 10.0]
     DRAW_FOREARM_3D = False  # Fig 5 (back-projection); set False to skip if slow
+    DRAW_FOOT_METHODS = True  # Fig 6 (foot-of-mountain candidates vs gradient ridge)
 
     out_dir = Path(__file__).resolve().parent / "_sandbox_gradient_ridge_out"
     out_dir.mkdir(exist_ok=True)
@@ -624,6 +1063,9 @@ def main() -> None:
             infl_boundary.contour_uv if infl_boundary is not None else None,
             out_dir,
         )
+    if DRAW_FOOT_METHODS:
+        fig6_foot_methods(g, smoothed, peak_rc, grad_contour_rc, N_ANGLES,
+                          SAVGOL_WINDOW, out_dir)
 
     print(f"Done. Figures in: {out_dir}")
     if _INTERACTIVE:
