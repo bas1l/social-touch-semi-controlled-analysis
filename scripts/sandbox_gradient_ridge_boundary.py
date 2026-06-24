@@ -63,6 +63,7 @@ import matplotlib.pyplot as plt
 # runtime in main() via _ensure_interactive_backend(), which must run AFTER them.
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection  # noqa: F401  (registers 3d)
 from scipy.ndimage import map_coordinates
+from skimage.measure import find_contours
 
 from analysis.receptive_field_mapping.metrics.rf_inflection_boundary import (
     compute_inflection_boundary,
@@ -368,10 +369,24 @@ def fig2_radial_profiling(g, grad_mag, peak_rc, grad_contour_rc, n_angles,
 
     ax_map.imshow(np.ma.masked_invalid(grad_mag), cmap="inferno", origin="upper",
                   vmin=0, vmax=max(float(np.nanmax(grad_mag)), 1e-12))
+
+    # Overlay the grid_z NaN boundary as a white dashed line so the researcher
+    # can confirm the lime-green gradient-ridge contour sits *inside* the data
+    # boundary rather than tracing it.
+    nan_boundary_segments = find_contours(
+        (~np.isnan(grid_z)).astype(float), level=0.5
+    )
+    for i, seg in enumerate(nan_boundary_segments):
+        label = "data boundary" if i == 0 else "_nolegend_"
+        ax_map.plot(seg[:, 1], seg[:, 0], "--", color="white",
+                    lw=0.8, alpha=0.6, label=label)
+
     if grad_contour_rc is not None:
         closed = np.vstack([grad_contour_rc, grad_contour_rc[:1]])
-        ax_map.plot(closed[:, 1], closed[:, 0], "-", color="lime", lw=1.8)
-    ax_map.plot(peak_rc[1], peak_rc[0], "cx", ms=12, mew=2)
+        ax_map.plot(closed[:, 1], closed[:, 0], "-", color="lime", lw=1.8,
+                    label="gradient ridge")
+    ax_map.plot(peak_rc[1], peak_rc[0], "cx", ms=12, mew=2, label="peak")
+    ax_map.legend(fontsize=7, loc="upper right")
 
     show_angles = np.linspace(0, 2 * np.pi, n_show, endpoint=False)
     colors = plt.cm.tab10(np.linspace(0, 1, n_show))
