@@ -1,0 +1,52 @@
+name: social-touch-analysis
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+
+  # --- VTK — C++ library; needed by PyVista ---
+  - vtk>=9.4
+
+  # --- Core scientific (MKL-linked builds from conda) ---
+  - scipy>=1.15
+
+  - pip:
+      # --- Core Scientific Computing & Data Analysis ---
+      - matplotlib>=3.10
+      - numpy
+      - pandas>=2.3
+      - scikit-image>=0.25
+      - scikit-learn>=1.7
+
+      # --- 3D, Visualization & Geometry ---
+      - open3d>=0.19
+      - pyvista>=0.46
+      - pyvistaqt>=0.11
+      - trimesh>=4.7
+      - libigl
+
+      # --- Image & Visualization ---
+      - Pillow>=11
+      - seaborn
+
+      # --- Pydantic & Data Validation ---
+      - pydantic>=2.11
+
+      # --- GUI Framework ---
+      - PyQt5>=5.15
+
+      # --- Workflow Orchestration ---
+      - prefect>=3.4
+
+      # --- Data & Serialization ---
+      - openpyxl
+      - PyYAML>=6.0
+      - ruamel.yaml>=0.18
+
+      # --- Utilities ---
+      - tqdm>=4.67
+
+      # --- Project (editable install) ---
+      - -e .
