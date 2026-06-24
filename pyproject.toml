@@ -24,6 +24,7 @@ dependencies = [
     "trimesh>=4.7",
     "libigl",
     "PyQt5>=5.15",
+    "grandalf",
     "prefect>=3.4",
     "pydantic>=2.11",
     "ruamel.yaml>=0.18",
