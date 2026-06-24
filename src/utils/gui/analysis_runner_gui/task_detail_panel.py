@@ -125,6 +125,15 @@ _OPTION_ENUMS: dict[str, list[tuple[str, object]]] = {
         ("Orange", "orange"),
         ("Magenta", "magenta"),
     ],
+    "boundary_method": [
+        ("Gradient (default)", "gradient"),
+        ("Inflection", "inflection"),
+    ],
+}
+
+_OPTION_VISIBILITY: dict[str, dict[str, set]] = {
+    "boundary_method": {"inflection_sigma": {"inflection"}},
+    "neuron_mode":     {"iff_metric": {"iff"}},
 }
 
 
@@ -266,6 +275,7 @@ class TaskDetailPanel(QWidget):
         super().__init__(parent)
         self._model: DagConfigModel | None = None
         self._task_name: str | None = None
+        self._sections: dict[str, QWidget] = {}
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -312,6 +322,7 @@ class TaskDetailPanel(QWidget):
             item = self._layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
+        self._sections.clear()
 
         # force_processing is rendered in the task list row, not here
         options = {
@@ -349,7 +360,16 @@ class TaskDetailPanel(QWidget):
                 widget = self._make_feature_section(key, val, cols=cols)
             else:
                 widget = self._make_scalar_section(key, val)
+            self._sections[key] = widget
             self._layout.insertWidget(i, widget)
+
+        for controller, dependents in _OPTION_VISIBILITY.items():
+            if controller not in options:
+                continue
+            current_val = options[controller]
+            for dep_key, visible_when in dependents.items():
+                if dep_key in self._sections:
+                    self._sections[dep_key].setVisible(current_val in visible_when)
 
     # ------------------------------------------------------------------
     # Section builders
@@ -892,6 +912,10 @@ class TaskDetailPanel(QWidget):
             _, saved_val = entries[index]
             self._model.set_task_option(self._task_name, key, saved_val)
             self.task_changed.emit()
+            if key in _OPTION_VISIBILITY:
+                for dep_key, visible_when in _OPTION_VISIBILITY[key].items():
+                    if dep_key in self._sections:
+                        self._sections[dep_key].setVisible(saved_val in visible_when)
         return _handler
 
     def _make_mode_toggle_handler(self, key: str, cb: QCheckBox):
