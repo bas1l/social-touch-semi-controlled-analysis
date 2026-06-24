@@ -262,6 +262,8 @@ def run_population_response_field_extraction(
         # --- Compute heatmaps for all gesture subsets ---
         subsets = ['all'] + list(GESTURE_TYPES)
         results: dict = {}
+        per_gesture_slim_raw: dict = {}
+        per_gesture_slim_unique_count: dict = {}
 
         for gtype in subsets:
             if gtype == 'all':
@@ -292,6 +294,8 @@ def run_population_response_field_extraction(
                 cp_mask,
                 n_verts,
             )
+            per_gesture_slim_raw[gtype] = heatmap[nearest_orig_for_slim]
+            per_gesture_slim_unique_count[gtype] = unique_count[nearest_orig_for_slim]
             threshold = compute_threshold_from_ratio(min_overlap_pct, n_gesture_touches)
             thresholded = apply_vertex_threshold(heatmap, unique_count, threshold)
             slim_heatmap = thresholded[nearest_orig_for_slim]
@@ -324,6 +328,8 @@ def run_population_response_field_extraction(
                     cp_mask,
                     n_verts,
                 )
+                per_gesture_slim_raw['stroke'] = heatmap[nearest_orig_for_slim]
+                per_gesture_slim_unique_count['stroke'] = unique_count[nearest_orig_for_slim]
                 threshold = compute_threshold_from_ratio(min_overlap_pct, n_stroke_touches)
                 thresholded = apply_vertex_threshold(heatmap, unique_count, threshold)
                 slim_heatmap = thresholded[nearest_orig_for_slim]
@@ -459,6 +465,8 @@ def run_population_response_field_extraction(
             forearm_V=slim_V,
             results=results,
             per_gesture_grids=per_gesture_grids,
+            per_gesture_slim_raw=per_gesture_slim_raw,
+            per_gesture_slim_unique_count=per_gesture_slim_unique_count,
             neuron_mode=neuron_mode,
             min_overlap_pct=min_overlap_pct,
             gesture_boundaries=gesture_boundaries,
@@ -810,6 +818,8 @@ def _save_response_fields_npz(
     forearm_V: np.ndarray,
     results: dict,
     per_gesture_grids: dict,
+    per_gesture_slim_raw: dict,
+    per_gesture_slim_unique_count: dict,
     neuron_mode: str,
     min_overlap_pct: float,
     gesture_boundaries: dict,
@@ -842,6 +852,8 @@ def _save_response_fields_npz(
         slim_heatmap, n_touches, threshold = results[gtype]
         grid_u, grid_v, grid_z = per_gesture_grids[gtype]
         data_dict[f'heatmap_{gtype}'] = slim_heatmap.astype(np.float64)
+        data_dict[f'heatmap_pre_threshold_{gtype}'] = per_gesture_slim_raw[gtype].astype(np.float64)
+        data_dict[f'unique_count_{gtype}'] = per_gesture_slim_unique_count[gtype].astype(np.int64)
         data_dict[f'n_touches_{gtype}'] = np.int64(n_touches)
         data_dict[f'threshold_{gtype}'] = np.int64(threshold)
         data_dict[f'grid_u_{gtype}'] = grid_u.astype(np.float64)

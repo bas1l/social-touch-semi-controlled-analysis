@@ -182,12 +182,12 @@ tasks:
   # Output: 4_analysed/population_response_fields/<session_id>/
   spatial_extract_boundaries:
     category: spatial_sensitivity
-    enabled: true
+    enabled: false
     options:
-      force_processing: false
+      force_processing: true
       neuron_mode: iff
       iff_metric: both
-      min_overlap_pct: 25
+      min_overlap_pct: 0
       median_filter_size: 5
       inflection_sigma: 5.0
       heatmap_space: linear

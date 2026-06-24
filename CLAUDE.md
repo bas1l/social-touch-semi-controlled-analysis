@@ -19,8 +19,11 @@ primary processing, preprocessing, merging, and postprocessing.
 ## Development Commands
 
 ```bash
-# Environment setup (conda + pip)
-conda activate social-touch-env
+# Create environment (first time)
+conda env create -f environment.yml
+
+# Activate and editable-install
+conda activate social-touch-analysis
 pip install -e .            # from repo root
 
 # Run all tests
@@ -34,6 +37,9 @@ python scripts/analysis_workflow_processing.py
 
 # Run the analysis viewers pipeline
 python scripts/analysis_workflow_viewers.py
+
+# Launch the GUI pipeline runner
+python scripts/launch_analysis_runner_gui.py
 ```
 
 There is no linter or formatter configured. Python ≥3.10 is required.
@@ -48,8 +54,10 @@ and sets `pythonpath = ["src"]` for pytest.
 | Package | Purpose |
 |---------|---------|
 | `analysis/pipeline/` | Shared constants, output directory names, session discovery, stage runner |
-| `analysis/touch_analytics/` | 5-stage feature pipeline: preparation → series → extraction → clustering → comparing |
-| `analysis/receptive_field_mapping/` | Spike heatmaps on forearm surface via SLIM UV projection |
+| `analysis/touch_analytics/` | Feature pipeline sub-packages: `preparation/`, `representation/`, `feature_extraction/`, `reduction/`, `clustering/`, `comparing/`, `evaluation/`; top-level `*_pipeline.py` entry points drive each stage |
+| `analysis/receptive_field_mapping/` | Spike heatmaps on forearm surface via SLIM UV projection; split into `surface/` (SLIM UV, projection), `metrics/` (boundary, grid, PCA), `rendering/` (all figure renderers), `pipelines/` (Prefect flow entry points), `data/` (loaders/IO), `gui/` (PyVista/PyQt5 viewers) |
+| `utils/pipeline/` | `DagConfigModel` — ruamel.yaml round-trip model for GUI-driven DAG YAML editing |
+| `utils/gui/analysis_runner_gui/` | PyQt5 GUI pipeline runner: three-column layout (workflow selector, task panel, session dirs), Prefect server manager, console, DAG graph view, config dialogs |
 | `_vendor/` | Vendored utilities from the parent repo (~500 LOC): task caching, DAG config, monitoring, KinectConfig, path tools |
 
 ### Data flow
@@ -69,6 +77,8 @@ Merged session CSV (from parent repo's 3_merged_data/)
 
 - **DAG configs**: `configs/analyse_workflow_processing_dag.yaml` and
   `configs/analyse_workflow_viewers_dag.yaml`
+- **GUI runner config**: `configs/analysis_runner_gui.yaml` — lists workflow entries
+  shown in the `AnalysisRunnerGUI` workflow selector
 - **Kinect/forearm configs**: Live in the parent repo at
   `../social-touch-semi-controlled/configs/`
 - **Data root**: Resolved by `_vendor.path_tools.get_project_data_root()` —
@@ -102,9 +112,13 @@ cross-repo code imports. These are the only external code dependencies:
 **This codebase is a self-controlled pipeline. Code must raise loudly when
 inputs, state, or results do not meet pipeline expectations.**
 
-- **Never introduce fallbacks, defaults, or silent degradation.**
+- **Never introduce fallbacks, defaults, or silent degradation — this applies
+  equally to sandbox and script files, not only to pipeline modules.**
 - Prefer `raise ValueError(...)` or `assert` with a message over any form of
   `or default`, `except: pass`, or returning a sentinel value.
+- When a file format changes (e.g. new NPZ keys), do not add version-detection
+  branches that silently fall back to old behaviour. Update the data, then
+  update the code unconditionally.
 
 ### YAML handling — ruamel.yaml only
 

@@ -76,6 +76,13 @@ from analysis.receptive_field_mapping.metrics.rf_gradient_boundary import (
     compute_gradient_ridge,
 )
 from analysis.receptive_field_mapping.surface.forearm_slim_uv import uv_points_to_xyz
+from analysis.receptive_field_mapping.data.rf_population_heatmap import (
+    apply_vertex_threshold,
+    compute_threshold_from_ratio,
+)
+from analysis.receptive_field_mapping.rendering.rf_population_map_renderer import (
+    compute_interpolated_grid,
+)
 
 
 # =============================================================================
@@ -214,8 +221,12 @@ def load_grid(npz_path: Path, gtype: str):
         "forearm_uv": d["forearm_uv"],
         "forearm_faces": d["forearm_faces"],
         "forearm_V": d["forearm_V"],
+        "heatmap_pre_threshold": _get("heatmap_pre_threshold"),
+        "unique_count": _get("unique_count"),
+        "n_touches": int(d[f"n_touches_{gtype}"]),
         "pipeline_sigma": float(d["inflection_sigma"]),
         "pipeline_boundary_method": str(d["boundary_method"]) if "boundary_method" in d else "?",
+        "pipeline_min_overlap_pct": float(d["min_overlap_pct"]),
         "gesture_types": available,
         "session_id": str(d["session_id"]),
     }
@@ -515,15 +526,17 @@ def main() -> None:
     NPZ_PATH = Path(
         "F:/liu-onedrive-nospecial-carac/_Teams/Social touch Kinect MNG/02_data/"
         "semi-controlled/4_analysed/spatial_extract_boundaries/iff_mean/" +
-        ST14_04
+        ST13_03
     )    
     
     
     GESTURE = "all"        # one of: all, stroke, tap, stroke_proximal, stroke_distal
 
     # ----------------------- TUNABLE METHOD PARAMETERS -----------------------
-    GAUSSIAN_SIGMA = 3.0   # smoothing before gradient (pipeline used inflection_sigma)
-    N_ANGLES = 360         # radial rays
+    MIN_OVERLAP_PCT: float = 50.0       # % of gesture touches a vertex must be contacted by
+    INFLECTION_SIGMA = 5.0              # Gaussian smoothing sigma (matches pipeline inflection_sigma)
+    MEDIAN_FILTER_SIZE: int | None = 5  # median filter on grid_z (None = no extra filtering)
+    N_ANGLES = 360                      # radial rays
     SAVGOL_WINDOW = 31     # contour smoothing window (None to disable)
     SIGMA_SWEEP = [2.0, 3.0, 4.0, 5.0, 7.0, 10.0]
     DRAW_FOREARM_3D = False  # Fig 5 (back-projection); set False to skip if slow
@@ -539,9 +552,20 @@ def main() -> None:
     print(f"Loading {NPZ_PATH.name}  (gesture='{GESTURE}')")
     g = load_grid(NPZ_PATH, GESTURE)
     print(f"  session={g['session_id']}  pipeline sigma={g['pipeline_sigma']}  "
-          f"pipeline method={g['pipeline_boundary_method']}")
+          f"pipeline method={g['pipeline_boundary_method']}  "
+          f"pipeline min_overlap_pct={g['pipeline_min_overlap_pct']}")
     print(f"  available gestures: {g['gesture_types']}")
-    grid_u, grid_v, grid_z = g["grid_u"], g["grid_v"], g["grid_z"]
+
+    threshold = compute_threshold_from_ratio(MIN_OVERLAP_PCT, g["n_touches"])
+    slim_heatmap = apply_vertex_threshold(g["heatmap_pre_threshold"], g["unique_count"], threshold)
+    grid_u, grid_v, grid_z = compute_interpolated_grid(
+        g["forearm_uv"], g["forearm_faces"], g["forearm_V"],
+        slim_heatmap, median_filter_size=MEDIAN_FILTER_SIZE,
+    )
+    print(f"  threshold={threshold} ({MIN_OVERLAP_PCT}% of {g['n_touches']} touches)")
+    g["grid_u"] = grid_u
+    g["grid_v"] = grid_v
+    g["grid_z"] = grid_z
 
     # --- Re-run the methods LIVE with the chosen parameters ------------------
     peak_rc = find_peak_location(grid_z)
@@ -549,7 +573,7 @@ def main() -> None:
         raise RuntimeError("grid_z is all-NaN — nothing to analyse.")
     print(f"  peak at (row,col)={peak_rc}, peak value={np.nanmax(grid_z):.3f}")
 
-    smoothed, laplacian = compute_laplacian_arrays(grid_z, GAUSSIAN_SIGMA)
+    smoothed, laplacian = compute_laplacian_arrays(grid_z, INFLECTION_SIGMA)
     grad_mag = compute_gradient_magnitude(smoothed, np.isnan(grid_z))
 
     grad_contour_rc = _extract_ridge_via_radial_profiling(
@@ -559,7 +583,7 @@ def main() -> None:
         grid_u, grid_v, grid_z, smoothed,
         n_angles=N_ANGLES, savgol_window=SAVGOL_WINDOW,
     )
-    infl_boundary = compute_inflection_boundary(grid_u, grid_v, grid_z, GAUSSIAN_SIGMA)
+    infl_boundary = compute_inflection_boundary(grid_u, grid_v, grid_z, INFLECTION_SIGMA)
 
     # Inflection contour in pixel space (from its UV contour) for overlays.
     infl_contour_rc = None
