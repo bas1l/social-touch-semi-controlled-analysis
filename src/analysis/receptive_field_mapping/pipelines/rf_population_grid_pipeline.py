@@ -13,7 +13,7 @@ from analysis.receptive_field_mapping.data.touch_population_data import (
     load_population_rf_data,
 )
 from analysis.pipeline.shared_constants import NEURON_MODES
-from utils.should_process_task import should_process_task
+from _vendor.should_process_task import should_process_task
 
 logger = logging.getLogger(__name__)
 

@@ -20,7 +20,7 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from utils.should_process_task import should_process_task, clean_task_outputs
+from _vendor.should_process_task import should_process_task, clean_task_outputs
 from .pipeline_shared import _TqdmLineWrapper, session_id_from_path
 from .preparation.loader import load_session_csv
 from .preparation.block_id import ensure_block_id_column

@@ -46,7 +46,7 @@ from analysis.receptive_field_mapping.data.touch_population_data import (
 )
 from analysis.pipeline.output_dirs import SPATIAL_SET_CAMERA, SPATIAL_SLIM_UV, TOUCH_COMPUTE_SERIES
 from analysis.pipeline.shared_constants import session_id_from_path
-from utils.should_process_task import should_process_task
+from _vendor.should_process_task import should_process_task
 
 logger = logging.getLogger(__name__)
 

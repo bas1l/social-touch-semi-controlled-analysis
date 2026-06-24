@@ -46,7 +46,7 @@ from analysis.receptive_field_mapping.rendering.rf_stimulus_session_comparison_r
     render_feature_session_comparison,
     render_feature_summary_grid,
 )
-from utils.should_process_task import should_process_task
+from _vendor.should_process_task import should_process_task
 
 logger = logging.getLogger(__name__)
 

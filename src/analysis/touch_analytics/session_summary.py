@@ -5,7 +5,7 @@ import pandas as pd
 from pathlib import Path
 from typing import List
 
-from utils.should_process_task import should_process_task, clean_task_outputs
+from _vendor.should_process_task import should_process_task, clean_task_outputs
 
 _BLOCK_ORDER_RE = re.compile(r'_block-order-(\d+)_')
 

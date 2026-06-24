@@ -28,7 +28,7 @@ from analysis.pipeline.shared_constants import (
     NEURON_MODES,
     single_touch_npz_filename,
 )
-from utils.should_process_task import should_process_task
+from _vendor.should_process_task import should_process_task
 
 logger = logging.getLogger(__name__)
 

@@ -39,7 +39,7 @@ from analysis.receptive_field_mapping.rendering.rf_touch_feature_radar_renderer 
     render_gesture_radar,
 )
 from analysis.touch_analytics.clustering_pipeline import DATA_TYPE_TO_COLUMNS
-from utils.should_process_task import should_process_task
+from _vendor.should_process_task import should_process_task
 
 logger = logging.getLogger(__name__)
 

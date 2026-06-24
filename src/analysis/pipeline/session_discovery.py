@@ -10,7 +10,7 @@ import logging
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-from primary_processing import KinectConfigFileHandler, KinectConfig
+from _vendor.kinect_config import KinectConfigFileHandler, KinectConfig
 
 
 def collect_unique_session_dirs(

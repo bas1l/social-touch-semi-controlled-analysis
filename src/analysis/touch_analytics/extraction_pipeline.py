@@ -22,7 +22,7 @@ from typing import List, Tuple
 import pandas as pd
 from tqdm import tqdm
 
-from utils.should_process_task import should_process_task, clean_task_outputs
+from _vendor.should_process_task import should_process_task, clean_task_outputs
 from .feature_extraction import get_feature_extractor, AGGREGATION_NAMES
 from .pipeline_shared import SHARED_COLUMNS, _TqdmLineWrapper, filter_enabled_profiles, session_id_from_path
 from .preparation.interpolation import interpolate_touch_columns

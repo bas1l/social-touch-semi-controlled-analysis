@@ -11,7 +11,7 @@ import open3d as o3d
 from matplotlib.colors import hsv_to_rgb
 
 from analysis.receptive_field_mapping.config import RFMapResult
-from utils.gui.visualize_point_cloud_comparison import visualize_point_cloud_comparison
+from _vendor.visualize_point_cloud_comparison import visualize_point_cloud_comparison
 
 logger = logging.getLogger(__name__)
 

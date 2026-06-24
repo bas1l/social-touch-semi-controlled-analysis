@@ -16,7 +16,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from analysis.pipeline.output_dirs import STIMULUS_EXTRACT_FEATURES
-from utils import path_tools
+from _vendor import path_tools
 
 TOUCH_KEYS = {"block_order_id", "trial_id", "single_touch_id"}
 SHARED_NON_NUMERIC = {

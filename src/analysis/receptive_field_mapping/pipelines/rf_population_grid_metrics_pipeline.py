@@ -14,7 +14,7 @@ from analysis.receptive_field_mapping.data.rf_extraction_io import (
 )
 from analysis.receptive_field_mapping.metrics.rf_grid_cell_metrics import compute_grid_cell_metrics
 from analysis.pipeline.output_dirs import SPATIAL_SET_CAMERA
-from utils.should_process_task import should_process_task
+from _vendor.should_process_task import should_process_task
 
 logger = logging.getLogger(__name__)
 

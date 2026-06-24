@@ -12,10 +12,10 @@ from prefect import flow
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-from utils import path_tools
-from utils import DagConfigHandler, PipelineMonitor, TaskExecutor
-from utils.pipeline.session_config_resolver import resolve_session_configs
-from primary_processing import KinectConfigFileHandler, KinectConfig
+from _vendor import path_tools
+from _vendor import DagConfigHandler, PipelineMonitor, TaskExecutor
+from _vendor.session_config_resolver import resolve_session_configs
+from _vendor.kinect_config import KinectConfigFileHandler, KinectConfig
 
 from analysis.touch_analytics import generate_ap_efficacy_matrix, generate_session_summary
 from analysis.touch_analytics.preparation_pipeline import run_preparation
@@ -296,7 +296,7 @@ def spatial_precompute_slim_uv_flow(
     )
     from analysis.receptive_field_mapping.data.rf_data_loader import resolve_forearm_ply
     from analysis.touch_analytics.pipeline_shared import session_id_from_path
-    from utils.should_process_task import should_process_task
+    from _vendor.should_process_task import should_process_task
 
     print(f"[SLIM UV] Precomputing SLIM UV maps for {len(input_items)} item(s)...")
     if not input_items:

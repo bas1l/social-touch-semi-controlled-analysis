@@ -39,7 +39,7 @@ from analysis.touch_analytics.pipeline_shared import (
     filter_enabled_profiles,
     session_id_from_path,
 )
-from utils.should_process_task import should_process_task
+from _vendor.should_process_task import should_process_task
 
 logger = logging.getLogger(__name__)
 

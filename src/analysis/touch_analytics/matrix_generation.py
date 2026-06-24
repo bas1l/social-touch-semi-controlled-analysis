@@ -8,7 +8,7 @@ from typing import List, Dict, Optional
 # Import local modules
 from .touch_config import DISCRETIZATION_CONFIG, get_discretization_config, KINEMATIC_SIGNALS
 from .reporting import VisualReportingStrategy
-from utils.should_process_task import should_process_task, clean_task_outputs
+from _vendor.should_process_task import should_process_task, clean_task_outputs
 
 def generate_touch_summary_matrix(
     input_files: List[Path], 

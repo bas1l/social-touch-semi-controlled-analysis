@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 
 from analysis.pipeline.output_dirs import CROSS_EXTRACT_GRID_METRICS
-from utils.should_process_task import should_process_task
+from _vendor.should_process_task import should_process_task
 
 matplotlib.use('Agg')
 

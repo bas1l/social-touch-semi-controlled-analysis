@@ -11,8 +11,8 @@ from prefect import flow
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-from utils import path_tools, DagConfigHandler, PipelineMonitor
-from utils.pipeline.session_config_resolver import resolve_session_configs
+from _vendor import path_tools, DagConfigHandler, PipelineMonitor
+from _vendor.session_config_resolver import resolve_session_configs
 from analysis.receptive_field_mapping import (
     precompute_explorer_caches,
     launch_feature_space_explorer,

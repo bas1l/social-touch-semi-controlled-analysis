@@ -19,7 +19,7 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-from utils import DagConfigHandler, PipelineMonitor, TaskExecutor
+from _vendor import DagConfigHandler, PipelineMonitor, TaskExecutor
 
 
 def run_pipeline_stages(

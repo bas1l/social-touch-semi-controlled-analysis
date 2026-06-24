@@ -8,7 +8,7 @@ from .preparation.gesture_type import classify_gesture_type
 from .representation.series_level.kinematics import compute_velocity, compute_acceleration
 
 # Architectural Import
-from utils.should_process_task import should_process_task, clean_task_outputs
+from _vendor.should_process_task import should_process_task, clean_task_outputs
 from analysis.pipeline.shared_constants import NERVE_SPIKE_COL
 
 def generate_unified_summary(

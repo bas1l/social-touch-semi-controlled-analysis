@@ -28,7 +28,7 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from utils.should_process_task import should_process_task, clean_task_outputs
+from _vendor.should_process_task import should_process_task, clean_task_outputs
 from .clustering import get_clusterer
 from .clustering.base import ClusteringContext
 from .clustering.feature_space_renderer import render_gmm_feature_space
