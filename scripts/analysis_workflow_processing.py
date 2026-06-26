@@ -459,6 +459,8 @@ def spatial_extract_boundaries_flow(
     contour_color: str = "red",
     circular_crop_margin: float = 0.0,
     boundary_method: str = "gradient",
+    radial_gauss_sigma: float = 8.0,
+    radial_hess_sigma: float = 5.0,
 ) -> None:
     """Render per-session 2D population RF heatmap PNGs projected via SLIM UV.
 
@@ -489,6 +491,8 @@ def spatial_extract_boundaries_flow(
             contour_color=contour_color,
             circular_crop_margin=circular_crop_margin,
             boundary_method=boundary_method,
+            radial_gauss_sigma=radial_gauss_sigma,
+            radial_hess_sigma=radial_hess_sigma,
         )
 
 
@@ -1657,6 +1661,8 @@ def _build_pipeline_stages(dag_handler: DagConfigHandler, items_to_process) -> l
                     else {}
                 ),
                 "boundary_method": dag_handler.get_task_options("spatial_extract_boundaries").get("boundary_method", "gradient"),
+                "radial_gauss_sigma": float(dag_handler.get_task_options("spatial_extract_boundaries").get("radial_gauss_sigma", 8.0)),
+                "radial_hess_sigma": float(dag_handler.get_task_options("spatial_extract_boundaries").get("radial_hess_sigma", 5.0)),
             },
         },
         {

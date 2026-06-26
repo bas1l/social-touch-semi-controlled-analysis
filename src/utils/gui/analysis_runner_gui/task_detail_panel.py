@@ -26,6 +26,7 @@ from PyQt5.QtWidgets import (
 
 from ruamel.yaml.comments import CommentedSeq
 
+from utils.gui.analysis_runner_gui.collapsible_section import CollapsibleSection
 from utils.gui.analysis_runner_gui.cluster_group_dialog import ClusterGroupDialog, ClusterGroupReadOnlyDialog
 from utils.gui.analysis_runner_gui.feature_combination_dialog import FeatureCombinationDialog
 from utils.gui.analysis_runner_gui.grid_group_dialog import GridGroupDialog, GridGroupReadOnlyDialog
@@ -128,12 +129,59 @@ _OPTION_ENUMS: dict[str, list[tuple[str, object]]] = {
     "boundary_method": [
         ("Gradient (default)", "gradient"),
         ("Inflection", "inflection"),
+        ("Radial foot (snapped)", "radial"),
     ],
 }
 
 _OPTION_VISIBILITY: dict[str, dict[str, set]] = {
-    "boundary_method": {"inflection_sigma": {"inflection"}},
+    "boundary_method": {
+        "inflection_sigma": {"inflection"},
+        "radial_gauss_sigma": {"radial"},
+        "radial_hess_sigma": {"radial"},
+    },
     "neuron_mode":     {"iff_metric": {"iff"}},
+}
+
+# Ordered catalogue of option groups (render order + display label).
+_OPTION_GROUPS: list[tuple[str, str]] = [
+    ("neuron", "Neuron firing"),
+    ("method", "Processing & parameters"),
+    ("visual", "Visualization"),
+]
+
+# Which group each option key belongs to. One group per key.
+_OPTION_GROUP_OF: dict[str, str] = {
+    # neuron firing
+    "neuron_mode": "neuron",
+    "iff_metric": "neuron",
+    "response_metric": "neuron",
+    # preprocessing & methods
+    "min_overlap_pct": "method",
+    "median_filter_size": "method",
+    "inflection_sigma": "method",
+    "boundary_method": "method",
+    "radial_gauss_sigma": "method",
+    "radial_hess_sigma": "method",
+    "projection_method": "method",
+    # visualization
+    "heatmap_space": "visual",
+    "cmap": "visual",
+    "flip_u": "visual",
+    "contour_color": "visual",
+    "circular_crop_margin": "visual",
+    "show_interactive": "visual",
+}
+
+# Tasks that opt in to grouped rendering. Every non-force_processing option of a
+# task listed here MUST be classified in _OPTION_GROUP_OF (enforced at render).
+_GROUPED_TASKS: set[str] = {
+    "spatial_map_single_touch",
+    "spatial_map_baseline",
+    "spatial_extract_boundaries",
+    "spatial_compare_boundaries",
+    "spatial_compare_proximal_distal",
+    "spatial_compare_tap_stroke",
+    "spatial_extract_rf_profiles",
 }
 
 
@@ -336,32 +384,19 @@ class TaskDetailPanel(QWidget):
             self._layout.insertWidget(0, lbl)
             return
 
-        for i, (key, val) in enumerate(options.items()):
-            if key in _OPTION_ENUMS:
-                widget = self._make_enum_section(key, val)
-            elif key == "camera_angle_mode" and isinstance(val, dict) and "auto" in val:
-                widget = self._make_camera_angle_mode_section(key, val)
-            elif key == "cluster_groups" and isinstance(val, (list, CommentedSeq)):
-                widget = self._make_downstream_cluster_groups_section(key, val)
-            elif key in _CHECKLIST_UNIVERSES and isinstance(val, (list, CommentedSeq)):
-                widget = self._make_checklist_section(key, val)
-            elif key == "cluster_groups" and _is_cluster_groups_dict(val):
-                widget = self._make_cluster_groups_section(key, val)
-            elif _is_radar_groups_dict(key, val):
-                widget = self._make_radar_groups_section(key, val)
-            elif _is_grid_groups_dict(val):
-                widget = self._make_grid_groups_section(key, val)
-            elif _is_profile_dict(val):
-                widget = self._make_profile_section(key, val)
-            elif _is_feature_combinations_dict(val):
-                widget = self._make_combination_section(key, val)
-            elif _is_feature_dict(val):
-                cols = 1 if len(val) <= 6 else 3
-                widget = self._make_feature_section(key, val, cols=cols)
-            else:
-                widget = self._make_scalar_section(key, val)
+        # Build a section widget per option, recording it in self._sections so
+        # conditional-visibility toggling can find it regardless of nesting.
+        sections: list[tuple[str, QWidget]] = []
+        for key, val in options.items():
+            widget = self._build_option_section(key, val)
             self._sections[key] = widget
-            self._layout.insertWidget(i, widget)
+            sections.append((key, widget))
+
+        if task_name in _GROUPED_TASKS:
+            self._insert_grouped(task_name, options, sections)
+        else:
+            for i, (_key, widget) in enumerate(sections):
+                self._layout.insertWidget(i, widget)
 
         for controller, dependents in _OPTION_VISIBILITY.items():
             if controller not in options:
@@ -370,6 +405,62 @@ class TaskDetailPanel(QWidget):
             for dep_key, visible_when in dependents.items():
                 if dep_key in self._sections:
                     self._sections[dep_key].setVisible(current_val in visible_when)
+
+    def _build_option_section(self, key: str, val: Any) -> QWidget:
+        """Dispatch *key*/*val* to the matching per-option section builder."""
+        if key in _OPTION_ENUMS:
+            return self._make_enum_section(key, val)
+        if key == "camera_angle_mode" and isinstance(val, dict) and "auto" in val:
+            return self._make_camera_angle_mode_section(key, val)
+        if key == "cluster_groups" and isinstance(val, (list, CommentedSeq)):
+            return self._make_downstream_cluster_groups_section(key, val)
+        if key in _CHECKLIST_UNIVERSES and isinstance(val, (list, CommentedSeq)):
+            return self._make_checklist_section(key, val)
+        if key == "cluster_groups" and _is_cluster_groups_dict(val):
+            return self._make_cluster_groups_section(key, val)
+        if _is_radar_groups_dict(key, val):
+            return self._make_radar_groups_section(key, val)
+        if _is_grid_groups_dict(val):
+            return self._make_grid_groups_section(key, val)
+        if _is_profile_dict(val):
+            return self._make_profile_section(key, val)
+        if _is_feature_combinations_dict(val):
+            return self._make_combination_section(key, val)
+        if _is_feature_dict(val):
+            cols = 1 if len(val) <= 6 else 3
+            return self._make_feature_section(key, val, cols=cols)
+        return self._make_scalar_section(key, val)
+
+    def _insert_grouped(
+        self,
+        task_name: str,
+        options: dict[str, Any],
+        sections: list[tuple[str, QWidget]],
+    ) -> None:
+        """Insert *sections* into collapsible group containers by option group.
+
+        Every option must be classified in :data:`_OPTION_GROUP_OF`; an
+        unclassified option raises (fail-fast). Groups are rendered in
+        :data:`_OPTION_GROUPS` order; empty groups are omitted; option order
+        within a group follows YAML order.
+        """
+        for key in options:
+            if key not in _OPTION_GROUP_OF:
+                raise ValueError(
+                    f"Task '{task_name}' option '{key}' has no group in _OPTION_GROUP_OF"
+                )
+
+        widget_of = dict(sections)
+        insert_at = 0
+        for group_key, group_label in _OPTION_GROUPS:
+            members = [k for k in options if _OPTION_GROUP_OF[k] == group_key]
+            if not members:
+                continue
+            container = CollapsibleSection(group_label, expanded=True)
+            for key in members:
+                container.add_widget(widget_of[key])
+            self._layout.insertWidget(insert_at, container)
+            insert_at += 1
 
     # ------------------------------------------------------------------
     # Section builders

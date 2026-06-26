@@ -182,9 +182,9 @@ tasks:
   # Output: 4_analysed/population_response_fields/<session_id>/
   spatial_extract_boundaries:
     category: spatial_sensitivity
-    enabled: false
+    enabled: true
     options:
-      force_processing: true
+      force_processing: false
       neuron_mode: iff
       iff_metric: both
       min_overlap_pct: 0
@@ -195,7 +195,10 @@ tasks:
       flip_u: true
       contour_color: red
       circular_crop_margin: 0.0
+      # one of: gradient | inflection | radial
       boundary_method: gradient
+      radial_gauss_sigma: 8.0
+      radial_hess_sigma: 5.0
     depends_on: [spatial_map_single_touch, spatial_precompute_slim_uv]
 
   # Aggregate inflection boundary metrics across sessions and render comparison visuals.
@@ -204,7 +207,7 @@ tasks:
   # session-x-gesture heatmap PNGs under 4_analysed/session_rf_boundary_comparison/
   spatial_compare_boundaries:
     category: spatial_sensitivity
-    enabled: true
+    enabled: false
     options:
       force_processing: true
       iff_metric: both
@@ -221,7 +224,7 @@ tasks:
   # and centroid shift decomposition figures. Output: 4_analysed/spatial_compare_proximal_distal/
   spatial_compare_proximal_distal:
     category: spatial_sensitivity
-    enabled: true
+    enabled: false
     options:
       force_processing: true
       iff_metric: both
@@ -238,7 +241,7 @@ tasks:
   # and shift decomposition figures. Output: 4_analysed/spatial_compare_tap_stroke/
   spatial_compare_tap_stroke:
     category: spatial_sensitivity
-    enabled: true
+    enabled: false
     options:
       force_processing: true
       iff_metric: both
@@ -254,7 +257,7 @@ tasks:
   # Output: 4_analysed/spatial_extract_rf_profiles/iff_<iff_metric>/<session_id>/
   spatial_extract_rf_profiles:
     category: spatial_sensitivity
-    enabled: true
+    enabled: false
     options:
       force_processing: false
       iff_metric: both
