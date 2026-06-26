@@ -25,6 +25,7 @@ from analysis.pipeline.shared_constants import GESTURE_TYPES, IFF_METRICS, singl
 from analysis.receptive_field_mapping.data.rf_population_heatmap import (
     apply_vertex_threshold,
     build_gesture_touch_indices,
+    clean_heatmap_islands,
     compute_rf_heatmap,
     compute_threshold_from_ratio,
     compute_unique_touch_count,
@@ -38,6 +39,10 @@ from analysis.receptive_field_mapping.metrics.rf_gradient_boundary import (
     compute_gradient_magnitude,
     compute_gradient_ridge,
     gradient_boundary_to_dict,
+)
+from analysis.receptive_field_mapping.metrics.rf_radial_foot_boundary import (
+    compute_radial_foot_boundary,
+    radial_foot_boundary_to_dict,
 )
 from analysis.receptive_field_mapping.metrics.rf_pca_alignment import (
     apply_uv_alignment,
@@ -81,6 +86,7 @@ class _SessionCompositeData:
     gesture_boundaries: dict = field(default_factory=dict)
     gesture_inflection_boundaries: dict = field(default_factory=dict)
     gesture_gradient_boundaries: dict = field(default_factory=dict)
+    gesture_radial_boundaries: dict = field(default_factory=dict)
     per_gesture_grids: dict = field(default_factory=dict)
     vertex_data_npz: Path | None = None
     alignment_center: np.ndarray = field(default_factory=lambda: np.zeros(2))
@@ -105,6 +111,9 @@ def run_population_response_field_extraction(
     contour_color: str = "red",
     circular_crop_margin: float = 0.0,
     boundary_method: str = "gradient",
+    radial_gauss_sigma: float = 8.0,
+    radial_hess_sigma: float = 5.0,
+    radial_envelope_smooth_sigma: float = 1.5,
 ) -> None:
     """Render per-session 2D population RF heatmap PNGs projected via SLIM UV.
 
@@ -147,10 +156,10 @@ def run_population_response_field_extraction(
             f"run_population_response_field_extraction: invalid iff_metric "
             f"{iff_metric!r}. Expected one of {IFF_METRICS}."
         )
-    if boundary_method not in ("gradient", "inflection"):
+    if boundary_method not in ("gradient", "inflection", "radial"):
         raise ValueError(
             f"run_population_response_field_extraction: invalid boundary_method "
-            f"{boundary_method!r}. Expected 'gradient' or 'inflection'."
+            f"{boundary_method!r}. Expected 'gradient', 'inflection', or 'radial'."
         )
     npz_filename = single_touch_npz_filename(iff_metric)
     # ---- Pass 1: compute heatmaps + render per-gesture PNGs ----
@@ -399,6 +408,7 @@ def run_population_response_field_extraction(
         gesture_boundaries: dict = {}
         gesture_inflection_boundaries: dict = {}
         gesture_gradient_boundaries: dict = {}
+        gesture_radial_boundaries: dict = {}
         per_gesture_grids: dict = {}
 
         for gtype, (slim_heatmap, n_touches, threshold) in results.items():
@@ -413,6 +423,7 @@ def run_population_response_field_extraction(
                 forearm_uv, slim_faces, slim_V, slim_heatmap,
                 median_filter_size=median_filter_size,
             )
+            grid_z = clean_heatmap_islands(grid_z)
             per_gesture_grids[gtype] = (grid_u, grid_v, grid_z)
             boundary = (
                 compute_inflection_boundary(
@@ -433,8 +444,21 @@ def run_population_response_field_extraction(
             else:
                 grad_boundary = None
             gesture_gradient_boundaries[gtype] = grad_boundary
+            if boundary_method == "radial":
+                radial_boundary = compute_radial_foot_boundary(
+                    grid_u, grid_v, grid_z,
+                    gauss_sigma=radial_gauss_sigma, hess_sigma=radial_hess_sigma,
+                    envelope_smooth_sigma=radial_envelope_smooth_sigma,
+                    snapshot_dir=inspection_dir, snapshot_label=gtype,
+                    contour_color=contour_color,
+                )
+            else:
+                radial_boundary = None
+            gesture_radial_boundaries[gtype] = radial_boundary
             if boundary_method == "gradient":
                 gesture_boundaries[gtype] = grad_boundary
+            elif boundary_method == "radial":
+                gesture_boundaries[gtype] = radial_boundary
             else:
                 gesture_boundaries[gtype] = boundary
             render_population_rf_map(
@@ -472,6 +496,7 @@ def run_population_response_field_extraction(
             gesture_boundaries=gesture_boundaries,
             gesture_gradient_boundaries=gesture_gradient_boundaries,
             gesture_inflection_boundaries=gesture_inflection_boundaries,
+            gesture_radial_boundaries=gesture_radial_boundaries,
             boundary_method=boundary_method,
             inflection_sigma=inflection_sigma,
             alignment_center=alignment_center,
@@ -504,6 +529,7 @@ def run_population_response_field_extraction(
             gesture_boundaries=gesture_boundaries,
             gesture_inflection_boundaries=gesture_inflection_boundaries,
             gesture_gradient_boundaries=gesture_gradient_boundaries,
+            gesture_radial_boundaries=gesture_radial_boundaries,
             per_gesture_grids=per_gesture_grids,
             vertex_data_npz=vertex_data_npz,
             alignment_center=alignment_center,
@@ -576,8 +602,18 @@ def run_population_response_field_extraction(
                         sd.forearm_uv, sd.forearm_faces, sd.forearm_V, slim_heatmap_g,
                         median_filter_size=median_filter_size,
                     )
+                    grid_z_g = clean_heatmap_islands(grid_z_g)
                     precomputed_grids[gtype] = (grid_u_g, grid_v_g, grid_z_g)
-                    if inflection_sigma is not None:
+                    if boundary_method == "radial":
+                        inflection_boundaries[gtype] = compute_radial_foot_boundary(
+                            grid_u_g, grid_v_g, grid_z_g,
+                            gauss_sigma=radial_gauss_sigma, hess_sigma=radial_hess_sigma,
+                            envelope_smooth_sigma=radial_envelope_smooth_sigma,
+                            snapshot_dir=inspection_dir,
+                            snapshot_label=f"{sd.session_id}_{gtype}_composite",
+                            contour_color=contour_color,
+                        )
+                    elif inflection_sigma is not None:
                         if boundary_method == "gradient":
                             smoothed_comp, _ = compute_laplacian_arrays(grid_z_g, inflection_sigma)
                             inflection_boundaries[gtype] = compute_gradient_ridge(
@@ -668,7 +704,7 @@ def run_population_response_field_extraction(
         all_boundary = sd.gesture_boundaries.get('all')
         if all_boundary is None:
             raise ValueError(
-                "render_population_rf_circular_crop requires an inflection boundary for gesture 'all' "
+                "render_population_rf_circular_crop requires a boundary for gesture 'all' "
                 "but none is available — ensure inflection_sigma is configured"
             )
         all_grid_u, all_grid_v, all_grid_z = sd.per_gesture_grids['all']
@@ -825,6 +861,7 @@ def _save_response_fields_npz(
     gesture_boundaries: dict,
     gesture_gradient_boundaries: dict | None = None,
     gesture_inflection_boundaries: dict | None = None,
+    gesture_radial_boundaries: dict | None = None,
     boundary_method: str = "gradient",
     inflection_sigma: float | None = None,
     alignment_center: np.ndarray = None,
@@ -888,6 +925,15 @@ def _save_response_fields_npz(
                 data_dict[f'gradient_mag_{gtype}'] = grad_mag.astype(np.float64)
             if grad_boundary is not None:
                 _save_boundary_fields(data_dict, 'gradient', gtype, grad_boundary,
+                                      forearm_uv, forearm_faces, forearm_V)
+
+    # ---- Radial foot (snapped) boundary ----
+    if gesture_radial_boundaries:
+        for gtype in results.keys():
+            rb = gesture_radial_boundaries.get(gtype)
+            if rb is not None:
+                data_dict[f'radial_lmax_{gtype}'] = rb.lmax.astype(np.float64)
+                _save_boundary_fields(data_dict, 'radial', gtype, rb,
                                       forearm_uv, forearm_faces, forearm_V)
 
     data_dict['alignment_center_uv'] = alignment_center.astype(np.float64)

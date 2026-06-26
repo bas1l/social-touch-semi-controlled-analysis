@@ -21,3 +21,7 @@ Thumbs.db
 # Environments
 .env
 .venv/
+/scripts/_sandbox_gradient_ridge_out
+
+# Shared docs (not for version control)
+/docs/github-organisation-setup.md

@@ -76,9 +76,12 @@ import matplotlib.pyplot as plt
 # time, so the interactive backend cannot be selected here — it is re-asserted at
 # runtime in main() via _ensure_interactive_backend(), which must run AFTER them.
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection  # noqa: F401  (registers 3d)
-from scipy.ndimage import map_coordinates
+from scipy.ndimage import gaussian_laplace, label as ndi_label, map_coordinates
+from scipy.optimize import curve_fit
 from scipy.signal import savgol_filter
 from skimage.measure import find_contours
+from skimage.segmentation import watershed
+from skimage.feature import peak_local_max
 
 from analysis.receptive_field_mapping.metrics.rf_inflection_boundary import (
     compute_inflection_boundary,
@@ -547,6 +550,1040 @@ def extract_foot_threshold(
     return enclosing[-1][1]
 
 
+def extract_foot_watershed(
+    grid_z: np.ndarray,
+    smoothed: np.ndarray,
+    peak_rc,
+    min_peak_distance: int = 15,
+    peak_threshold_rel: float = 0.1,
+) -> np.ndarray:
+    """Foot via the watershed catchment of the target peak, cut at saddles.
+
+    Non-radial.  Treats the smoothed response surface as a topography and floods
+    its *inverted* form (``-smoothed``) from a set of markers, one per maximum.
+    The basin growing from the target peak's marker stops along the watershed
+    lines (valleys/saddles) where it meets a neighbour peak's basin — that
+    catchment line is the "foot of the mountain" against competing peaks, and the
+    NaN/low-response region elsewhere.  Unlike the radial foot extractors this
+    needs no per-ray casting, so it represents irregular, multi-lobed extents
+    faithfully.
+
+    Algorithm
+    ---------
+    1. Find competing maxima with ``skimage.feature.peak_local_max`` on
+       ``smoothed`` (``min_distance=min_peak_distance``, ``threshold_rel=
+       peak_threshold_rel``), restricted to the valid (non-NaN ``grid_z``) region.
+    2. Build an integer ``markers`` array: the target peak (the
+       ``peak_local_max`` detection nearest ``peak_rc``, snapped to it if absent)
+       is label ``1``; every other detected maximum gets its own distinct label
+       (``2, 3, ...``); the low/background region (valid pixels below
+       ``peak_threshold_rel`` of the peak) seeds a single background label so the
+       target basin is also bounded on its open (non-neighbour) flanks.
+    3. Run ``watershed(-smoothed, markers, mask=~np.isnan(grid_z))`` and take the
+       region ``labels == 1``.
+    4. ``find_contours((labels == 1).astype(float), 0.5)`` and select the contour
+       whose polygon encloses ``peak_rc`` (largest, if several qualify) — the
+       same point-in-polygon rule used by ``extract_foot_threshold``.
+
+    Fail-fast contract
+    ------------------
+    Raises ``ValueError`` if the field is all-NaN/degenerate, if no local maximum
+    is detected, if the target catchment is empty, if ``find_contours`` returns
+    nothing, or if no contour encloses the peak.  Never returns a default ring or
+    sentinel.
+
+    Returns (N, 2) (row, col) contour points.
+    """
+    if not (0 < min_peak_distance):
+        raise ValueError(
+            f"min_peak_distance must be positive, got {min_peak_distance}"
+        )
+    if not (0.0 <= peak_threshold_rel < 1.0):
+        raise ValueError(
+            f"peak_threshold_rel must be in [0, 1), got {peak_threshold_rel}"
+        )
+
+    peak_r, peak_c = int(round(peak_rc[0])), int(round(peak_rc[1]))
+    valid = ~np.isnan(grid_z)
+    if not np.any(valid):
+        raise ValueError(
+            "extract_foot_watershed: grid_z is all-NaN — no surface to flood"
+        )
+
+    peak_val = float(np.nanmax(smoothed))
+    if not np.isfinite(peak_val) or peak_val <= 0.0:
+        raise ValueError(
+            f"extract_foot_watershed: smoothed peak value non-positive/non-finite "
+            f"({peak_val}) — field too flat/degenerate to flood"
+        )
+
+    # NaNs cannot drive peak detection or flooding; replace with the field
+    # minimum so they read as the lowest topography (deepest "sea").
+    fill_low = float(np.nanmin(smoothed))
+    surface = np.where(np.isnan(smoothed), fill_low, smoothed)
+
+    # --- 1. Competing maxima (and the target) via peak_local_max -------------
+    coords = peak_local_max(
+        surface,
+        min_distance=min_peak_distance,
+        threshold_rel=peak_threshold_rel,
+        labels=valid.astype(int),
+        exclude_border=False,
+    )
+    if coords.shape[0] == 0:
+        raise ValueError(
+            "extract_foot_watershed: peak_local_max found no maxima — field too "
+            "flat/degenerate to define a watershed catchment"
+        )
+
+    # --- 2. Markers: target peak = 1, other maxima = 2.., background = last ---
+    markers = np.zeros(surface.shape, dtype=np.int32)
+
+    # Identify which detected maximum is the target (nearest to peak_rc).
+    dists = np.hypot(coords[:, 0] - peak_r, coords[:, 1] - peak_c)
+    target_idx = int(np.argmin(dists))
+    target_coord = coords[target_idx]
+
+    markers[int(target_coord[0]), int(target_coord[1])] = 1
+    next_label = 2
+    for i, (r, c) in enumerate(coords):
+        if i == target_idx:
+            continue
+        markers[int(r), int(c)] = next_label
+        next_label += 1
+
+    # Background marker: valid, low-response pixels (below the peak fraction).
+    # This bounds the target basin on flanks that face no neighbour peak.
+    background = valid & (surface <= peak_threshold_rel * peak_val)
+    # Do not overwrite any maximum marker already placed.
+    background &= markers == 0
+    if np.any(background):
+        markers[background] = next_label
+        next_label += 1
+
+    # --- 3. Flood the inverted surface within the valid region ---------------
+    labels = watershed(-surface, markers, mask=valid)
+
+    target_region = labels == 1
+    if not np.any(target_region):
+        raise ValueError(
+            "extract_foot_watershed: the target peak's catchment is empty after "
+            "watershed — marker placement or mask is degenerate"
+        )
+
+    # --- 4. Contour of the target catchment, enclosing the peak --------------
+    contours = find_contours(target_region.astype(float), level=0.5)
+    if not contours:
+        raise ValueError(
+            "extract_foot_watershed: find_contours found no boundary for the "
+            "target catchment region"
+        )
+
+    from matplotlib.path import Path as MplPath
+
+    enclosing = []
+    for c in contours:
+        if len(c) < 3:
+            continue
+        poly = MplPath(np.column_stack([c[:, 0], c[:, 1]]))
+        if poly.contains_point((peak_r, peak_c)):
+            area = 0.5 * abs(
+                np.dot(c[:, 0], np.roll(c[:, 1], 1))
+                - np.dot(c[:, 1], np.roll(c[:, 0], 1))
+            )
+            enclosing.append((area, c))
+
+    if not enclosing:
+        raise ValueError(
+            f"extract_foot_watershed: no watershed-catchment contour encloses the "
+            f"peak at (row,col)={peak_rc}"
+        )
+
+    enclosing.sort(key=lambda t: t[0])
+    return enclosing[-1][1]
+
+
+def extract_foot_prominence(
+    grid_z: np.ndarray,
+    smoothed: np.ndarray,
+    peak_rc,
+    min_prominence_frac: float = 0.1,
+) -> np.ndarray:
+    """Foot via topological prominence: the saddle/col where the peak merges.
+
+    Non-radial.  Treats the smoothed response surface as a topography and runs
+    an inline 0-D persistent-homology flood (union-find).  Pixels are added one
+    at a time from highest to lowest value; each new pixel joins the connected
+    components of its already-added 8-neighbours.  When two components touch, the
+    *elder rule* keeps the older (taller-seeded) component alive and "kills" the
+    younger one — the value at which the younger dies is the **saddle level**
+    (the col).  The target peak's prominence is ``peak_value - saddle_level``.
+    The iso-contour of ``smoothed`` at that saddle level is the parameter-light,
+    non-radial extent of the one mountain whose summit is the target peak — it is
+    exactly the highest closed contour that still encircles the target peak alone
+    before it spills over the col into a taller neighbour.
+
+    Algorithm
+    ---------
+    1. Restrict to valid pixels (``~np.isnan(grid_z)``); sort them descending by
+       ``smoothed`` value.
+    2. Union-find over valid pixels.  Add pixels one at a time in that order.
+       Each component remembers its *seed* (the highest pixel that started it).
+       For every already-added 8-neighbour, union: the component with the higher
+       seed value (the elder) absorbs the other.  At a merge of two *distinct*
+       live components, the younger (lower-seed) component dies at the current
+       pixel's value — that is a saddle level for the younger summit.
+    3. The target peak is the valid maximum nearest ``peak_rc``.  Record the
+       saddle level at which the target peak's component is first absorbed into an
+       elder (taller) component — but only accept that merge if its prominence
+       (``peak_value - saddle_level``) exceeds ``min_prominence_frac * peak_value``;
+       otherwise it is a shallow noise merge and flooding continues, so the
+       saddle is taken at the first *significant* merge.
+    4. Boundary = ``find_contours(smoothed, saddle_level)`` selecting the contour
+       whose polygon encloses the peak (largest, if several qualify) — the same
+       point-in-polygon rule used by ``extract_foot_threshold``.
+
+    The ``min_prominence_frac`` knob guards against shallow noise merges: a peak
+    that merges into a neighbour over a negligible col (prominence below the
+    floor) is treated as the same mountain and flooding continues to the next,
+    deeper col.
+
+    Fail-fast contract
+    ------------------
+    Raises ``ValueError`` if ``grid_z`` is all-NaN, if the smoothed peak value is
+    non-positive/non-finite, if the target peak never merges into a taller
+    component at any level whose prominence clears the floor (e.g. it is the
+    global summit and no significant col exists), if ``find_contours`` returns
+    nothing at the saddle level, or if no contour encloses the peak.  Never
+    returns a default ring or sentinel.
+
+    Returns (N, 2) (row, col) contour points.
+    """
+    if not (0.0 <= min_prominence_frac < 1.0):
+        raise ValueError(
+            f"min_prominence_frac must be in [0, 1), got {min_prominence_frac}"
+        )
+
+    valid = ~np.isnan(grid_z)
+    if not np.any(valid):
+        raise ValueError(
+            "extract_foot_prominence: grid_z is all-NaN — no surface to flood"
+        )
+
+    peak_val = float(np.nanmax(smoothed))
+    if not np.isfinite(peak_val) or peak_val <= 0.0:
+        raise ValueError(
+            f"extract_foot_prominence: smoothed peak value non-positive/non-finite "
+            f"({peak_val}) — field too flat/degenerate to flood"
+        )
+
+    n_rows, n_cols = smoothed.shape
+    peak_r, peak_c = int(round(peak_rc[0])), int(round(peak_rc[1]))
+
+    # --- Identify the target pixel: the valid maximum nearest peak_rc ---------
+    # Use the exact (snapped) peak pixel if it is valid; otherwise fall back to
+    # the nearest valid pixel by Euclidean distance, weighted toward high values.
+    if valid[peak_r, peak_c]:
+        target_flat = peak_r * n_cols + peak_c
+    else:
+        vr, vc = np.nonzero(valid)
+        d = (vr - peak_r) ** 2 + (vc - peak_c) ** 2
+        nearest = int(np.argmin(d))
+        target_flat = int(vr[nearest]) * n_cols + int(vc[nearest])
+
+    # --- Sort valid pixels descending by smoothed value -----------------------
+    flat_valid = np.flatnonzero(valid)
+    order = flat_valid[np.argsort(-smoothed.ravel()[flat_valid], kind="stable")]
+
+    # --- Inline union-find over the pixel grid --------------------------------
+    NONE = -1
+    parent = np.full(smoothed.size, NONE, dtype=np.int64)   # NONE = not yet added
+    seed = np.full(smoothed.size, NONE, dtype=np.int64)     # representative -> seed pixel
+
+    def _find(x: int) -> int:
+        root = x
+        while parent[root] != root:
+            root = parent[root]
+        # Path compression.
+        while parent[x] != root:
+            parent[x], x = root, parent[x]
+        return root
+
+    # 8-connectivity neighbour offsets.
+    neigh = (
+        (-1, -1), (-1, 0), (-1, 1),
+        (0, -1), (0, 1),
+        (1, -1), (1, 0), (1, 1),
+    )
+
+    saddle_level = None  # set when the target's component dies into a taller one
+
+    for flat in order:
+        r = flat // n_cols
+        c = flat % n_cols
+        # Birth: the pixel starts its own component, seeded by itself.
+        parent[flat] = flat
+        seed[flat] = flat
+
+        for dr, dc in neigh:
+            nr, nc = r + dr, c + dc
+            if nr < 0 or nr >= n_rows or nc < 0 or nc >= n_cols:
+                continue
+            nflat = nr * n_cols + nc
+            if parent[nflat] == NONE:
+                continue  # neighbour not added yet (lower value, or invalid)
+
+            root_a = _find(flat)
+            root_b = _find(nflat)
+            if root_a == root_b:
+                continue  # already the same component
+
+            # Elder rule: higher-seed component (taller summit) is the elder and
+            # survives; the younger dies at this pixel's value (the saddle level).
+            val_a = float(smoothed.ravel()[seed[root_a]])
+            val_b = float(smoothed.ravel()[seed[root_b]])
+            if val_a >= val_b:
+                elder, younger = root_a, root_b
+            else:
+                elder, younger = root_b, root_a
+
+            target_root = _find(target_flat) if parent[target_flat] != NONE else NONE
+
+            if younger == target_root:
+                # The target peak's component is being absorbed into a taller one.
+                level = float(smoothed.ravel()[flat])
+                prominence = peak_val - level
+                if prominence > min_prominence_frac * peak_val:
+                    saddle_level = level
+                    break
+
+            # Merge younger into elder; the elder keeps its (taller) seed.
+            elder_seed = seed[elder]
+            parent[younger] = elder
+            seed[elder] = elder_seed
+
+        if saddle_level is not None:
+            break
+
+    if saddle_level is None:
+        raise ValueError(
+            "extract_foot_prominence: the target peak never merged into a taller "
+            f"component above the prominence floor (min_prominence_frac="
+            f"{min_prominence_frac}) — it is the global summit or no significant "
+            "col exists; cannot define a foot of the mountain"
+        )
+
+    # --- Iso-contour at the saddle level, enclosing the peak ------------------
+    filled = np.where(np.isnan(smoothed), float(np.nanmin(smoothed)), smoothed)
+    contours = find_contours(filled, level=saddle_level)
+    if not contours:
+        raise ValueError(
+            f"extract_foot_prominence: find_contours found no contour at the saddle "
+            f"level {saddle_level:.4f}"
+        )
+
+    from matplotlib.path import Path as MplPath
+
+    enclosing = []
+    for c in contours:
+        if len(c) < 3:
+            continue
+        poly = MplPath(np.column_stack([c[:, 0], c[:, 1]]))
+        if poly.contains_point((peak_r, peak_c)):
+            area = 0.5 * abs(
+                np.dot(c[:, 0], np.roll(c[:, 1], 1))
+                - np.dot(c[:, 1], np.roll(c[:, 0], 1))
+            )
+            enclosing.append((area, c))
+
+    if not enclosing:
+        raise ValueError(
+            f"extract_foot_prominence: no iso-contour at the saddle level "
+            f"{saddle_level:.4f} encloses the peak at (row,col)={peak_rc}"
+        )
+
+    enclosing.sort(key=lambda t: t[0])
+    return enclosing[-1][1]
+
+
+def extract_foot_curvature_field(
+    grid_z: np.ndarray,
+    smoothed: np.ndarray,
+    peak_rc,
+    sigma: float = 5.0,
+) -> np.ndarray:
+    """Foot via the non-radial outer convex-up break of the curvature field.
+
+    Non-radial analog of ``extract_foot_curvature``.  The geomorphological
+    *footslope* is the convex-up break where the mountain flank flattens into the
+    background — in curvature terms the transition from the concave summit cap
+    (Laplacian < 0) outward to the convex-up toe (Laplacian > 0).  Instead of
+    casting one ray per angle, this traces that break directly on the 2D
+    Laplacian field and selects the closed break that wraps the whole peak basin,
+    so it represents irregular, multi-lobed extents faithfully.
+
+    Algorithm
+    ---------
+    1. Recompute the NaN-aware smoothed field and its Laplacian with
+       ``compute_laplacian_arrays(grid_z, sigma)`` (REUSED — same convention as
+       the inflection boundary; Laplacian < 0 is concave-up summit, > 0 is the
+       convex-up basin/footslope).
+    2. **Peak (inflection) basin** = the connected component of the concave
+       region (Laplacian < 0) that contains the peak pixel.  Its outer rim is the
+       inflection ring; the footslope must lie strictly *outside* it.
+    3. Extract every zero-crossing of the Laplacian via
+       ``find_contours(laplacian, 0.0)`` — each is a candidate convex-up break.
+    4. Among breaks whose polygon **encloses the peak**, drop any that lies inside
+       (does not strictly contain) the inflection basin's own rim, then take the
+       innermost remaining break — the *first* convex-up break outside the
+       inflection basin (the foot of the mountain, not a distant background
+       ripple).  Selection uses the same point-in-polygon rule as
+       ``extract_foot_threshold``.
+
+    Fail-fast contract
+    ------------------
+    Raises ``ValueError`` if ``grid_z`` is all-NaN, if the peak pixel is not in a
+    concave region (no summit cap to bound), if ``find_contours`` yields no
+    zero-crossing, or if no convex-up break both encloses the peak and lies
+    outside the inflection basin.  Never returns a default ring or sentinel.
+
+    Returns (N, 2) (row, col) contour points.
+    """
+    if not (sigma > 0.0):
+        raise ValueError(f"sigma must be positive, got {sigma}")
+
+    valid = ~np.isnan(grid_z)
+    if not np.any(valid):
+        raise ValueError(
+            "extract_foot_curvature_field: grid_z is all-NaN — no surface to "
+            "analyse"
+        )
+
+    peak_r, peak_c = int(round(peak_rc[0])), int(round(peak_rc[1]))
+
+    # --- 1. NaN-aware smoothed field + Laplacian (REUSE the inflection helper) -
+    _smoothed_sig, laplacian = compute_laplacian_arrays(grid_z, sigma)
+
+    # --- 2. Connected concave (Laplacian < 0) basin containing the peak --------
+    # The summit cap is concave-up (negative Laplacian).  Restrict to valid
+    # pixels so the data-mask halo cannot leak into the basin.
+    concave = (laplacian < 0.0) & valid
+    if not concave[peak_r, peak_c]:
+        raise ValueError(
+            "extract_foot_curvature_field: the peak pixel is not in a concave "
+            "(Laplacian<0) region — no summit cap to bound a footslope against"
+        )
+
+    from scipy.ndimage import label as _ndlabel
+
+    labels_cc, _n = _ndlabel(concave)
+    peak_label = int(labels_cc[peak_r, peak_c])
+    if peak_label == 0:
+        raise ValueError(
+            "extract_foot_curvature_field: failed to label the peak's concave "
+            "basin"
+        )
+    peak_basin = labels_cc == peak_label
+
+    # Outer rim of the inflection basin (the concave summit cap around the peak).
+    basin_contours = find_contours(peak_basin.astype(float), level=0.5)
+    if not basin_contours:
+        raise ValueError(
+            "extract_foot_curvature_field: could not contour the peak's "
+            "inflection basin"
+        )
+
+    from matplotlib.path import Path as MplPath
+
+    # Largest basin contour enclosing the peak = the inflection rim.
+    basin_enclosing = []
+    for c in basin_contours:
+        if len(c) < 3:
+            continue
+        poly = MplPath(np.column_stack([c[:, 0], c[:, 1]]))
+        if poly.contains_point((peak_r, peak_c)):
+            area = 0.5 * abs(
+                np.dot(c[:, 0], np.roll(c[:, 1], 1))
+                - np.dot(c[:, 1], np.roll(c[:, 0], 1))
+            )
+            basin_enclosing.append((area, c))
+    if not basin_enclosing:
+        raise ValueError(
+            "extract_foot_curvature_field: no inflection-basin rim encloses the "
+            f"peak at (row,col)={peak_rc}"
+        )
+    basin_enclosing.sort(key=lambda t: t[0])
+    basin_rim = basin_enclosing[-1][1]
+    basin_poly = MplPath(np.column_stack([basin_rim[:, 0], basin_rim[:, 1]]))
+
+    # --- 3. Zero-crossings of the Laplacian = candidate convex-up breaks -------
+    # NaN cells block contouring; fill them with the field minimum so the break
+    # is found only inside the valid region.
+    lap_filled = np.where(np.isnan(laplacian), float(np.nanmin(laplacian)), laplacian)
+    breaks = find_contours(lap_filled, level=0.0)
+    if not breaks:
+        raise ValueError(
+            "extract_foot_curvature_field: find_contours found no Laplacian "
+            "zero-crossing — field too flat to define a convex-up break"
+        )
+
+    # --- 4. Innermost break that encloses the peak yet lies outside the basin --
+    # "Outside the inflection basin" = the break is not contained within the
+    # basin rim; we require the basin centroid/peak to be inside the break (so it
+    # wraps the whole summit) and the break to be larger than (extend beyond) the
+    # basin rim.  Choose the smallest such break — the *first* footslope outward.
+    basin_area = 0.5 * abs(
+        np.dot(basin_rim[:, 0], np.roll(basin_rim[:, 1], 1))
+        - np.dot(basin_rim[:, 1], np.roll(basin_rim[:, 0], 1))
+    )
+
+    candidates = []
+    for c in breaks:
+        if len(c) < 3:
+            continue
+        poly = MplPath(np.column_stack([c[:, 0], c[:, 1]]))
+        if not poly.contains_point((peak_r, peak_c)):
+            continue
+        area = 0.5 * abs(
+            np.dot(c[:, 0], np.roll(c[:, 1], 1))
+            - np.dot(c[:, 1], np.roll(c[:, 0], 1))
+        )
+        # Footslope must lie strictly outside the inflection basin: it has to be
+        # bigger than the basin rim and contain the rim's points.
+        if area <= basin_area:
+            continue
+        if not np.all(poly.contains_points(
+            np.column_stack([basin_rim[:, 0], basin_rim[:, 1]])
+        )):
+            continue
+        candidates.append((area, c))
+
+    if not candidates:
+        raise ValueError(
+            "extract_foot_curvature_field: no convex-up break both encloses the "
+            f"peak at (row,col)={peak_rc} and lies outside the inflection basin "
+            "— field has no footslope break beyond the summit cap"
+        )
+
+    # Innermost (smallest-area) qualifying break = the first footslope outward.
+    candidates.sort(key=lambda t: t[0])
+    return candidates[0][1]
+
+
+def extract_foot_spill_point(
+    grid_z: np.ndarray,
+    smoothed: np.ndarray,
+    peak_rc,
+    n_levels: int = 200,
+    detrend: bool = False,
+) -> np.ndarray:
+    """Foot via the spill point: the level where the peak's basin floods outward.
+
+    Non-radial superlevel-set method.  Imagine slowly lowering a water line over
+    the smoothed response surface from just below the peak toward the background.
+    The connected component that holds the peak grows slowly while the water sits
+    on the steep flank of the mountain, then *suddenly* engulfs a large flat area
+    the moment the water drops below the surrounding col/shoulder — that jump is
+    the **spill point**, the level at which the peak's catchment spills into the
+    background plateau.  The iso-contour of ``smoothed`` at that spill level is the
+    non-radial foot of the mountain: it wraps the whole basin (irregular,
+    multi-lobed extents included) rather than assuming a star-convex single peak.
+
+    Algorithm
+    ---------
+    1. Work on ``smoothed`` restricted to ``valid = ~np.isnan(grid_z)``.  Optionally
+       remove a planar background first (``detrend=True``): least-squares fit
+       ``z ≈ a·row + b·col + c`` over valid pixels and subtract it, so a tilted
+       background does not smear the spill knee.  The plane fit is fail-fast: a
+       rank-deficient design matrix (e.g. all-collinear valid pixels) raises.
+    2. Sweep a threshold ``t`` over ``n_levels`` values from just below the peak
+       value down toward the background (valid-region) minimum.  At each ``t``,
+       label the superlevel set ``field >= t`` with ``ndi_label`` (8-connectivity),
+       take the component containing ``peak_rc``, and record its pixel area.
+    3. The spill level is the ``t`` of maximum growth rate ``dArea/d(-t)`` — the
+       discrete forward difference of the recorded areas as ``t`` decreases.  This
+       is the knee where the basin abruptly floods the background.
+    4. Boundary = ``find_contours(field, spill_level)`` selecting the contour whose
+       polygon encloses the peak (largest, if several qualify) — the same
+       point-in-polygon rule used by ``extract_foot_threshold``.
+
+    Fail-fast contract
+    ------------------
+    Raises ``ValueError`` if ``grid_z`` is all-NaN, if the smoothed peak value is
+    non-positive/non-finite, if ``detrend`` is requested but the plane fit is
+    degenerate, if the peak's component never grows across the sweep (no spill),
+    if the growth-rate knee is undefined, if ``find_contours`` returns nothing at
+    the spill level, or if no contour encloses the peak.  Never returns a default
+    ring or sentinel.
+
+    Returns (N, 2) (row, col) contour points.
+    """
+    if not (n_levels >= 2):
+        raise ValueError(f"n_levels must be >= 2, got {n_levels}")
+
+    valid = ~np.isnan(grid_z)
+    if not np.any(valid):
+        raise ValueError(
+            "extract_foot_spill_point: grid_z is all-NaN — no surface to flood"
+        )
+
+    peak_r, peak_c = int(round(peak_rc[0])), int(round(peak_rc[1]))
+    n_rows, n_cols = smoothed.shape
+
+    # --- 1. Field to sweep: smoothed, optionally planar-detrended --------------
+    field = np.array(smoothed, dtype=np.float64, copy=True)
+    if detrend:
+        vr, vc = np.nonzero(valid)
+        zv = smoothed[vr, vc]
+        finite = np.isfinite(zv)
+        vr, vc, zv = vr[finite], vc[finite], zv[finite]
+        if vr.size < 3:
+            raise ValueError(
+                "extract_foot_spill_point: fewer than 3 finite valid pixels — "
+                "cannot fit a planar background to detrend"
+            )
+        design = np.column_stack([vr.astype(np.float64), vc.astype(np.float64),
+                                  np.ones(vr.size)])
+        # Fail-fast on a degenerate (rank-deficient) plane fit.
+        rank = int(np.linalg.matrix_rank(design))
+        if rank < 3:
+            raise ValueError(
+                "extract_foot_spill_point: planar background fit is degenerate "
+                f"(design-matrix rank {rank} < 3) — valid pixels are collinear; "
+                "cannot detrend"
+            )
+        coeffs, *_ = np.linalg.lstsq(design, zv, rcond=None)
+        a, b, c = (float(coeffs[0]), float(coeffs[1]), float(coeffs[2]))
+        rows_idx = np.arange(n_rows)[:, None]
+        cols_idx = np.arange(n_cols)[None, :]
+        plane = a * rows_idx + b * cols_idx + c
+        field = field - plane
+
+    # NaN cells must not join the peak's component or seed contours; drop them to
+    # the valid-region minimum so they read as the lowest topography.
+    field = np.where(valid, field, np.nan)
+    valid_vals = field[valid]
+    valid_vals = valid_vals[np.isfinite(valid_vals)]
+    if valid_vals.size == 0:
+        raise ValueError(
+            "extract_foot_spill_point: no finite valid samples after detrend — "
+            "cannot define a spill sweep"
+        )
+    field = np.where(np.isnan(field), float(valid_vals.min()), field)
+
+    peak_val = float(field[peak_r, peak_c]) if valid[peak_r, peak_c] else float(valid_vals.max())
+    if not np.isfinite(peak_val):
+        raise ValueError(
+            "extract_foot_spill_point: peak sample is non-finite — cannot sweep"
+        )
+    bg_val = float(valid_vals.min())
+    if not (peak_val > bg_val):
+        raise ValueError(
+            f"extract_foot_spill_point: peak value ({peak_val:.4f}) does not exceed "
+            f"the background minimum ({bg_val:.4f}) — field too flat/degenerate to "
+            "define a spill point"
+        )
+
+    # --- 2. Sweep thresholds from just below the peak toward the background ----
+    # Descending levels so the peak's component only grows as the sweep advances.
+    span = peak_val - bg_val
+    levels = np.linspace(peak_val - span / n_levels, bg_val, n_levels)
+    areas = np.empty(n_levels, dtype=np.float64)
+    for k, t in enumerate(levels):
+        superlevel = (field >= t) & valid
+        labels_sl, _n = ndi_label(superlevel)
+        peak_label = int(labels_sl[peak_r, peak_c])
+        if peak_label == 0:
+            areas[k] = 0.0
+        else:
+            areas[k] = float(np.count_nonzero(labels_sl == peak_label))
+
+    if float(np.max(areas)) <= 0.0:
+        raise ValueError(
+            "extract_foot_spill_point: the peak's superlevel component never grew "
+            "across the sweep — peak pixel may sit on the data mask or field is "
+            "degenerate"
+        )
+
+    # --- 3. Spill level = argmax of the growth rate dArea/d(-t) ----------------
+    # t decreases along the sweep, so d(-t) > 0; the forward difference of areas
+    # is the growth as the water line drops one step.
+    d_area = np.diff(areas)
+    dt = -np.diff(levels)  # positive step in (-t)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        growth = np.where(dt > 0, d_area / dt, 0.0)
+    if not np.any(np.isfinite(growth)) or float(np.nanmax(growth)) <= 0.0:
+        raise ValueError(
+            "extract_foot_spill_point: the basin growth-rate knee is undefined "
+            "(no positive dArea/d(-t)) — no spill detected"
+        )
+    knee = int(np.nanargmax(growth))
+    # The spill happens between levels[knee] and levels[knee+1]; take the lower
+    # (already-flooded) level as the iso-contour level for the basin extent.
+    spill_level = float(levels[knee + 1])
+
+    # --- 4. Iso-contour at the spill level, enclosing the peak -----------------
+    contours = find_contours(field, level=spill_level)
+    if not contours:
+        raise ValueError(
+            f"extract_foot_spill_point: find_contours found no contour at the spill "
+            f"level {spill_level:.4f}"
+        )
+
+    from matplotlib.path import Path as MplPath
+
+    enclosing = []
+    for c in contours:
+        if len(c) < 3:
+            continue
+        poly = MplPath(np.column_stack([c[:, 0], c[:, 1]]))
+        if poly.contains_point((peak_r, peak_c)):
+            area = 0.5 * abs(
+                np.dot(c[:, 0], np.roll(c[:, 1], 1))
+                - np.dot(c[:, 1], np.roll(c[:, 0], 1))
+            )
+            enclosing.append((area, c))
+
+    if not enclosing:
+        raise ValueError(
+            f"extract_foot_spill_point: no iso-contour at the spill level "
+            f"{spill_level:.4f} encloses the peak at (row,col)={peak_rc}"
+        )
+
+    enclosing.sort(key=lambda t: t[0])
+    return enclosing[-1][1]
+
+
+def extract_foot_log_blob(
+    grid_z: np.ndarray,
+    peak_rc,
+    sigma_min: float = 2.0,
+    sigma_max: float = 30.0,
+    n_sigma: int = 20,
+) -> np.ndarray:
+    """Foot via scale-space blob detection: the normalized-LoG characteristic size.
+
+    Non-radial scale-space method.  A bell-shaped response is a *blob*, and blob
+    detection answers "how big is this blob?" by finding the Gaussian scale at
+    which a normalized Laplacian-of-Gaussian (LoG) filter responds most strongly
+    at the blob centre.  The scale-normalized LoG ``σ²·∇²(G_σ * z)`` has, for a
+    Gaussian blob of width ``s``, an extremum in σ at ``σ* ∝ s`` — the *intrinsic*
+    characteristic radius of the mountain, read directly off the data rather than
+    assumed.  The LoG **zero-crossing ring** at that best scale traces the
+    inflection circle of the matched blob, which is taken here as the foot of the
+    mountain: it wraps the whole peak basin (irregular, multi-lobed extents
+    included) without star-convex per-ray casting.
+
+    Algorithm
+    ---------
+    1. Build a NaN-filled copy of ``grid_z`` (NaNs → the valid-region minimum, the
+       flat "background" floor) so ``gaussian_laplace`` does not propagate NaN.
+       This NaN-fill is a documented *model assumption* — the masked region is
+       treated as flat background — NOT a silent fallback; it asserts against an
+       all-NaN field.
+    2. For each σ on a log-spaced grid in ``[sigma_min, sigma_max]``, compute the
+       scale-normalized LoG response ``resp = σ²·gaussian_laplace(filled, σ)``.  A
+       bright blob gives a strongly *negative* LoG at its centre, so the matched
+       scale is ``σ* = argmax_σ (-resp[peak_rc])``.  Record
+       ``log_characteristic_sigma = σ*``.
+    3. Boundary = LoG zero-crossing ring of ``resp`` at ``σ*``:
+       ``find_contours(resp_sigma_star, 0.0)``, selecting the contour whose polygon
+       encloses the peak (largest, if several qualify) — the same point-in-polygon
+       rule used by ``extract_foot_threshold``.
+
+    Fail-fast contract
+    ------------------
+    Raises ``ValueError`` if ``grid_z`` is all-NaN, if the LoG response at the peak
+    never has a negative-going extremum within ``[sigma_min, sigma_max]`` (i.e. the
+    best ``-resp[peak_rc]`` is non-positive, or the extremum sits at a grid
+    endpoint so the characteristic scale lies outside the sampled range), if
+    ``find_contours`` returns no zero-crossing at ``σ*``, or if no zero-crossing
+    ring encloses the peak.  Never returns a default ring or sentinel.
+
+    Returns (N, 2) (row, col) contour points.
+    """
+    if not (sigma_min > 0.0):
+        raise ValueError(f"sigma_min must be positive, got {sigma_min}")
+    if not (sigma_max > sigma_min):
+        raise ValueError(
+            f"sigma_max ({sigma_max}) must exceed sigma_min ({sigma_min})"
+        )
+    if not (n_sigma >= 2):
+        raise ValueError(f"n_sigma must be >= 2, got {n_sigma}")
+
+    valid = ~np.isnan(grid_z)
+    if not np.any(valid):
+        raise ValueError(
+            "extract_foot_log_blob: grid_z is all-NaN — no surface to analyse"
+        )
+
+    peak_r, peak_c = int(round(peak_rc[0])), int(round(peak_rc[1]))
+
+    # --- 1. NaN-filled copy: masked region read as the flat background floor ----
+    # Model assumption (NOT a fallback): the data mask is flat background, so NaNs
+    # take the valid-region minimum.  ``gaussian_laplace`` would otherwise spread
+    # NaN across the whole response.
+    fill_low = float(np.nanmin(grid_z))
+    filled = np.where(np.isnan(grid_z), fill_low, grid_z).astype(np.float64)
+
+    # --- 2. Scale sweep: σ* maximizes the negative-going LoG at the peak --------
+    sigmas = np.geomspace(sigma_min, sigma_max, n_sigma)
+    neg_resp_at_peak = np.empty(n_sigma, dtype=np.float64)
+    responses = []
+    for k, sigma in enumerate(sigmas):
+        resp = (sigma ** 2) * gaussian_laplace(filled, sigma)
+        responses.append(resp)
+        neg_resp_at_peak[k] = -float(resp[peak_r, peak_c])
+
+    best_k = int(np.argmax(neg_resp_at_peak))
+    if neg_resp_at_peak[best_k] <= 0.0:
+        raise ValueError(
+            "extract_foot_log_blob: the normalized-LoG response at the peak is "
+            "never negative-going within "
+            f"[{sigma_min}, {sigma_max}] — no blob signature at the peak (field too "
+            "flat or peak sits on the background floor)"
+        )
+    if best_k == 0 or best_k == n_sigma - 1:
+        raise ValueError(
+            "extract_foot_log_blob: the LoG response peaks at a σ-grid endpoint "
+            f"(σ*={float(sigmas[best_k]):.3f}) — the characteristic scale lies "
+            f"outside the sampled range [{sigma_min}, {sigma_max}]; widen it"
+        )
+
+    log_characteristic_sigma = float(sigmas[best_k])  # noqa: F841 (recorded scale)
+    resp_sigma_star = responses[best_k]
+
+    # --- 3. LoG zero-crossing ring at σ*, enclosing the peak -------------------
+    contours = find_contours(resp_sigma_star, level=0.0)
+    if not contours:
+        raise ValueError(
+            "extract_foot_log_blob: find_contours found no LoG zero-crossing at "
+            f"σ*={log_characteristic_sigma:.3f}"
+        )
+
+    from matplotlib.path import Path as MplPath
+
+    enclosing = []
+    for c in contours:
+        if len(c) < 3:
+            continue
+        poly = MplPath(np.column_stack([c[:, 0], c[:, 1]]))
+        if poly.contains_point((peak_r, peak_c)):
+            area = 0.5 * abs(
+                np.dot(c[:, 0], np.roll(c[:, 1], 1))
+                - np.dot(c[:, 1], np.roll(c[:, 0], 1))
+            )
+            enclosing.append((area, c))
+
+    if not enclosing:
+        raise ValueError(
+            "extract_foot_log_blob: no LoG zero-crossing ring at "
+            f"σ*={log_characteristic_sigma:.3f} encloses the peak at "
+            f"(row,col)={peak_rc}"
+        )
+
+    enclosing.sort(key=lambda t: t[0])
+    return enclosing[-1][1]
+
+
+def _elliptical_gaussian_2d(
+    coords, amplitude, x0, y0, sigma_x, sigma_y, theta, offset
+):
+    """Rotated 2-D elliptical Gaussian, raveled for ``curve_fit``.
+
+    ``coords`` is a ``(rows, cols)`` pair of equally-shaped index arrays; the
+    surface ``offset + amplitude·exp(-(a·dx² + 2b·dx·dy + c·dy²))`` is evaluated
+    and returned flattened.  ``theta`` rotates the principal axes.
+    """
+    r, c = coords
+    dr = r - x0
+    dc = c - y0
+    cos_t = np.cos(theta)
+    sin_t = np.sin(theta)
+    a = (cos_t ** 2) / (2 * sigma_x ** 2) + (sin_t ** 2) / (2 * sigma_y ** 2)
+    b = (-np.sin(2 * theta)) / (4 * sigma_x ** 2) + (np.sin(2 * theta)) / (
+        4 * sigma_y ** 2
+    )
+    cc = (sin_t ** 2) / (2 * sigma_x ** 2) + (cos_t ** 2) / (2 * sigma_y ** 2)
+    surface = offset + amplitude * np.exp(
+        -(a * dr ** 2 + 2 * b * dr * dc + cc * dc ** 2)
+    )
+    return surface.ravel()
+
+
+def extract_foot_iso_fit(
+    grid_z: np.ndarray,
+    peak_rc,
+    iso_level: float = 0.5,
+    model: str = "gaussian",
+) -> np.ndarray:
+    """Foot as an iso-level ring of a fitted 2-D elliptical-Gaussian model.
+
+    Parametric reference method.  Rather than tracing the (noisy) data surface
+    directly, fit a smooth analytic bell — a rotated 2-D elliptical Gaussian
+    ``offset + A·exp(-(...))`` with free amplitude, centre ``(x0, y0)``, widths
+    ``(σx, σy)``, rotation ``θ`` and ``offset`` — to the valid pixels via
+    ``scipy.optimize.curve_fit``, then read the foot off the *model* at a chosen
+    iso-level.  Because the model is reproducible and smooth, the resulting ring
+    is a clean parametric reference: at ``iso_level=0.5`` it is the half-maximum
+    (FWHM) contour of the fitted mountain.
+
+    Algorithm
+    ---------
+    1. Collect the valid (non-NaN ``grid_z``) pixels as ``(row, col, z)`` samples.
+       Seed the fit from the data: ``offset = nanmin``, ``amplitude = nanmax -
+       nanmin``, ``(x0, y0) = peak_rc``, ``σx = σy =`` a rough width (a fraction
+       of the valid-region extent), ``θ = 0``.
+    2. Fit the elliptical Gaussian with ``curve_fit`` over the valid samples.  A
+       failure to converge raises (caught and re-raised as ``ValueError``).
+    3. Evaluate the *fitted* surface on the full grid and contour it at
+       ``offset + iso_level·amplitude`` with ``find_contours``; select the ring
+       whose polygon encloses the peak (largest, if several qualify) — the same
+       point-in-polygon rule used by ``extract_foot_threshold``.
+    4. Compute the fit coefficient of determination ``R²`` over the valid samples
+       for diagnostics (returned only via the figure text panel, not the ring).
+
+    ``model`` selects the analytic bell.  Only ``"gaussian"`` is implemented; a
+    ``"super_gaussian"`` branch is reserved and raises ``NotImplementedError``
+    (fail-fast — it must NOT silently fall back to the Gaussian).
+
+    Fail-fast contract
+    ------------------
+    Raises ``ValueError`` if ``model`` is unknown, if ``grid_z`` is all-NaN or has
+    too few valid samples to fit seven parameters, if the peak value is
+    non-positive/non-finite, if ``curve_fit`` fails to converge, if
+    ``find_contours`` returns nothing at the iso-level, or if no contour encloses
+    the peak.  Raises ``NotImplementedError`` for the reserved ``"super_gaussian"``
+    model.  Never returns a default ring or sentinel.
+
+    Returns (N, 2) (row, col) contour points.
+    """
+    if model == "super_gaussian":
+        raise NotImplementedError(
+            "extract_foot_iso_fit: model='super_gaussian' is reserved but not "
+            "implemented — pass model='gaussian' (no silent fallback)"
+        )
+    if model != "gaussian":
+        raise ValueError(
+            f"extract_foot_iso_fit: unknown model '{model}' — expected 'gaussian' "
+            "or 'super_gaussian'"
+        )
+    if not (0.0 < iso_level < 1.0):
+        raise ValueError(f"iso_level must be in (0, 1), got {iso_level}")
+
+    valid = ~np.isnan(grid_z)
+    if not np.any(valid):
+        raise ValueError(
+            "extract_foot_iso_fit: grid_z is all-NaN — no surface to fit"
+        )
+
+    n_rows, n_cols = grid_z.shape
+    peak_r, peak_c = int(round(peak_rc[0])), int(round(peak_rc[1]))
+
+    # --- 1. Valid samples + data-seeded initial parameters --------------------
+    vr, vc = np.nonzero(valid)
+    zv = grid_z[vr, vc].astype(np.float64)
+    if vr.size < 7:
+        raise ValueError(
+            f"extract_foot_iso_fit: only {vr.size} valid pixels — fewer than the 7 "
+            "free parameters of the elliptical Gaussian; cannot fit"
+        )
+
+    z_min = float(np.nanmin(grid_z))
+    z_max = float(np.nanmax(grid_z))
+    amplitude0 = z_max - z_min
+    if not np.isfinite(amplitude0) or amplitude0 <= 0.0:
+        raise ValueError(
+            f"extract_foot_iso_fit: peak amplitude non-positive/non-finite "
+            f"({amplitude0}) — field too flat/degenerate to fit a bell"
+        )
+
+    # Rough width seed: a fraction of the valid-region row/col extent.
+    width0_r = max(float(vr.max() - vr.min()) / 6.0, 1.0)
+    width0_c = max(float(vc.max() - vc.min()) / 6.0, 1.0)
+    p0 = (
+        amplitude0,
+        float(peak_r),
+        float(peak_c),
+        width0_r,
+        width0_c,
+        0.0,
+        z_min,
+    )
+
+    # --- 2. Fit the elliptical Gaussian over the valid samples ----------------
+    try:
+        popt, _pcov = curve_fit(
+            _elliptical_gaussian_2d,
+            (vr.astype(np.float64), vc.astype(np.float64)),
+            zv,
+            p0=p0,
+            maxfev=20000,
+        )
+    except (RuntimeError, ValueError) as exc:
+        raise ValueError(
+            f"extract_foot_iso_fit: curve_fit failed to converge on the elliptical "
+            f"Gaussian model — {exc}"
+        ) from exc
+
+    fit_amplitude = float(popt[0])
+    fit_offset = float(popt[6])
+    if not np.isfinite(fit_amplitude) or fit_amplitude <= 0.0:
+        raise ValueError(
+            f"extract_foot_iso_fit: fitted amplitude non-positive/non-finite "
+            f"({fit_amplitude}) — degenerate fit, no iso-level to contour"
+        )
+
+    # --- Fit R² over the valid samples (diagnostic) ---------------------------
+    z_pred = _elliptical_gaussian_2d(
+        (vr.astype(np.float64), vc.astype(np.float64)), *popt
+    )
+    ss_res = float(np.sum((zv - z_pred) ** 2))
+    ss_tot = float(np.sum((zv - zv.mean()) ** 2))
+    fit_r2 = 1.0 - ss_res / ss_tot if ss_tot > 0.0 else 0.0
+
+    # --- 3. Iso-level ring of the FITTED surface, enclosing the peak ----------
+    rows_idx = np.arange(n_rows)[:, None]
+    cols_idx = np.arange(n_cols)[None, :]
+    fitted_surface = _elliptical_gaussian_2d(
+        (np.broadcast_to(rows_idx, (n_rows, n_cols)).astype(np.float64),
+         np.broadcast_to(cols_idx, (n_rows, n_cols)).astype(np.float64)),
+        *popt,
+    ).reshape(n_rows, n_cols)
+
+    level = fit_offset + iso_level * fit_amplitude
+    contours = find_contours(fitted_surface, level=level)
+    if not contours:
+        raise ValueError(
+            f"extract_foot_iso_fit: find_contours found no contour at the iso-level "
+            f"{level:.4f} ({100 * iso_level:.0f}% of fitted amplitude)"
+        )
+
+    from matplotlib.path import Path as MplPath
+
+    enclosing = []
+    for c in contours:
+        if len(c) < 3:
+            continue
+        poly = MplPath(np.column_stack([c[:, 0], c[:, 1]]))
+        if poly.contains_point((peak_r, peak_c)):
+            area = 0.5 * abs(
+                np.dot(c[:, 0], np.roll(c[:, 1], 1))
+                - np.dot(c[:, 1], np.roll(c[:, 0], 1))
+            )
+            enclosing.append((area, c))
+
+    if not enclosing:
+        raise ValueError(
+            f"extract_foot_iso_fit: no fitted iso-contour at {100 * iso_level:.0f}% "
+            f"of amplitude encloses the peak at (row,col)={peak_rc} "
+            f"(fit R²={fit_r2:.3f})"
+        )
+
+    enclosing.sort(key=lambda t: t[0])
+    return enclosing[-1][1]
+
+
 def contour_height(grid_z: np.ndarray, contour_rc: np.ndarray) -> np.ndarray:
     """Bilinearly sample grid_z at contour (row, col) points (NaN→nanmean fill)."""
     filled = np.where(np.isnan(grid_z), np.nanmean(grid_z), grid_z)
@@ -805,7 +1842,18 @@ def fig5_forearm_3d(g, grad_contour_uv, infl_contour_uv, out_dir):
 def fig6_foot_methods(g, smoothed, peak_rc, grad_contour_rc, n_angles,
                       savgol_window, out_dir, n_show=6,
                       profile_savgol_window=11, profile_savgol_polyorder=3,
-                      threshold_frac=0.2):
+                      threshold_frac=0.2,
+                      watershed_min_peak_distance=15,
+                      watershed_peak_threshold_rel=0.1,
+                      prominence_min_prominence_frac=0.1,
+                      curvature_field_sigma=5.0,
+                      spill_point_n_levels=200,
+                      spill_point_detrend=False,
+                      log_blob_sigma_min=2.0,
+                      log_blob_sigma_max=30.0,
+                      log_blob_n_sigma=20,
+                      iso_fit_iso_level=0.5,
+                      iso_fit_model="gaussian"):
     """Compare the three "foot of the mountain" candidates vs the gradient ridge.
 
     Left panel: ``grid_z`` heatmap + the white-dashed data boundary (reused from
@@ -822,16 +1870,22 @@ def fig6_foot_methods(g, smoothed, peak_rc, grad_contour_rc, n_angles,
     (via ``contour_height``).  Expected: foot heights ~20-25% of peak vs the
     gradient ridge ~60%.
 
-    The foot extractors are called directly; if a field is degenerate they raise
-    ``ValueError`` (fail-fast) and that propagates out of this figure, exactly as
-    the other sandbox figures let their errors propagate.
+    The original radial foot extractors are called directly; if a field is
+    degenerate they raise ``ValueError`` (fail-fast) and that propagates out of
+    this figure, exactly as the other sandbox figures let their errors propagate.
+    The non-radial extractors (watershed, prominence, curvature field, and the
+    single-peak delineation trio spill point / LoG blob / iso-fit) are each
+    guarded by a try/except so a single method that legitimately fails does not
+    abort the whole comparison figure: a warning is printed and that row is
+    skipped (display robustness only — the extractors themselves remain fail-fast
+    and never return a default ring).
     """
     grid_z = g["grid_z"]
     jet = plt.cm.jet.copy()
     jet.set_bad("lightgrey")
     peak_val = float(np.nanmax(grid_z))
 
-    # --- Extract the three foot candidates (fail-fast, no silent skip) --------
+    # --- Extract the radial foot candidates (fail-fast, no silent skip) -------
     foot_curv_rc = extract_foot_curvature(
         grid_z, smoothed, peak_rc, n_angles=n_angles, savgol_window=savgol_window,
         profile_savgol_window=profile_savgol_window,
@@ -842,12 +1896,75 @@ def fig6_foot_methods(g, smoothed, peak_rc, grad_contour_rc, n_angles,
     )
     foot_thr_rc = extract_foot_threshold(grid_z, peak_rc, frac=threshold_frac)
 
+    # --- Extract the non-radial candidates, guarded so one failure does not ---
+    #     abort the comparison figure (display robustness; the extractors stay
+    #     fail-fast and never return a default ring — we just skip the row).
+    def _try_extract(name, fn):
+        try:
+            return fn()
+        except ValueError as exc:
+            print(f"  WARNING: {name} skipped in fig6 — {exc}")
+            return None
+
+    foot_ws_rc = _try_extract(
+        "watershed",
+        lambda: extract_foot_watershed(
+            grid_z, smoothed, peak_rc,
+            min_peak_distance=watershed_min_peak_distance,
+            peak_threshold_rel=watershed_peak_threshold_rel,
+        ),
+    )
+    foot_prom_rc = _try_extract(
+        "prominence",
+        lambda: extract_foot_prominence(
+            grid_z, smoothed, peak_rc,
+            min_prominence_frac=prominence_min_prominence_frac,
+        ),
+    )
+    foot_cfield_rc = _try_extract(
+        "curvature field",
+        lambda: extract_foot_curvature_field(
+            grid_z, smoothed, peak_rc, sigma=curvature_field_sigma,
+        ),
+    )
+
+    # --- Single-peak delineation candidates (methods 4.2/4.3/4.4), each ------
+    #     non-radial and guarded the same way as the other non-radial methods.
+    foot_spill_rc = _try_extract(
+        "spill point",
+        lambda: extract_foot_spill_point(
+            grid_z, smoothed, peak_rc,
+            n_levels=spill_point_n_levels, detrend=spill_point_detrend,
+        ),
+    )
+    foot_log_rc = _try_extract(
+        "LoG blob",
+        lambda: extract_foot_log_blob(
+            grid_z, peak_rc,
+            sigma_min=log_blob_sigma_min, sigma_max=log_blob_sigma_max,
+            n_sigma=log_blob_n_sigma,
+        ),
+    )
+    foot_iso_rc = _try_extract(
+        "iso-fit",
+        lambda: extract_foot_iso_fit(
+            grid_z, peak_rc,
+            iso_level=iso_fit_iso_level, model=iso_fit_model,
+        ),
+    )
+
     # (label, contour_rc, color) — gradient ridge first as the reference ring.
     methods = [
         ("gradient ridge", grad_contour_rc, "lime"),
         ("curvature foot", foot_curv_rc, "deepskyblue"),
         ("kneedle foot", foot_knee_rc, "magenta"),
         (f"threshold foot ({100*threshold_frac:.0f}%)", foot_thr_rc, "orange"),
+        ("watershed", foot_ws_rc, "yellow"),
+        ("prominence", foot_prom_rc, "white"),
+        ("curvature field", foot_cfield_rc, "springgreen"),
+        ("spill point", foot_spill_rc, "yellow"),
+        ("LoG blob", foot_log_rc, "white"),
+        (f"iso-fit ({100*iso_fit_iso_level:.0f}%)", foot_iso_rc, "springgreen"),
     ]
 
     fig = plt.figure(figsize=(16, 8))
@@ -980,7 +2097,7 @@ def main() -> None:
         "F:/liu-onedrive-nospecial-carac/_Teams/Social touch Kinect MNG/02_data/"
         "semi-controlled/4_analysed/spatial_extract_boundaries/iff_mean/" +
         ST13_03
-    )    
+    )
     
     
     GESTURE = "all"        # one of: all, stroke, tap, stroke_proximal, stroke_distal
@@ -992,8 +2109,60 @@ def main() -> None:
     N_ANGLES = 360                      # radial rays
     SAVGOL_WINDOW = 31     # contour smoothing window (None to disable)
     SIGMA_SWEEP = [2.0, 3.0, 4.0, 5.0, 7.0, 10.0]
-    DRAW_FOREARM_3D = False  # Fig 5 (back-projection); set False to skip if slow
-    DRAW_FOOT_METHODS = True  # Fig 6 (foot-of-mountain candidates vs gradient ridge)
+    # ---- Figure windows (enable/disable each window independently) -------
+    # Each entry's "show" flag gates whether that figure window is generated
+    # (and, in interactive mode, opened).  Set "show": False to skip it.
+    FIGURES = {
+        "fig1_pipeline_steps":   {"show": True},   # smoothing / Laplacian / gradient steps
+        "fig2_radial_profiling": {"show": True},   # gradient ridge radial profiling
+        "fig3_sigma_sweep":      {"show": True},   # ridge vs Gaussian sigma sweep
+        "fig4_surface_3d":       {"show": True},   # grid_z surface with contours
+        "fig5_forearm_3d":       {"show": False},  # back-projection onto forearm (slow)
+        "fig6_foot_methods":     {"show": True},   # foot-of-mountain candidates vs ridge
+    }
+
+    # ---- Foot-of-mountain method parameters (Fig 6) ----------------------
+    # Nested by method so each knob's owner is explicit.  The two radial foot
+    # methods (curvature, kneedle) also use the shared N_ANGLES and
+    # SAVGOL_WINDOW defined above; only method-specific knobs live here.
+    FOOT_PARAMS = {
+        "curvature": {                       # foot = max upward z'' beyond the inflection
+            "profile_savgol_window": 11,     # on-ray z'/z'' smoothing window (odd)
+            "profile_savgol_polyorder": 3,   # on-ray Savitzky-Golay poly order
+        },
+        "kneedle": {                         # foot = chord-deviation knee
+            # no method-specific knob (uses shared N_ANGLES / SAVGOL_WINDOW)
+        },
+        "threshold": {                       # foot = iso-level reference ring
+            "frac": 0.2,                     # iso-level as fraction of peak
+        },
+        "watershed": {                       # foot = catchment cut at saddles (non-radial)
+            "min_peak_distance": 15,         # min separation between competing maxima (px)
+            "peak_threshold_rel": 0.1,       # maxima/background floor as fraction of peak
+        },
+        "prominence": {                      # foot = saddle/col iso-contour (non-radial)
+            "min_prominence_frac": 0.1,      # min prominence (frac of peak) to accept a merge
+        },
+        "curvature_field": {                 # foot = outer convex-up break (non-radial)
+            "sigma": 5.0,                    # Gaussian sigma for the Laplacian field
+        },
+        "spill_point": {                     # foot = superlevel-set flood knee (non-radial)
+            "n_levels": 200,                 # threshold sweep resolution
+            "detrend": False,                # remove a planar background before sweeping
+        },
+        "log_blob": {                        # foot = scale-space LoG ring (non-radial)
+            "sigma_min": 2.0,                # smallest blob scale to probe (px)
+            "sigma_max": 30.0,               # largest blob scale to probe (px)
+            "n_sigma": 20,                   # log-spaced scales between the bounds
+        },
+        "iso_fit": {                         # foot = fitted-Gaussian iso-level ring (non-radial)
+            "iso_level": 0.5,                # iso-level as fraction of fitted amplitude (0.5=FWHM)
+            "model": "gaussian",             # analytic bell; 'super_gaussian' reserved (raises)
+        },
+        "display": {                         # Fig 6 right-panel rendering
+            "n_show": 6,                     # sample rays drawn in the right panel
+        },
+    }
 
     out_dir = Path(__file__).resolve().parent / "_sandbox_gradient_ridge_out"
     out_dir.mkdir(exist_ok=True)
@@ -1051,21 +2220,42 @@ def main() -> None:
         infl_contour_rc = np.column_stack([rr, cc])
 
     print("Rendering figures...")
-    fig1_pipeline_steps(g, smoothed, laplacian, grad_mag, peak_rc,
-                        grad_contour_rc, infl_contour_rc, out_dir)
-    fig2_radial_profiling(g, grad_mag, peak_rc, grad_contour_rc, N_ANGLES, out_dir)
-    fig3_sigma_sweep(g, SIGMA_SWEEP, N_ANGLES, SAVGOL_WINDOW, out_dir)
-    fig4_surface_3d(g, grad_contour_rc, infl_contour_rc, out_dir)
-    if DRAW_FOREARM_3D:
+    if FIGURES["fig1_pipeline_steps"]["show"]:
+        fig1_pipeline_steps(g, smoothed, laplacian, grad_mag, peak_rc,
+                            grad_contour_rc, infl_contour_rc, out_dir)
+    if FIGURES["fig2_radial_profiling"]["show"]:
+        fig2_radial_profiling(g, grad_mag, peak_rc, grad_contour_rc, N_ANGLES, out_dir)
+    if FIGURES["fig3_sigma_sweep"]["show"]:
+        fig3_sigma_sweep(g, SIGMA_SWEEP, N_ANGLES, SAVGOL_WINDOW, out_dir)
+    if FIGURES["fig4_surface_3d"]["show"]:
+        fig4_surface_3d(g, grad_contour_rc, infl_contour_rc, out_dir)
+    if FIGURES["fig5_forearm_3d"]["show"]:
         fig5_forearm_3d(
             g,
             grad_boundary.contour_uv if grad_boundary is not None else None,
             infl_boundary.contour_uv if infl_boundary is not None else None,
             out_dir,
         )
-    if DRAW_FOOT_METHODS:
-        fig6_foot_methods(g, smoothed, peak_rc, grad_contour_rc, N_ANGLES,
-                          SAVGOL_WINDOW, out_dir)
+    if FIGURES["fig6_foot_methods"]["show"]:
+        fig6_foot_methods(
+            g, smoothed, peak_rc, grad_contour_rc, N_ANGLES,
+            SAVGOL_WINDOW, out_dir,
+            n_show=FOOT_PARAMS["display"]["n_show"],
+            profile_savgol_window=FOOT_PARAMS["curvature"]["profile_savgol_window"],
+            profile_savgol_polyorder=FOOT_PARAMS["curvature"]["profile_savgol_polyorder"],
+            threshold_frac=FOOT_PARAMS["threshold"]["frac"],
+            watershed_min_peak_distance=FOOT_PARAMS["watershed"]["min_peak_distance"],
+            watershed_peak_threshold_rel=FOOT_PARAMS["watershed"]["peak_threshold_rel"],
+            prominence_min_prominence_frac=FOOT_PARAMS["prominence"]["min_prominence_frac"],
+            curvature_field_sigma=FOOT_PARAMS["curvature_field"]["sigma"],
+            spill_point_n_levels=FOOT_PARAMS["spill_point"]["n_levels"],
+            spill_point_detrend=FOOT_PARAMS["spill_point"]["detrend"],
+            log_blob_sigma_min=FOOT_PARAMS["log_blob"]["sigma_min"],
+            log_blob_sigma_max=FOOT_PARAMS["log_blob"]["sigma_max"],
+            log_blob_n_sigma=FOOT_PARAMS["log_blob"]["n_sigma"],
+            iso_fit_iso_level=FOOT_PARAMS["iso_fit"]["iso_level"],
+            iso_fit_model=FOOT_PARAMS["iso_fit"]["model"],
+        )
 
     print(f"Done. Figures in: {out_dir}")
     if _INTERACTIVE:
