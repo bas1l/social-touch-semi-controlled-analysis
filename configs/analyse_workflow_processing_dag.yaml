@@ -182,20 +182,24 @@ tasks:
   # Output: 4_analysed/population_response_fields/<session_id>/
   spatial_extract_boundaries:
     category: spatial_sensitivity
-    enabled: false
+    enabled: true
     options:
-      force_processing: true
+      force_processing: false
       neuron_mode: iff
-      iff_metric: both
-      min_overlap_pct: 0
-      median_filter_size: 5
+      iff_metric: mean
+      min_overlap_pct: 25
+      median_filter_size:        # null = filter disabled; set a positive odd int to enable
       inflection_sigma: 5.0
       heatmap_space: linear
       cmap: inferno
       flip_u: true
       contour_color: red
       circular_crop_margin: 0.0
-      boundary_method: gradient
+      # one of: gradient | inflection | radial
+      boundary_method: radial
+      radial_gauss_sigma: 8.0
+      radial_hess_sigma: 5.0
+      radial_envelope_smooth_sigma: 1.5   # Gaussian smoothing (vertices) of the 2D-footprint envelope
     depends_on: [spatial_map_single_touch, spatial_precompute_slim_uv]
 
   # Aggregate inflection boundary metrics across sessions and render comparison visuals.
@@ -206,7 +210,7 @@ tasks:
     category: spatial_sensitivity
     enabled: true
     options:
-      force_processing: true
+      force_processing: false
       iff_metric: both
       heatmap_space: linear
       cmap: inferno
@@ -223,7 +227,7 @@ tasks:
     category: spatial_sensitivity
     enabled: true
     options:
-      force_processing: true
+      force_processing: false
       iff_metric: both
       heatmap_space: linear
       cmap: inferno
@@ -240,7 +244,7 @@ tasks:
     category: spatial_sensitivity
     enabled: true
     options:
-      force_processing: true
+      force_processing: false
       iff_metric: both
       heatmap_space: linear
       cmap: inferno
@@ -257,7 +261,7 @@ tasks:
     enabled: true
     options:
       force_processing: false
-      iff_metric: both
+      iff_metric: mean
     depends_on: [spatial_extract_boundaries]
 
   # Stage 2b (Feature Extraction): Per-session feature extraction. Each enabled feature extracts to its own folder.
