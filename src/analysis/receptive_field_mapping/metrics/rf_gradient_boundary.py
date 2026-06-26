@@ -89,14 +89,29 @@ def compute_gradient_magnitude(
 ) -> np.ndarray:
     """Gradient magnitude |nabla z| from a smoothed field.
 
-    NaN cells are filled with zero before computing np.gradient, then
-    re-masked to NaN in the output.
+    The fill uses ``np.isnan(smoothed)`` — NOT ``nan_mask`` (which marks
+    NaN cells in the original ``grid_z``) — before calling ``np.gradient``.
+    This distinction matters because the NaN-aware Gaussian normalisation in
+    ``compute_laplacian_arrays`` produces a ``smoothed`` field that extends
+    valid (non-NaN) values ~3σ pixels *beyond* ``grid_z``'s NaN boundary
+    (the "Gaussian halo").  If that halo were zeroed with ``nan_mask`` a
+    step-function discontinuity would appear exactly at the data edge,
+    creating a large artificial gradient spike there.  Every radial ray's
+    ``argmax(|∇z|)`` would land on that spike, making the contour trace the
+    data mask rather than the biological RF boundary.
+
+    Using ``np.isnan(smoothed)`` instead fills only the cells that are truly
+    NaN in the smoothed field, preserving the smooth Gaussian continuation at
+    the boundary and eliminating the spike.
+
+    ``nan_mask`` is still used for output re-masking (line below), which
+    correctly excludes the halo from the returned gradient array.
 
     Returns
     -------
     (R, C) gradient magnitude array, NaN where *nan_mask* is True.
     """
-    filled = np.where(nan_mask, 0.0, smoothed)
+    filled = np.where(np.isnan(smoothed), 0.0, smoothed)
     grad_u = np.gradient(filled, axis=0)
     grad_v = np.gradient(filled, axis=1)
     grad_mag = np.sqrt(grad_u ** 2 + grad_v ** 2)
