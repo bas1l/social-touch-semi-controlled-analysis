@@ -8,9 +8,12 @@ concave-up foot; that positive ring is the perimeter delineated here.
 
 The contour is extracted via radial profiling: ``n_angles`` rays are cast from
 the peak outward and, along each ray, the centre of the first encountered
-positive λmax plateau gives the foot radius.  The radius is then **snapped** to
-the last valid raw sample so no contour vertex sits on a NaN cell of the raw
-heatmap.
+positive λmax plateau gives the (un-snapped) foot radius.  That star-convex curve
+is then clipped to the visible heatmap footprint by the **2D footprint envelope**
+post-pass (``envelope_contour_to_footprint``): rasterise the contour, intersect
+with ``grid_z > 0``, keep the seed-connected component and re-trace its outer
+boundary.  The contour can therefore never bulge into non-painted cells, even
+where the footprint is concave or split into islands.
 
 This mirrors the structure of :mod:`rf_gradient_boundary`
 (dataclass / ``compute_*`` orchestrator / ``*_to_dict`` / optional snapshot
@@ -32,9 +35,16 @@ import pathlib
 from dataclasses import dataclass
 
 import numpy as np
-from scipy.ndimage import distance_transform_edt, map_coordinates
+from matplotlib.path import Path as MplPath
+from scipy.ndimage import (
+    distance_transform_edt,
+    gaussian_filter1d,
+    label,
+    map_coordinates,
+)
 from scipy.signal import find_peaks, savgol_filter
 from skimage.feature import hessian_matrix, hessian_matrix_eigvals
+from skimage.measure import find_contours
 
 from analysis.receptive_field_mapping.metrics.rf_inflection_boundary import (
     compute_contour_pca,
@@ -305,6 +315,120 @@ def _extract_radial_plateau_foot(
 
 
 # ---------------------------------------------------------------------------
+# 2D footprint envelope (ported from
+# scripts/sandbox/single_peak_contour/delineation.py)
+# ---------------------------------------------------------------------------
+
+
+def _smooth_closed_contour(contour_rc: np.ndarray, sigma: float | None) -> np.ndarray:
+    """Light circular Gaussian smoothing of a closed (row, col) contour.
+
+    Smooths the marching-squares staircase ("teeth") by Gaussian-filtering the row
+    and col coordinate sequences along the loop with ``mode="wrap"`` so the seam is
+    continuous. ``sigma`` is in units of vertices; ``None``/``<= 0`` is a no-op.
+    The duplicated closing vertex is dropped before filtering and re-appended after,
+    so it is not double-weighted at the seam.
+    """
+    if sigma is None or sigma <= 0 or len(contour_rc) < 4:
+        return contour_rc
+    pts = contour_rc
+    closed = bool(np.allclose(pts[0], pts[-1]))
+    if closed:
+        pts = pts[:-1]
+    rows = gaussian_filter1d(pts[:, 0], sigma, mode="wrap")
+    cols = gaussian_filter1d(pts[:, 1], sigma, mode="wrap")
+    out = np.column_stack([rows, cols])
+    if closed:
+        out = np.vstack([out, out[0]])
+    return out
+
+
+def _select_enclosing_contour(
+    binary: np.ndarray,
+    peak_rc: tuple[int, int],
+) -> np.ndarray:
+    """Return the largest marching-squares contour of *binary* that encloses the peak.
+
+    Raises ``ValueError`` if no contour encloses the peak (fail-fast).
+    """
+    contours = find_contours(binary.astype(float), 0.5)
+    peak_r, peak_c = peak_rc
+    enclosing: list[tuple[float, np.ndarray]] = []
+    for c in contours:
+        if len(c) < 4:
+            continue
+        poly = MplPath(np.column_stack([c[:, 0], c[:, 1]]))
+        if not poly.contains_point((peak_r, peak_c)):
+            continue
+        area = 0.5 * abs(
+            np.dot(c[:, 0], np.roll(c[:, 1], 1))
+            - np.dot(c[:, 1], np.roll(c[:, 0], 1))
+        )
+        enclosing.append((area, c))
+    if not enclosing:
+        raise ValueError("region-growth: no contour encloses the peak")
+    enclosing.sort(key=lambda t: t[0])
+    return enclosing[-1][1]
+
+
+def envelope_contour_to_footprint(
+    contour_rc: np.ndarray,
+    grid_z: np.ndarray,
+    peak_rc: tuple[int, int],
+    smooth_sigma: float | None = None,
+) -> dict:
+    """2D (XY-only) envelope: clip a contour to the visible heatmap footprint.
+
+    The radial foot is a star-convex, one-radius-per-angle curve anchored at the
+    seed, so its straight chords bulge into non-painted (grey) cells wherever the
+    footprint is concave or split into detached islands. This post-pass removes
+    that overshoot using only the 2D XY footprint, ignoring all field heights:
+
+      1. ``footprint = grid_z > 0`` — the exact mask the heatmap paints
+         (below-threshold and NaN both excluded, since ``NaN > 0`` is False).
+      2. Rasterise the closed ``contour_rc`` polygon into a filled (row, col)
+         mask and intersect it with the footprint.
+      3. Keep the connected component containing the seed.
+      4. Re-trace its outer boundary (largest contour enclosing the seed).
+      5. Optionally apply a very light circular Gaussian smoothing
+         (``smooth_sigma``, in vertices) to take the staircase ("teeth") off the
+         marching-squares trace.
+
+    Where the input contour spilled past the footprint the boundary now follows
+    the footprint edge; where it sat inside, it follows the input contour. The
+    marching-squares trace **redefines the point group** of the contour.
+
+    Returns ``{"contour_rc": (M, 2)}``.
+
+    Raises ``ValueError`` (fail-fast, no fallback ring) if the polygon does not
+    enclose the seed, or the polygon ∩ footprint is empty at the seed.
+    """
+    peak_r, peak_c = peak_rc
+    n_rows, n_cols = grid_z.shape
+
+    rr, cc = np.mgrid[0:n_rows, 0:n_cols]
+    pts = np.column_stack([rr.ravel(), cc.ravel()])
+    inside = MplPath(contour_rc).contains_points(pts).reshape(n_rows, n_cols)
+
+    footprint = grid_z > 0
+    region = inside & footprint
+
+    if not region[peak_r, peak_c]:
+        raise ValueError(
+            "envelope: seed is not inside the contour ∩ footprint intersection — "
+            "cannot envelope an empty region (check the radial contour and seed)"
+        )
+
+    labeled, _n = label(region)
+    seed_label = int(labeled[peak_r, peak_c])
+    region_mask = labeled == seed_label
+
+    contour_rc = _select_enclosing_contour(region_mask, peak_rc)
+    contour_rc = _smooth_closed_contour(contour_rc, smooth_sigma)
+    return {"contour_rc": contour_rc}
+
+
+# ---------------------------------------------------------------------------
 # Snapshot rendering
 # ---------------------------------------------------------------------------
 
@@ -438,6 +562,7 @@ def compute_radial_foot_boundary(
     plateau_size: int = 1,
     prominence: float | None = None,
     require_positive: bool = True,
+    envelope_smooth_sigma: float | None = 1.5,
     snapshot_dir: pathlib.Path | None = None,
     snapshot_label: str = "",
     contour_color: str = "green",
@@ -448,8 +573,10 @@ def compute_radial_foot_boundary(
     Gaussian-smoothed field) turns positive — the perimeter where the response
     dome meets its surround.  The contour is extracted by casting ``n_angles``
     rays from the peak outward and taking, per ray, the centre of the first
-    positive λmax plateau; each radius is then snapped to the last valid raw
-    sample so no vertex sits on a NaN cell.
+    positive λmax plateau (the un-snapped foot).  That star-convex curve is then
+    clipped to the visible heatmap footprint by the 2D footprint envelope
+    (``envelope_contour_to_footprint``), so no vertex bulges into a non-painted
+    (``grid_z <= 0`` or NaN) cell, even where the footprint is concave or split.
 
     Parameters
     ----------
@@ -471,6 +598,9 @@ def compute_radial_foot_boundary(
         Optional prominence passed to ``scipy.signal.find_peaks``.
     require_positive:
         Require the selected λmax plateau peak to be > 0 (the concave-up foot).
+    envelope_smooth_sigma:
+        Circular Gaussian smoothing (in vertices) applied to the 2D-footprint
+        envelope contour; ``None``/``<= 0`` to skip.
     snapshot_dir:
         Directory for diagnostic PNGs; ``None`` to skip.
     snapshot_label:
@@ -517,7 +647,16 @@ def compute_radial_foot_boundary(
         logger.warning("radial_foot: extractor raised — %s", exc)
         return None
 
-    contour_rc = res["contour_rc"]
+    try:
+        env = envelope_contour_to_footprint(
+            res["contour_unsnapped_rc"], grid_z, peak_rc,
+            smooth_sigma=envelope_smooth_sigma,
+        )
+    except ValueError as exc:
+        logger.warning("radial_foot: envelope raised — %s", exc)
+        return None
+
+    contour_rc = env["contour_rc"]
     contour_uv = contour_pixels_to_uv(contour_rc, grid_u, grid_v)
 
     area_uv = compute_polygon_area(contour_uv)

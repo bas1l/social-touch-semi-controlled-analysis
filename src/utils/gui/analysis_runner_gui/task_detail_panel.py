@@ -36,6 +36,10 @@ from utils.pipeline.dag_config_model import DagConfigModel
 
 _COMPLEX_FG = QColor("#336699")
 
+# Default size used when the median filter is toggled on from a disabled (null) state.
+# Must be a positive odd integer (renderer requirement).
+_MEDIAN_FILTER_DEFAULT = 3
+
 # Full universe of items for checklist options keyed by option name.
 # Without this, unchecking an item removes it from the YAML and it vanishes on restart.
 _CHECKLIST_UNIVERSES: dict[str, list[str]] = {
@@ -129,7 +133,7 @@ _OPTION_ENUMS: dict[str, list[tuple[str, object]]] = {
     "boundary_method": [
         ("Gradient (default)", "gradient"),
         ("Inflection", "inflection"),
-        ("Radial foot (snapped)", "radial"),
+        ("Radial (2D footprint envelope)", "radial"),
     ],
 }
 
@@ -138,6 +142,7 @@ _OPTION_VISIBILITY: dict[str, dict[str, set]] = {
         "inflection_sigma": {"inflection"},
         "radial_gauss_sigma": {"radial"},
         "radial_hess_sigma": {"radial"},
+        "radial_envelope_smooth_sigma": {"radial"},
     },
     "neuron_mode":     {"iff_metric": {"iff"}},
 }
@@ -162,6 +167,7 @@ _OPTION_GROUP_OF: dict[str, str] = {
     "boundary_method": "method",
     "radial_gauss_sigma": "method",
     "radial_hess_sigma": "method",
+    "radial_envelope_smooth_sigma": "method",
     "projection_method": "method",
     # visualization
     "heatmap_space": "visual",
@@ -408,6 +414,8 @@ class TaskDetailPanel(QWidget):
 
     def _build_option_section(self, key: str, val: Any) -> QWidget:
         """Dispatch *key*/*val* to the matching per-option section builder."""
+        if key == "median_filter_size":
+            return self._make_median_filter_section(key, val)
         if key in _OPTION_ENUMS:
             return self._make_enum_section(key, val)
         if key == "camera_angle_mode" and isinstance(val, dict) and "auto" in val:
@@ -488,6 +496,42 @@ class TaskDetailPanel(QWidget):
         row_layout.addWidget(combo)
         row_layout.addStretch()
         layout.addWidget(row)
+        return box
+
+    def _make_median_filter_section(self, key: str, val: Any) -> QWidget:
+        """Checkbox-gated numeric field for the median filter size.
+
+        Unchecking the box writes ``null`` (filter disabled); the size field is
+        greyed out. Checking it restores a positive-odd-integer size. ``val`` is
+        treated as enabled only when it is a positive integer.
+        """
+        box = QGroupBox(_option_header(key))
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(6, 4, 6, 4)
+
+        enabled = isinstance(val, int) and not isinstance(val, bool) and val >= 1
+
+        row_widget = QWidget()
+        row_layout = QHBoxLayout(row_widget)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(6)
+
+        cb = QCheckBox("Enabled")
+        cb.setChecked(enabled)
+
+        edit = QLineEdit(str(val) if enabled else "")
+        edit.setFixedWidth(120)
+        edit.setEnabled(enabled)
+        edit.setPlaceholderText("odd ≥ 1")
+        edit.setToolTip("Median filter window size — must be a positive odd integer.")
+
+        cb.stateChanged.connect(self._make_median_filter_toggle_handler(key, cb, edit))
+        edit.editingFinished.connect(self._make_median_filter_edit_handler(key, cb, edit))
+
+        row_layout.addWidget(cb)
+        row_layout.addWidget(edit)
+        row_layout.addStretch()
+        layout.addWidget(row_widget)
         return box
 
     def _make_scalar_section(self, key: str, val: Any) -> QWidget:
@@ -1063,6 +1107,50 @@ class TaskDetailPanel(QWidget):
             self._model.set_task_option(self._task_name, key, new_val)
             self.task_changed.emit()
 
+        return _handler
+
+    @staticmethod
+    def _parse_median_filter_size(text: Any) -> int | None:
+        """Return a positive odd int parsed from *text*, or None if invalid."""
+        try:
+            size = int(text)
+        except (ValueError, TypeError):
+            return None
+        if size < 1 or size % 2 == 0:
+            return None
+        return size
+
+    def _make_median_filter_toggle_handler(self, key: str, cb: QCheckBox, edit: QLineEdit):
+        def _handler(_state: int) -> None:
+            if self._model is None or self._task_name is None:
+                return
+            if cb.isChecked():
+                size = self._parse_median_filter_size(edit.text())
+                if size is None:
+                    size = _MEDIAN_FILTER_DEFAULT
+                edit.setText(str(size))
+                edit.setEnabled(True)
+                self._model.set_task_option(self._task_name, key, size)
+            else:
+                edit.setEnabled(False)
+                self._model.set_task_option(self._task_name, key, None)
+            self.task_changed.emit()
+        return _handler
+
+    def _make_median_filter_edit_handler(self, key: str, cb: QCheckBox, edit: QLineEdit):
+        def _handler() -> None:
+            if self._model is None or self._task_name is None:
+                return
+            if not cb.isChecked():
+                return
+            size = self._parse_median_filter_size(edit.text())
+            if size is None:
+                current = self._model.get_task_option(self._task_name, key)
+                revert = current if self._parse_median_filter_size(current) is not None else _MEDIAN_FILTER_DEFAULT
+                edit.setText(str(revert))
+                return
+            self._model.set_task_option(self._task_name, key, size)
+            self.task_changed.emit()
         return _handler
 
     def _make_complex_click_handler(self, key: str, lbl: QLabel):

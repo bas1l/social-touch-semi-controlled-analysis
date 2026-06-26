@@ -113,6 +113,7 @@ def run_population_response_field_extraction(
     boundary_method: str = "gradient",
     radial_gauss_sigma: float = 8.0,
     radial_hess_sigma: float = 5.0,
+    radial_envelope_smooth_sigma: float = 1.5,
 ) -> None:
     """Render per-session 2D population RF heatmap PNGs projected via SLIM UV.
 
@@ -447,6 +448,7 @@ def run_population_response_field_extraction(
                 radial_boundary = compute_radial_foot_boundary(
                     grid_u, grid_v, grid_z,
                     gauss_sigma=radial_gauss_sigma, hess_sigma=radial_hess_sigma,
+                    envelope_smooth_sigma=radial_envelope_smooth_sigma,
                     snapshot_dir=inspection_dir, snapshot_label=gtype,
                     contour_color=contour_color,
                 )
@@ -606,6 +608,7 @@ def run_population_response_field_extraction(
                         inflection_boundaries[gtype] = compute_radial_foot_boundary(
                             grid_u_g, grid_v_g, grid_z_g,
                             gauss_sigma=radial_gauss_sigma, hess_sigma=radial_hess_sigma,
+                            envelope_smooth_sigma=radial_envelope_smooth_sigma,
                             snapshot_dir=inspection_dir,
                             snapshot_label=f"{sd.session_id}_{gtype}_composite",
                             contour_color=contour_color,

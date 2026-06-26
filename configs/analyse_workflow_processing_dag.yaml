@@ -186,9 +186,9 @@ tasks:
     options:
       force_processing: false
       neuron_mode: iff
-      iff_metric: both
-      min_overlap_pct: 0
-      median_filter_size: 5
+      iff_metric: mean
+      min_overlap_pct: 25
+      median_filter_size:        # null = filter disabled; set a positive odd int to enable
       inflection_sigma: 5.0
       heatmap_space: linear
       cmap: inferno
@@ -196,9 +196,10 @@ tasks:
       contour_color: red
       circular_crop_margin: 0.0
       # one of: gradient | inflection | radial
-      boundary_method: gradient
+      boundary_method: radial
       radial_gauss_sigma: 8.0
       radial_hess_sigma: 5.0
+      radial_envelope_smooth_sigma: 1.5   # Gaussian smoothing (vertices) of the 2D-footprint envelope
     depends_on: [spatial_map_single_touch, spatial_precompute_slim_uv]
 
   # Aggregate inflection boundary metrics across sessions and render comparison visuals.
@@ -207,9 +208,9 @@ tasks:
   # session-x-gesture heatmap PNGs under 4_analysed/session_rf_boundary_comparison/
   spatial_compare_boundaries:
     category: spatial_sensitivity
-    enabled: false
+    enabled: true
     options:
-      force_processing: true
+      force_processing: false
       iff_metric: both
       heatmap_space: linear
       cmap: inferno
@@ -224,9 +225,9 @@ tasks:
   # and centroid shift decomposition figures. Output: 4_analysed/spatial_compare_proximal_distal/
   spatial_compare_proximal_distal:
     category: spatial_sensitivity
-    enabled: false
+    enabled: true
     options:
-      force_processing: true
+      force_processing: false
       iff_metric: both
       heatmap_space: linear
       cmap: inferno
@@ -241,9 +242,9 @@ tasks:
   # and shift decomposition figures. Output: 4_analysed/spatial_compare_tap_stroke/
   spatial_compare_tap_stroke:
     category: spatial_sensitivity
-    enabled: false
+    enabled: true
     options:
-      force_processing: true
+      force_processing: false
       iff_metric: both
       heatmap_space: linear
       cmap: inferno
@@ -257,10 +258,10 @@ tasks:
   # Output: 4_analysed/spatial_extract_rf_profiles/iff_<iff_metric>/<session_id>/
   spatial_extract_rf_profiles:
     category: spatial_sensitivity
-    enabled: false
+    enabled: true
     options:
       force_processing: false
-      iff_metric: both
+      iff_metric: mean
     depends_on: [spatial_extract_boundaries]
 
   # Stage 2b (Feature Extraction): Per-session feature extraction. Each enabled feature extracts to its own folder.

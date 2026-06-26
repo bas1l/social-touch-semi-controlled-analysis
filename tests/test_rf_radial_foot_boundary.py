@@ -282,6 +282,46 @@ class TestNoneCases:
 
 
 # ---------------------------------------------------------------------------
+# Test: 2D footprint envelope — contour never bulges past the painted footprint
+# ---------------------------------------------------------------------------
+
+
+class TestFootprintEnvelope:
+    """The enveloped contour encloses only footprint (``grid_z > 0``) cells."""
+
+    @pytest.fixture(scope="class")
+    def grid(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        return _make_gaussian_grid(size=120, sigma_u=12.0, sigma_v=12.0)
+
+    def test_interior_within_footprint(self, grid) -> None:
+        from matplotlib.path import Path as MplPath
+
+        grid_u, grid_v, grid_z = grid
+        boundary = compute_radial_foot_boundary(grid_u, grid_v, grid_z)
+        assert boundary is not None
+
+        pts = np.column_stack([grid_u.ravel(), grid_v.ravel()])
+        inside = MplPath(boundary.contour_uv).contains_points(pts).reshape(grid_z.shape)
+        footprint = grid_z > 0
+        leak = int(np.count_nonzero(inside & ~footprint))
+        assert leak <= 2, (
+            f"{leak} cells inside the enveloped contour fall outside the "
+            "painted footprint (grid_z > 0)"
+        )
+
+    def test_smooth_sigma_none_is_valid(self, grid) -> None:
+        grid_u, grid_v, grid_z = grid
+        boundary = compute_radial_foot_boundary(
+            grid_u, grid_v, grid_z, envelope_smooth_sigma=None
+        )
+        assert boundary is not None
+        assert boundary.area_uv > 0.0
+        assert _point_in_polygon(boundary.peak_uv, boundary.contour_uv), (
+            "unsmoothed enveloped contour does not enclose the peak"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Test: serialization
 # ---------------------------------------------------------------------------
 

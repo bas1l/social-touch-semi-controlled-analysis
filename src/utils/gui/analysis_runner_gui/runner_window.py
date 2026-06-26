@@ -64,6 +64,7 @@ class AnalysisRunnerGUI(QMainWindow):
         self._build_toolbar()
         self._build_ui()
         self.setStatusBar(QStatusBar())
+        self._select_default_workflow()
 
         self._server_manager = PrefectServerManager()
         self._server_manager.start()
@@ -197,6 +198,18 @@ class AnalysisRunnerGUI(QMainWindow):
         self._update_title()
         self._update_run_bar()
         self.statusBar().showMessage(f"Loaded {entry.dag_config.name}", 3000)
+
+    def _select_default_workflow(self) -> None:
+        """Pre-select and load the analysis processing workflow on launch."""
+        default = next(
+            (e for e in self._entries
+             if e.script.name == "analysis_workflow_processing.py"),
+            None,
+        )
+        if default is None:
+            return
+        self._workflow_selector.select_entry(default)
+        self._load_workflow(default)
 
     # ------------------------------------------------------------------
     # Dirty-state management
