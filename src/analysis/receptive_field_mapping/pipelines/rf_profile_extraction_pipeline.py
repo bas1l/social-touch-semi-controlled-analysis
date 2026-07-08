@@ -82,13 +82,12 @@ def _extract_profiles_for_gesture(
     grid_v = npz[f'grid_v_{gtype}']
     grid_z = npz[f'grid_z_{gtype}']
 
-    inflection_contour_key = f'inflection_contour_uv_{gtype}'
-    if inflection_contour_key in npz:
-        contour_uv = npz[inflection_contour_key]
-    elif f'boundary_contour_uv_{gtype}' in npz:
-        contour_uv = npz[f'boundary_contour_uv_{gtype}']
-    else:
-        contour_uv = None
+    # Use the active boundary contour selected by the DAG's `boundary_method`
+    # (stored under the `boundary_` prefix), matching the renderer below. `None`
+    # is absence handling for a gesture whose boundary computation returned None,
+    # not a fallback to a different method.
+    boundary_contour_key = f'boundary_contour_uv_{gtype}'
+    contour_uv = npz[boundary_contour_key] if boundary_contour_key in npz else None
 
     n_cols = grid_v.shape[1]
     rows: list[dict] = []
@@ -142,13 +141,53 @@ def _extract_profiles_for_gesture(
     return pd.DataFrame(rows)
 
 
-_METHODOLOGY_MD = """\
+_BOUNDARY_METHOD_DESCRIPTIONS = {
+    "radial": """\
+The boundary is the **radial "foot of mountain"** contour, computed on the
+**Hessian largest-eigenvalue (λmax)** field of the Gaussian-smoothed `grid_z`.
+Rays are cast outward from the response peak, and the centre of the first
+positive-λmax plateau on each ray marks the foot where the response dome meets
+its flat surround. The star-convex curve is then clipped to the visible heatmap
+footprint (2D-footprint envelope). The contour therefore represents the
+**concave-up ring** at the base of the response dome.""",
+    "gradient": """\
+The boundary is the **gradient ridge** contour, computed on the gradient
+magnitude |∇z| of the Gaussian-smoothed `grid_z`. Rays are cast outward from
+the response peak, and the distance of maximum gradient magnitude on each ray
+marks the ridge. The contour therefore represents the **ring of steepest
+slope** on the flanks of the response dome.""",
+    "inflection": """\
+The inflection boundary is computed from a **Gaussian-smoothed** version of the
+same `grid_z` (default sigma = 4 grid cells). The algorithm:
+
+1. NaN-aware Gaussian smoothing normalised by a weight mask.
+2. Nearest-neighbour extrapolation of remaining NaN cells.
+3. Laplacian computation (second spatial derivative in both U and V).
+4. Flood-fill of the connected negative-Laplacian region around the peak.
+5. Marching-squares contour extraction at the basin boundary.
+
+The contour therefore represents the **Laplacian zero-crossing** of the
+smoothed field: the ring where the surface transitions from concave (near
+the peak) to convex (on the flanks).""",
+}
+
+
+def _methodology_md(boundary_method: str) -> str:
+    """Build the methodology markdown for the active boundary method."""
+    if boundary_method not in _BOUNDARY_METHOD_DESCRIPTIONS:
+        raise ValueError(
+            f"_methodology_md: unknown boundary_method {boundary_method!r}. "
+            f"Expected one of {sorted(_BOUNDARY_METHOD_DESCRIPTIONS)}."
+        )
+    boundary_section = _BOUNDARY_METHOD_DESCRIPTIONS[boundary_method]
+    return f"""\
 # RF Profile Extraction: Methodology
 
 ## What this pipeline produces
 
 1D cross-section profiles extracted from 2D population RF heatmaps, with
-boundary crossing annotations derived from the inflection contour.
+boundary crossing annotations derived from the active boundary contour
+(`boundary_method = {boundary_method!r}`).
 
 ## Distinction between profile data and boundary computation
 
@@ -164,31 +203,16 @@ to these values.
 
 ### Boundary contour (the red crossing markers)
 
-The inflection boundary is computed from a **Gaussian-smoothed** version of
-the same `grid_z` (default sigma = 4 grid cells). The algorithm:
-
-1. NaN-aware Gaussian smoothing normalised by a weight mask.
-2. Nearest-neighbour extrapolation of remaining NaN cells.
-3. Laplacian computation (second spatial derivative in both U and V).
-4. Flood-fill of the connected negative-Laplacian region around the peak.
-5. Marching-squares contour extraction at the basin boundary.
-
-The contour therefore represents the **Laplacian zero-crossing** of the
-smoothed field: the ring where the surface transitions from concave (near
-the peak) to convex (on the flanks).
+{boundary_section}
 
 ## Consequence for profile interpretation
 
 Because the boundary was derived from the smoothed field while the profile
 plots the raw field, the crossing markers may not fall exactly at the
-inflection points of the displayed 1D curve. Two factors contribute:
-
-- **Smoothing mismatch**: the Gaussian pre-smoothing shifts the effective
-  inflection location relative to the raw data.
-- **2D vs 1D Laplacian**: the 2D Laplacian
-  (d^2z/du^2 + d^2z/dv^2) includes the off-axis curvature term, so
-  the zero-crossing of the 2D Laplacian along a 1D slice does not generally
-  coincide with the zero of the 1D second derivative (d^2z/du^2 alone).
+corresponding feature of the displayed 1D curve. The Gaussian pre-smoothing
+shifts the effective boundary location relative to the raw data, and the 2D
+analysis (which includes off-axis curvature) does not generally coincide with
+a purely 1D analysis along a single slice.
 
 ## Current design decision
 
@@ -211,10 +235,10 @@ Each profile figure is saved in two formats:
 """
 
 
-def _write_methodology_md(output_dir: Path) -> None:
+def _write_methodology_md(output_dir: Path, boundary_method: str) -> None:
     """Write the methodology markdown file at the output directory root."""
     md_path = output_dir / 'rf_profile_extraction_methodology.md'
-    md_path.write_text(_METHODOLOGY_MD, encoding='utf-8')
+    md_path.write_text(_methodology_md(boundary_method), encoding='utf-8')
 
 
 def run_rf_profile_extraction(
@@ -233,7 +257,7 @@ def run_rf_profile_extraction(
         raise ValueError("[RF Profile Extraction] session_configs is empty.")
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    _write_methodology_md(output_dir)
+    methodology_written = False
 
     for csv_path, database_path in session_configs:
         csv_path = Path(csv_path)
@@ -262,6 +286,10 @@ def run_rf_profile_extraction(
 
         npz = np.load(npz_path, allow_pickle=True)
         gesture_types = list(npz['gesture_types'])
+
+        if not methodology_written:
+            _write_methodology_md(output_dir, str(npz['boundary_method']))
+            methodology_written = True
 
         session_output_dir.mkdir(parents=True, exist_ok=True)
         produced_csvs: list[str] = []
