@@ -42,8 +42,6 @@ import matplotlib.patheffects as pe
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
-from scipy.interpolate import RegularGridInterpolator
-from scipy.signal import find_peaks
 
 from _vendor.path_tools import get_project_data_root
 from analysis.receptive_field_mapping.metrics.rf_inflection_boundary import (
@@ -53,6 +51,13 @@ from analysis.receptive_field_mapping.metrics.rf_inflection_boundary import (
 from analysis.receptive_field_mapping.metrics.rf_radial_foot_boundary import (
     _compute_hessian_lmax,
     compute_radial_foot_boundary,
+)
+from analysis.receptive_field_mapping.metrics.rf_ray_sampling import (
+    first_positive_plateau_radius,
+    lmax_zero_crossing_radius,
+    ray_contour_crossing,
+    representative_ray_direction,
+    uv_field_interpolator,
 )
 
 SESSION = "2022-06-17_ST16-02"
@@ -332,54 +337,6 @@ def fig_result(grid_u, grid_v, grid_z, res):
 # bd_04 — one of the 360 rays: the 1-D λmax profile behind the 2-D contour
 # ---------------------------------------------------------------------------
 
-def _uv_interp(field, grid_u, grid_v):
-    """Linear interpolator of a (R, C) field over UV mm (axis0=U, axis1=V).
-
-    Mirrors ``_imshow_uv``'s convention. Axes are flipped to strictly ascending
-    if needed (``RegularGridInterpolator`` requires it); NaN outside the
-    footprint propagates as NaN.
-    """
-    u_axis = np.asarray(grid_u[:, 0], dtype=float)
-    v_axis = np.asarray(grid_v[0, :], dtype=float)
-    fld = np.asarray(field, dtype=float)
-    if u_axis[0] > u_axis[-1]:
-        u_axis = u_axis[::-1]
-        fld = fld[::-1, :]
-    if v_axis[0] > v_axis[-1]:
-        v_axis = v_axis[::-1]
-        fld = fld[:, ::-1]
-    return RegularGridInterpolator((u_axis, v_axis), fld,
-                                   bounds_error=False, fill_value=np.nan)
-
-
-def _ray_contour_crossing(peak_uv, direction, contour):
-    """Smallest positive radius where the ray peak+t·direction meets the contour.
-
-    Fail-fast: raises if the ray never crosses the closed contour (no fallback).
-    """
-    ox, oy = float(peak_uv[0]), float(peak_uv[1])
-    dx, dy = float(direction[0]), float(direction[1])
-    closed = np.vstack([contour, contour[:1]])
-    ts = []
-    for i in range(len(closed) - 1):
-        ax_, ay = float(closed[i, 0]), float(closed[i, 1])
-        bx, by = float(closed[i + 1, 0]), float(closed[i + 1, 1])
-        ex, ey = bx - ax_, by - ay
-        det = ex * dy - dx * ey
-        if abs(det) < 1e-12:
-            continue
-        t = (-(ax_ - ox) * ey + ex * (ay - oy)) / det
-        s = (dx * (ay - oy) - dy * (ax_ - ox)) / det
-        if t > 1e-9 and -1e-9 <= s <= 1 + 1e-9:
-            ts.append(t)
-    if not ts:
-        raise ValueError(
-            "generate_boundary_workflow_figures: chosen ray never crosses the "
-            "RF contour — cannot mark the foot location."
-        )
-    return min(ts)
-
-
 def fig_ray_section(grid_u, grid_v, grid_z, res):
     """One of the 360 rays: λmax heatmap + the λmax-vs-radius profile."""
     b = res["boundary"]
@@ -389,16 +346,13 @@ def fig_ray_section(grid_u, grid_v, grid_z, res):
 
     # A representative ray: toward the contour vertex farthest from the peak —
     # deterministic, and guaranteed to yield a long, clean foot crossing.
-    d_to_peak = np.hypot(contour[:, 0] - pu, contour[:, 1] - pv)
-    far = contour[int(np.argmax(d_to_peak))]
-    vec = np.array([far[0] - pu, far[1] - pv], dtype=float)
-    direction = vec / np.hypot(vec[0], vec[1])
+    direction, _far = representative_ray_direction((pu, pv), contour)
 
-    foot_r = _ray_contour_crossing((pu, pv), direction, contour)
+    foot_r = ray_contour_crossing((pu, pv), direction, contour)
 
     # Sample λmax and the IFF dome along the ray, in UV mm.
-    lmax_interp = _uv_interp(lmax, grid_u, grid_v)
-    iff_interp = _uv_interp(grid_z, grid_u, grid_v)
+    lmax_interp = uv_field_interpolator(lmax, grid_u, grid_v)
+    iff_interp = uv_field_interpolator(grid_z, grid_u, grid_v)
     r_max = foot_r * 1.7
     radii = np.linspace(0.0, r_max, 260)
     pts = np.column_stack([pu + radii * direction[0], pv + radii * direction[1]])
@@ -406,16 +360,7 @@ def fig_ray_section(grid_u, grid_v, grid_z, res):
     iff_prof = iff_interp(pts)
 
     # The detector's actual pick: centre of the first plateau that peaks above 0.
-    finite = np.isfinite(lmax_prof)
-    pk, props = find_peaks(np.where(finite, lmax_prof, -np.inf), plateau_size=1)
-    left = np.asarray(props.get("left_edges", pk))
-    right = np.asarray(props.get("right_edges", pk))
-    centres = ((left + right) // 2).astype(int)
-    plateau_r = None
-    for k, c in enumerate(centres):
-        if lmax_prof[pk[k]] > 0.0:
-            plateau_r = float(radii[c])
-            break
+    plateau_r = first_positive_plateau_radius(radii, lmax_prof)
 
     BLUE = "#4A6FA5"
     fig, (axL, axR) = plt.subplots(1, 2, figsize=(15.0, 6.0),
@@ -451,13 +396,7 @@ def fig_ray_section(grid_u, grid_v, grid_z, res):
                      color=RADIAL_C, alpha=0.25, interpolate=True,
                      label="λ>0 concave-up flank")
     # the λmax=0 inflection the detector's pick deliberately walks past
-    _zc = None
-    for _i in range(1, len(lmax_prof)):
-        if (np.isfinite(lmax_prof[_i - 1]) and np.isfinite(lmax_prof[_i])
-                and lmax_prof[_i - 1] <= 0 < lmax_prof[_i]):
-            _t = (0.0 - lmax_prof[_i - 1]) / (lmax_prof[_i] - lmax_prof[_i - 1])
-            _zc = float(radii[_i - 1] + _t * (radii[_i] - radii[_i - 1]))
-            break
+    _zc = lmax_zero_crossing_radius(radii, lmax_prof)
     if _zc is not None:
         axR.axvline(_zc, color="#888", linewidth=1.3, linestyle="--",
                     label="λ=0 inflection (pick walks past)")

@@ -11,9 +11,11 @@ from analysis.pipeline.output_dirs import SPATIAL_EXTRACT_BOUNDARIES
 from analysis.pipeline.shared_constants import IFF_METRICS, session_id_from_path
 from analysis.receptive_field_mapping.rendering.rf_profile_renderer import (
     render_center_axis_profile,
+    render_combined_profile,
     render_gradient_profile,
     render_laplacian_context,
     render_laplacian_profile,
+    render_raycast_section,
 )
 
 logger = logging.getLogger(__name__)
@@ -216,16 +218,34 @@ a purely 1D analysis along a single slice.
 
 ## Current design decision
 
-The profiles intentionally display the **raw interpolated** IFF values
-rather than the smoothed ones. This preserves the original signal detail for
+The single-signal profiles intentionally display the **raw interpolated** IFF
+values rather than the smoothed ones, preserving the original signal detail for
 visual inspection. The boundary crossings are overlaid as-is from the
 smoothed-field contour, providing a spatial reference for the RF extent
 without implying that the crossing falls at a specific feature of the raw
 curve.
 
-A future refinement could overlay both representations (raw as a faint
-background, smoothed as the primary line) so that the crossings visually
-align with the displayed curve.
+## Combined overlay profile
+
+For each centre and axis, a `*_rf_profile_combined_*` figure overlays all three
+representations on one plot: the raw IFF (faint dashed) and the Gaussian-smoothed
+IFF (bold) share the primary axis, while the Hessian principal curvature λmax is
+drawn on a twin axis with blue (concave dome, λ<0) / red (convex flank, λ>0)
+sign-fill. The values of interest are marked directly: boundary crossings (●),
+the λmax=0 inflections (faint vertical ticks), and the RF centre (× on a dashed
+vertical). This overlay lets the crossings be read against both the raw and
+smoothed curves simultaneously.
+
+## Raycast section
+
+For each centre, a `*_rf_raycast_*` figure reproduces the interactive
+`docs/spatial_extract_boundaries/hessian_explainer.html` view as a static
+2-panel image: the λmax field with a representative ray cast from the centre
+toward the farthest boundary vertex, beside the along-ray profile (λmax with
+sign-fill and the raw/smoothed IFF dome on a twin axis). It marks the λmax=0
+inflection and the detector's "foot of mountain" pick — the first
+positive-λmax plateau. The combined-overlay and raycast figures require the
+radial Hessian field (`boundary_method = 'radial'`) and are skipped otherwise.
 
 ## Output formats
 
@@ -353,6 +373,14 @@ def run_rf_profile_extraction(
             if has_gradient:
                 gradient_mag = npz[gradient_mag_key]
 
+            # Radial Hessian lambda-max field — written only when
+            # boundary_method == 'radial'. Gates the combined-overlay and
+            # raycast figures (feature availability, not a stale-data fallback).
+            radial_lmax_key = f'radial_lmax_{gtype}'
+            has_hessian = radial_lmax_key in npz
+            if has_hessian:
+                radial_lmax = npz[radial_lmax_key]
+
             if has_laplacian:
                 laplacian_2d_dir = session_output_dir / 'laplacian_2d'
                 laplacian_2d_dir.mkdir(parents=True, exist_ok=True)
@@ -436,6 +464,22 @@ def run_rf_profile_extraction(
                     produced_pngs.append(str(u_grad_png))
                     produced_svgs.append(str(u_grad_png.with_suffix('.svg')))
 
+                if has_hessian and has_laplacian:
+                    u_combined_png = session_output_dir / f'{session_id}_rf_profile_combined_u_{center_type}_{gtype}.png'
+                    render_combined_profile(
+                        coords=u_coords,
+                        iff_raw=grid_z[:, j],
+                        iff_smoothed=smoothed[:, j],
+                        lmax_values=radial_lmax[:, j],
+                        boundary_crossings=crossings_u,
+                        peak_coord=float(center[0]),
+                        output_path=u_combined_png,
+                        title=f"{session_id} | {gtype} | raw+smoothed+λmax vs U at {center_type} (V={v_coords[j]:.1f} mm)",
+                        xlabel="U (mm)",
+                    )
+                    produced_pngs.append(str(u_combined_png))
+                    produced_svgs.append(str(u_combined_png.with_suffix('.svg')))
+
                 # V-profile: IFF vs V at constant U = center_u
                 i = int(np.argmin(np.abs(u_coords - center[0])))
                 iff_v = grid_z[i, :]
@@ -510,6 +554,36 @@ def run_rf_profile_extraction(
                     )
                     produced_pngs.append(str(v_grad_png))
                     produced_svgs.append(str(v_grad_png.with_suffix('.svg')))
+
+                if has_hessian and has_laplacian:
+                    v_combined_png = session_output_dir / f'{session_id}_rf_profile_combined_v_{center_type}_{gtype}.png'
+                    render_combined_profile(
+                        coords=v_coords,
+                        iff_raw=grid_z[i, :],
+                        iff_smoothed=smoothed[i, :],
+                        lmax_values=radial_lmax[i, :],
+                        boundary_crossings=crossings_v,
+                        peak_coord=float(center[1]),
+                        output_path=v_combined_png,
+                        title=f"{session_id} | {gtype} | raw+smoothed+λmax vs V at {center_type} (U={u_coords[i]:.1f} mm)",
+                        xlabel="V (mm)",
+                    )
+                    produced_pngs.append(str(v_combined_png))
+                    produced_svgs.append(str(v_combined_png.with_suffix('.svg')))
+
+                # Raycast section (HTML-style): one representative ray from this
+                # centre. Requires the radial Hessian field and a boundary contour.
+                if has_hessian and has_laplacian and contour_uv is not None and len(contour_uv) > 0:
+                    raycast_png = session_output_dir / f'{session_id}_rf_raycast_{center_type}_{gtype}.png'
+                    render_raycast_section(
+                        grid_u=grid_u, grid_v=grid_v,
+                        lmax=radial_lmax, grid_z=grid_z, smoothed=smoothed,
+                        contour_uv=contour_uv, peak_uv=center,
+                        output_path=raycast_png,
+                        title=f"{session_id} | {gtype} | raycast at {center_type} — Hessian λmax + foot pick",
+                    )
+                    produced_pngs.append(str(raycast_png))
+                    produced_svgs.append(str(raycast_png.with_suffix('.svg')))
 
         sentinel_data = {
             'session_id': session_id,
