@@ -1,0 +1,1667 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The foot of the mountain — how curvature finds an RF boundary</title>
+<style>
+/* ---------- Tokens ---------------------------------------------------- */
+:root{
+  --bg:#eef1f5; --surface:#ffffff; --surface-2:#e7ecf1; --surface-3:#dde4ec;
+  --ink:#182029; --ink-soft:#485666; --ink-faint:#7c8b9c; --line:#d3dbe4;
+  --accent:#b5741f; --accent-ink:#8a5715; --accent-soft:#f0e2cd;
+  /* curvature field — blue = concave-down (λ<0), red = concave-up (λ>0) */
+  --field-neg:#1d5fa6; --field-mid:#f3f4f6; --field-pos:#c23a2a;
+  --field-ring:#b5741f; --ray:#7a4bd0; --pick:#178a5a;
+  --raw-lo:#152233; --raw-mid:#c07f22; --raw-hi:#f7efdd;
+  --shadow:0 1px 2px rgba(20,30,45,.06),0 8px 26px rgba(20,30,45,.08);
+  --maxw:66ch;
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --bg:#10151b; --surface:#191f27; --surface-2:#212a34; --surface-3:#2b3542;
+    --ink:#e7ecf2; --ink-soft:#a9b6c4; --ink-faint:#6c7a89; --line:#2c3743;
+    --accent:#e0a24a; --accent-ink:#f0bd74; --accent-soft:#33291a;
+    --field-neg:#4f93d6; --field-mid:#1d242d; --field-pos:#e5675a;
+    --field-ring:#e0a24a; --ray:#a487f0; --pick:#3fbe86;
+  --raw-lo:#0b131c; --raw-mid:#e0a24a; --raw-hi:#f4e8d0;
+    --shadow:0 1px 2px rgba(0,0,0,.3),0 10px 30px rgba(0,0,0,.35);
+  }
+}
+:root[data-theme="light"]{
+  --bg:#eef1f5; --surface:#ffffff; --surface-2:#e7ecf1; --surface-3:#dde4ec;
+  --ink:#182029; --ink-soft:#485666; --ink-faint:#7c8b9c; --line:#d3dbe4;
+  --accent:#b5741f; --accent-ink:#8a5715; --accent-soft:#f0e2cd;
+  --field-neg:#1d5fa6; --field-mid:#f3f4f6; --field-pos:#c23a2a;
+  --field-ring:#b5741f; --ray:#7a4bd0; --pick:#178a5a;
+  --raw-lo:#152233; --raw-mid:#c07f22; --raw-hi:#f7efdd;
+  --shadow:0 1px 2px rgba(20,30,45,.06),0 8px 26px rgba(20,30,45,.08);
+}
+:root[data-theme="dark"]{
+  --bg:#10151b; --surface:#191f27; --surface-2:#212a34; --surface-3:#2b3542;
+  --ink:#e7ecf2; --ink-soft:#a9b6c4; --ink-faint:#6c7a89; --line:#2c3743;
+  --accent:#e0a24a; --accent-ink:#f0bd74; --accent-soft:#33291a;
+  --field-neg:#4f93d6; --field-mid:#1d242d; --field-pos:#e5675a;
+  --field-ring:#e0a24a; --ray:#a487f0; --pick:#3fbe86;
+  --raw-lo:#0b131c; --raw-mid:#e0a24a; --raw-hi:#f4e8d0;
+  --shadow:0 1px 2px rgba(0,0,0,.3),0 10px 30px rgba(0,0,0,.35);
+}
+
+/* ---------- Base ------------------------------------------------------ */
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+@media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+body{
+  margin:0; background:var(--bg); color:var(--ink);
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  font-size:17px; line-height:1.65; -webkit-font-smoothing:antialiased;
+}
+.serif{font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,"Times New Roman",serif;}
+.mono{font-family:ui-monospace,"SFMono-Regular","Cascadia Code","Consolas",Menlo,monospace;}
+
+h1,h2,h3{font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;
+  font-weight:600; line-height:1.15; text-wrap:balance; letter-spacing:-.01em;}
+p,li{max-width:var(--maxw)}
+a{color:var(--accent-ink); text-decoration-color:color-mix(in srgb,var(--accent) 45%,transparent); text-underline-offset:2px}
+a:hover{text-decoration-color:var(--accent)}
+:focus-visible{outline:2.5px solid var(--accent); outline-offset:3px; border-radius:3px}
+
+.wrap{max-width:1080px; margin:0 auto; padding:0 24px}
+section{padding:clamp(40px,7vw,84px) 0; border-top:1px solid var(--line)}
+section:first-of-type{border-top:none}
+.eyebrow{font-family:ui-monospace,"Cascadia Code",Consolas,monospace; font-size:12.5px;
+  letter-spacing:.16em; text-transform:uppercase; color:var(--accent-ink); margin:0 0 10px}
+h2{font-size:clamp(26px,3.6vw,38px); margin:0 0 8px}
+h3{font-size:20px; margin:34px 0 8px}
+.lede{font-size:19px; color:var(--ink-soft); max-width:60ch}
+.narrow{max-width:var(--maxw)}
+
+/* ---------- Hero ------------------------------------------------------ */
+.hero{position:relative; overflow:hidden; border-top:none;
+  padding:clamp(64px,10vw,120px) 0 clamp(48px,7vw,80px)}
+#topo{position:absolute; inset:0; width:100%; height:100%; z-index:0; opacity:.5}
+.hero .wrap{position:relative; z-index:1}
+.hero h1{font-size:clamp(34px,6vw,60px); margin:0 0 20px; max-width:16ch}
+.hero .kicker{color:var(--accent-ink); font-style:italic}
+.hero .lede{font-size:clamp(18px,2.4vw,22px); max-width:54ch}
+.tag{display:inline-flex; gap:8px; align-items:center; margin-bottom:26px;
+  font-family:ui-monospace,Consolas,monospace; font-size:12.5px; letter-spacing:.1em;
+  text-transform:uppercase; color:var(--ink-soft);
+  background:var(--surface); border:1px solid var(--line); border-radius:100px;
+  padding:6px 14px; box-shadow:var(--shadow)}
+.tag b{color:var(--accent-ink); font-weight:600}
+
+/* ---------- Cards / callouts ----------------------------------------- */
+.card{background:var(--surface); border:1px solid var(--line); border-radius:14px;
+  box-shadow:var(--shadow)}
+.note{background:var(--surface-2); border:1px solid var(--line);
+  border-left:3px solid var(--accent); border-radius:0 10px 10px 0;
+  padding:16px 20px; margin:24px 0; font-size:15.5px; color:var(--ink-soft)}
+.note b{color:var(--ink)}
+.legend{display:flex; flex-wrap:wrap; gap:6px 20px; align-items:center;
+  font-size:14px; color:var(--ink-soft); margin:14px 0}
+.legend span{display:inline-flex; align-items:center; gap:7px}
+.sw{width:26px; height:12px; border-radius:3px; display:inline-block}
+.sw.line{height:0; border-top:3px solid; width:22px}
+.sw.dash{height:0; border-top:2.5px dashed; width:22px}
+
+/* ---------- Formula --------------------------------------------------- */
+.formula{background:var(--surface); border:1px solid var(--line); border-radius:12px;
+  padding:22px 24px; margin:20px 0; box-shadow:var(--shadow); overflow-x:auto}
+.formula .row{font-family:ui-monospace,"Cascadia Code",Consolas,monospace;
+  font-size:18px; display:flex; align-items:center; gap:6px; white-space:nowrap}
+.rad{border-top:1.6px solid currentColor; padding:2px 4px 0}
+.frac{display:inline-flex; flex-direction:column; text-align:center; vertical-align:middle;
+  margin:0 3px; font-size:.92em}
+.frac span:first-child{border-bottom:1.4px solid currentColor; padding:0 4px}
+.frac span:last-child{padding:0 4px}
+sub{font-size:.72em}
+.hess-wrap{display:flex; align-items:center; gap:16px; flex-wrap:wrap; margin:8px 0 4px}
+.matrix{display:inline-grid; grid-template-columns:auto auto; gap:6px 22px;
+  padding:12px 18px; border-left:2.5px solid var(--ink); border-right:2.5px solid var(--ink);
+  border-radius:5px; font-family:ui-monospace,Consolas,monospace; font-size:17px}
+
+/* ---------- Sandbox --------------------------------------------------- */
+.lab{background:var(--surface); border:1px solid var(--line); border-radius:16px;
+  box-shadow:var(--shadow); padding:clamp(18px,3vw,30px); margin-top:8px}
+.lab-grid{display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:26px; align-items:start}
+.panel{min-width:0}
+.panel h4{margin:0 0 4px; font-size:14px; font-family:ui-monospace,Consolas,monospace;
+  letter-spacing:.04em; text-transform:uppercase; color:var(--ink-faint); font-weight:600}
+.panel h4 .n{display:inline-grid; place-items:center; width:20px; height:20px; border-radius:6px;
+  background:var(--accent-soft); color:var(--accent-ink); font-size:12px; margin-right:8px; vertical-align:-3px}
+.panel h4.step2{margin-top:16px}
+.connect{display:flex; align-items:center; gap:10px; margin:13px 2px 7px;
+  font-family:ui-monospace,Consolas,monospace; font-size:12px; letter-spacing:.05em;
+  text-transform:uppercase; color:var(--accent-ink); font-weight:600}
+.connect::before,.connect::after{content:""; height:1px; background:var(--line); flex:1}
+.grad-sw{width:50px; height:12px; border-radius:3px; display:inline-block;
+  background:linear-gradient(90deg,var(--raw-lo),var(--raw-mid),var(--raw-hi))}
+.panel .cap{font-size:13px; color:var(--ink-faint); margin:6px 0 0; max-width:none}
+canvas.viz{width:100%; height:auto; display:block; border-radius:10px;
+  background:var(--surface-2); border:1px solid var(--line); cursor:crosshair;
+  touch-action:none}
+.readout{display:flex; flex-wrap:wrap; gap:8px 16px; margin-top:12px;
+  font-family:ui-monospace,Consolas,monospace; font-size:13.5px; color:var(--ink-soft)}
+.readout b{color:var(--ink); font-weight:600}
+.readout .chip{background:var(--surface-2); border:1px solid var(--line);
+  border-radius:7px; padding:4px 10px}
+
+/* two side-by-side sub-stages (raw → smoothed) inside the sandbox left column */
+.substages{display:grid; grid-template-columns:1fr 40px 1fr; gap:8px; align-items:center; margin-bottom:4px}
+.substages .sub{min-width:0}
+.substages .sub h4{margin-bottom:6px}
+.substages .arrow{display:grid; place-items:center; text-align:center; line-height:1.15;
+  font-family:ui-monospace,Consolas,monospace; font-size:11px; color:var(--accent-ink); font-weight:600}
+.substages .arrow .g{font-size:20px}
+
+.controls{display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr));
+  gap:14px 26px; margin-top:26px; padding-top:22px; border-top:1px solid var(--line)}
+.ctrl label{display:flex; justify-content:space-between; align-items:baseline;
+  font-size:13.5px; font-weight:600; color:var(--ink-soft); margin-bottom:6px}
+.ctrl label .val{font-family:ui-monospace,Consolas,monospace; color:var(--accent-ink);
+  font-weight:600; font-variant-numeric:tabular-nums}
+.ctrl .hint{font-size:12px; color:var(--ink-faint); margin:5px 0 0}
+input[type=range]{width:100%; -webkit-appearance:none; appearance:none; height:5px;
+  border-radius:4px; background:var(--surface-3); outline-offset:4px}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none; appearance:none;
+  width:18px; height:18px; border-radius:50%; background:var(--accent);
+  border:2px solid var(--surface); box-shadow:0 1px 3px rgba(0,0,0,.3); cursor:pointer}
+input[type=range]::-moz-range-thumb{width:18px; height:18px; border-radius:50%;
+  background:var(--accent); border:2px solid var(--surface); cursor:pointer}
+.stagechip{display:inline-block; font-family:ui-monospace,Consolas,monospace; font-size:11px;
+  padding:2px 8px; border-radius:100px; background:var(--surface-2); border:1px solid var(--line);
+  color:var(--ink-faint); margin-left:8px; vertical-align:2px}
+.btnrow{display:flex; flex-wrap:wrap; gap:10px; margin-top:22px}
+button.preset{font:inherit; font-size:14px; font-weight:600; cursor:pointer;
+  background:var(--surface-2); color:var(--ink); border:1px solid var(--line);
+  border-radius:9px; padding:9px 15px; transition:border-color .15s,background .15s}
+button.preset:hover{border-color:var(--accent); background:var(--accent-soft)}
+button.preset.on{border-color:var(--accent); background:var(--accent-soft); color:var(--accent-ink)}
+.toggle{display:inline-flex; align-items:center; gap:9px; font-size:14px; font-weight:600;
+  color:var(--ink-soft); cursor:pointer; user-select:none}
+.toggle input{width:16px; height:16px; accent-color:var(--accent)}
+
+/* ---------- "read from the sandbox" ribbon --------------------------- */
+.fromlab{display:inline-flex; align-items:center; gap:9px; margin:0 0 6px;
+  font-family:ui-monospace,Consolas,monospace; font-size:12px; letter-spacing:.05em;
+  text-transform:uppercase; color:var(--accent-ink); font-weight:600;
+  background:var(--accent-soft); border:1px solid color-mix(in srgb,var(--accent) 35%,transparent);
+  border-radius:100px; padding:5px 13px}
+.fromlab::before{content:"▲"; font-size:10px}
+
+/* ---------- Scrubber (1-D) ------------------------------------------- */
+.scrub{display:grid; grid-template-columns:minmax(0,1.4fr) minmax(0,1fr); gap:24px;
+  align-items:center}
+.scrub .verdict{font-size:15.5px}
+.verdict .badge{display:inline-block; font-family:ui-monospace,Consolas,monospace;
+  font-weight:600; font-size:13px; padding:3px 10px; border-radius:7px; margin-bottom:8px}
+.badge.down{background:color-mix(in srgb,var(--field-neg) 18%,transparent); color:var(--field-neg)}
+.badge.up{background:color-mix(in srgb,var(--field-pos) 20%,transparent); color:var(--field-pos)}
+
+/* ---------- Comparison (single live dome) ---------------------------- */
+.cmp-grid{display:grid; grid-template-columns:minmax(0,1fr) minmax(0,300px); gap:24px; align-items:center}
+.cmp-grid .rd{font-family:ui-monospace,Consolas,monospace; font-size:14px; color:var(--ink-soft)}
+.cmp-grid .rd .k{display:flex; justify-content:space-between; gap:14px; padding:7px 0; border-bottom:1px solid var(--line)}
+.cmp-grid .rd .k b{color:var(--ink); font-variant-numeric:tabular-nums}
+.cmp-grid .rd .k.delta b{color:var(--accent-ink)}
+
+/* ---------- Figures --------------------------------------------------- */
+figure{margin:26px 0 0}
+figure img{width:100%; height:auto; display:block; border-radius:12px;
+  border:1px solid var(--line); box-shadow:var(--shadow); background:var(--surface)}
+figcaption{font-size:14px; color:var(--ink-faint); margin-top:10px; max-width:70ch}
+
+/* ---------- Steps ----------------------------------------------------- */
+ol.steps{list-style:none; counter-reset:s; padding:0; margin:22px 0; display:grid; gap:14px}
+ol.steps li{counter-increment:s; position:relative; padding:16px 18px 16px 60px;
+  background:var(--surface); border:1px solid var(--line); border-radius:12px; max-width:none}
+ol.steps li::before{content:counter(s); position:absolute; left:16px; top:15px;
+  width:30px; height:30px; display:grid; place-items:center; border-radius:8px;
+  background:var(--accent-soft); color:var(--accent-ink); font-weight:700;
+  font-family:ui-monospace,Consolas,monospace; font-size:14px}
+ol.steps li b{color:var(--ink)}
+.dim{color:var(--ink-faint)}
+
+/* ---------- Self-check ------------------------------------------------ */
+details.q{background:var(--surface); border:1px solid var(--line); border-radius:12px;
+  padding:2px 20px; margin:12px 0; max-width:var(--maxw)}
+details.q summary{cursor:pointer; font-weight:600; padding:14px 0; list-style:none}
+details.q summary::-webkit-details-marker{display:none}
+details.q summary::before{content:"›"; display:inline-block; margin-right:10px;
+  color:var(--accent); transition:transform .15s; font-weight:700}
+details.q[open] summary::before{transform:rotate(90deg)}
+details.q p{margin:0 0 16px; color:var(--ink-soft)}
+
+/* ---------- Footer / theme toggle ------------------------------------ */
+footer{padding:40px 0 70px; color:var(--ink-faint); font-size:14px; border-top:1px solid var(--line)}
+footer a{color:var(--ink-soft)}
+.themebtn{position:fixed; top:16px; right:16px; z-index:10; width:42px; height:42px;
+  border-radius:50%; border:1px solid var(--line); background:var(--surface);
+  color:var(--ink); cursor:pointer; box-shadow:var(--shadow); font-size:18px; line-height:1}
+.themebtn:hover{border-color:var(--accent)}
+
+/* ---------- Rigor asides ("the math") -------------------------------- */
+details.math{background:var(--surface-2); border:1px solid var(--line);
+  border-left:3px solid var(--ink-faint); border-radius:0 10px 10px 0;
+  padding:2px 20px; margin:18px 0; max-width:var(--maxw)}
+details.math > summary{cursor:pointer; font-weight:600; padding:14px 0; list-style:none;
+  font-size:15px; color:var(--ink)}
+details.math > summary::-webkit-details-marker{display:none}
+details.math > summary::before{content:"∑"; display:inline-block; width:1.4em;
+  color:var(--ink-faint); font-family:ui-monospace,Consolas,monospace}
+details.math[open] > summary{color:var(--accent-ink)}
+details.math .body{padding-bottom:16px; font-size:15px; color:var(--ink-soft)}
+details.math .body b{color:var(--ink)}
+
+/* ---------- Component mini-panels (g_rr / g_cc / g_rc) ---------------- */
+.mini-grid{display:grid; grid-template-columns:repeat(3,1fr); gap:16px; margin:8px 0}
+.mini{min-width:0; text-align:center}
+.mini canvas{width:100%; height:auto; border-radius:9px; border:1px solid var(--line);
+  background:var(--surface-2); display:block}
+.mini .lbl{font-family:ui-monospace,Consolas,monospace; font-size:13px; color:var(--ink-soft);
+  margin-top:8px}
+.mini .lbl b{color:var(--ink)}
+.plus{display:grid; place-items:center; font-size:22px; color:var(--ink-faint)}
+
+/* ---------- Eigenvector mini ----------------------------------------- */
+.eig{display:grid; grid-template-columns:minmax(0,320px) minmax(0,1fr); gap:22px; align-items:center; margin-top:6px}
+.eig canvas{width:100%; height:auto; border-radius:10px; border:1px solid var(--line);
+  background:var(--surface-2); cursor:crosshair; touch-action:none; display:block}
+.eig .rd{font-family:ui-monospace,Consolas,monospace; font-size:14px; color:var(--ink-soft)}
+.eig .rd .k{display:flex; justify-content:space-between; gap:14px; padding:5px 0; border-bottom:1px solid var(--line)}
+.eig .rd .k b{color:var(--ink); font-variant-numeric:tabular-nums}
+.arrow-key{display:flex; gap:18px; margin-top:12px; font-size:13.5px; color:var(--ink-soft)}
+.arrow-key i{display:inline-block; width:22px; border-top:3px solid; vertical-align:middle; margin-right:6px}
+
+/* ---------- 3-D viewer ------------------------------------------------ */
+.viewer{background:var(--surface); border:1px solid var(--line); border-radius:16px;
+  box-shadow:var(--shadow); padding:clamp(16px,2.6vw,26px); margin-top:8px}
+.stage{width:100%; aspect-ratio:16/10; border-radius:12px; background:
+  radial-gradient(120% 120% at 50% 15%, var(--surface-2), var(--surface-3));
+  border:1px solid var(--line); cursor:grab; touch-action:none; display:block}
+.stage:active{cursor:grabbing}
+.v-controls{display:flex; flex-wrap:wrap; gap:20px 28px; align-items:center;
+  margin-top:20px; padding-top:18px; border-top:1px solid var(--line)}
+.morph{flex:1 1 320px; min-width:240px}
+.morph label{display:flex; justify-content:space-between; font-size:13.5px; font-weight:600;
+  color:var(--ink-soft); margin-bottom:7px}
+.morph .ends{display:flex; justify-content:space-between; font-size:12px; color:var(--ink-faint);
+  font-family:ui-monospace,Consolas,monospace; margin-top:5px}
+
+@media (max-width:760px){
+  body{font-size:16px}
+  .lab-grid{grid-template-columns:1fr}
+  .substages{grid-template-columns:1fr; gap:4px}
+  .substages .arrow{transform:rotate(90deg); margin:2px 0}
+  .scrub{grid-template-columns:1fr}
+  .cmp-grid{grid-template-columns:1fr}
+  .eig{grid-template-columns:1fr}
+  .mini-grid{grid-template-columns:1fr}
+}
+</style>
+</head>
+<body>
+<button class="themebtn" id="themebtn" aria-label="Toggle light / dark theme" title="Toggle theme">◐</button>
+
+<!-- ===================== HERO ===================== -->
+<header class="hero">
+  <canvas id="topo" aria-hidden="true"></canvas>
+  <div class="wrap">
+    <span class="tag">Receptive-field mapping · <b>the Hessian step</b></span>
+    <h1 class="serif">Finding a boundary by asking <span class="kicker">where the hill stops falling and starts flattening</span></h1>
+    <p class="lede">A neuron's receptive field, drawn as a heatmap, looks like a hill. Its edge
+    isn't a fixed brightness — it's the <b>foot of the mountain</b>, the ring where the hillside's
+    upward-curving flank crests as it eases into the plain. This page is built around one
+    live sandbox: <b>build a dome once, and every diagram below is that same dome, dissected.</b></p>
+  </div>
+</header>
+
+<!-- ===================== 1 · THE IDEA ===================== -->
+<section id="idea">
+  <div class="wrap narrow">
+    <p class="eyebrow">01 — The intuition</p>
+    <h2 class="serif">A receptive field is a hill</h2>
+    <p>In this pipeline, a touch-responsive neuron is summarised as a <b>heatmap on the skin</b>:
+    each point on the forearm gets a firing value (mean IFF). Strongly-driven skin is bright,
+    unresponsive skin is dark. Plot the value as height and you get a <b>response dome</b> — tall
+    near the neuron's hotspot, sloping away in every direction.</p>
+
+    <p>Where does the receptive field <em>end</em>? The tempting answer is "pick a brightness and
+    cut there." But a fixed cutoff punishes some neurons and flatters others: a tall, sharp dome
+    and a low, broad dome would get boundaries of completely different meaning.</p>
+
+    <p>The <b>foot of the mountain</b> idea sidesteps that. Walk downhill from the peak. For a
+    while the ground curves the way a hilltop does — <b>bulging over, concave-down</b>. Then, as
+    the slope eases into the surrounding plain, the ground <b>dishes the other way,
+    concave-up</b>. The bending flips partway down (that flip is the <em>inflection</em>, still on
+    the steep slope); the <b>foot</b> is a step further out — where that upward dishing is
+    <em>strongest</em>, its crest, right where the hillside settles into the plain. That crest is a
+    property of <em>shape</em>, not of brightness — so it adapts to every dome on its own terms.</p>
+
+    <div class="note"><b>The whole trick in one line:</b> measure the surface's curvature, and the
+    boundary is the <b>crest of the concave-up ring</b> just outside the concave-down cap — not a
+    brightness level, and not merely the sign flip that starts it. The sandbox right below lets you
+    build that surface; everything after it takes the same dome apart, one step at a time.</div>
+  </div>
+</section>
+
+<!-- ===================== 2 · THE SANDBOX (centerpiece) ===================== -->
+<section id="sandbox">
+  <div class="wrap">
+    <div class="narrow">
+      <p class="eyebrow">02 — The sandbox · the instrument the whole page reads from</p>
+      <h2 class="serif">Build one dome. Watch λmax find its foot.</h2>
+      <p>This is the only control panel on the page. The sliders build a synthetic response
+      heatmap, and the left column shows the <b>entire pipeline in three stages, stacked</b>:
+      <b>①&nbsp;raw response</b> (dome&nbsp;+&nbsp;noise) → <b>②&nbsp;smoothed</b> at
+      <span class="mono">σ<sub>gauss</sub></span> → <b>③&nbsp;λmax curvature field</b> measured
+      from the smoothed dome by the Hessian at <span class="mono">σ<sub>hess</sub></span>. Each
+      arrow is one operation; move a slider and you see exactly what it does to the next stage.</p>
+      <p>In the λmax field, curvature is painted
+      <b style="color:var(--field-neg)">blue where &lt; 0</b> (the concave-down cap) and
+      <b style="color:var(--field-pos)">red where &gt; 0</b> (the concave-up flank). The
+      detector does <em>not</em> stop at the λmax&nbsp;=&nbsp;0 crossing (the faint dashed
+      inflection, where red just begins) — it walks outward to the <b>crest</b> of the red ridge,
+      the <b style="color:var(--field-ring)">amber foot ring</b>, where the surface dishes upward
+      most strongly. Drag on <em>any</em> of the three left maps to aim the
+      <b style="color:var(--ray)">ray</b>; the right panel plots λmax and dome height along it —
+      one spoke of the real 360-ray detector.</p>
+      <p class="dim" style="font-size:15px">Don't worry yet about <em>how</em> λmax is computed —
+      the sections below dissect it (a 1-D slice, the Hessian's three fields, its eigenvectors, the
+      surface in 3-D, the threshold test). Every one of them is a view of <b>the dome you build
+      here</b>. Change a slider and they all move together. First, just get a feel.</p>
+    </div>
+
+    <div class="lab">
+      <div class="lab-grid">
+        <div class="panel">
+          <div class="substages">
+            <div class="sub">
+              <h4><span class="n">1</span>Raw · input</h4>
+              <canvas id="rawCanvas" class="viz" width="240" height="240"
+                role="img" aria-label="Raw input heatmap of the response dome plus noise, driven by the shape and noise sliders"></canvas>
+            </div>
+            <div class="arrow"><span class="g">→</span>σ<sub>gauss</sub></div>
+            <div class="sub">
+              <h4><span class="n">2</span>Smoothed</h4>
+              <canvas id="smoothCanvas" class="viz" width="240" height="240"
+                role="img" aria-label="The same dome after Gaussian pre-smoothing at sigma gauss"></canvas>
+            </div>
+          </div>
+          <div class="legend" style="margin:8px 0 0">
+            <span><i class="grad-sw"></i> low → high response</span>
+            <span><i class="sw dash" style="border-color:var(--ray)"></i> ray</span>
+          </div>
+          <div class="connect">Hessian (σ<sub>hess</sub>) ↓</div>
+          <h4 class="step2"><span class="n">3</span>λmax curvature field · output</h4>
+          <canvas id="fieldCanvas" class="viz" width="440" height="440"
+            role="img" aria-label="Two-dimensional Hessian lambda-max field with the radial foot ring, a faint zero-crossing reference, and a draggable ray"></canvas>
+          <div class="legend" style="margin-bottom:0">
+            <span><i class="sw" style="background:var(--field-neg)"></i> λmax&lt;0 cap</span>
+            <span><i class="sw" style="background:var(--field-pos)"></i> λmax&gt;0 flank</span>
+            <span><i class="sw line" style="border-color:var(--field-ring)"></i> foot (λmax crest)</span>
+            <span><i class="sw dash" style="border-color:var(--ink-faint)"></i> λmax=0 (inflection)</span>
+          </div>
+        </div>
+        <div class="panel">
+          <h4>Along the ray — radius from peak →</h4>
+          <canvas id="rayCanvas" class="viz" width="440" height="440" style="cursor:default"
+            role="img" aria-label="One-dimensional profile of lambda-max and dome height sampled along the ray"></canvas>
+          <div class="readout" id="rayReadout">
+            <span class="chip">foot radius <b id="ro-foot">–</b></span>
+            <span class="chip">λmax at peak <b id="ro-peak">–</b></span>
+          </div>
+          <p class="cap">Grey = dome height (right axis). Blue/red fill = λmax by sign. The
+          <b style="color:var(--pick)">green marker</b> sits at the <b>crest of the first positive
+          λmax plateau</b> — the foot pick on this ray; the amber line is where the 2-D foot ring
+          sits. The faint dashed <span class="mono">λ=0</span> tick is the inflection the pick walks
+          <em>past</em>.</p>
+        </div>
+      </div>
+
+      <div class="controls">
+        <div class="ctrl"><label for="s-breadth">Dome breadth <span class="val" id="v-breadth"></span></label>
+          <input type="range" id="s-breadth" min="10" max="40" step="1" value="20">
+          <p class="hint">shapes stage ①</p></div>
+        <div class="ctrl"><label for="s-height">Dome height <span class="val" id="v-height"></span></label>
+          <input type="range" id="s-height" min="20" max="100" step="1" value="80">
+          <p class="hint">shapes stage ①</p></div>
+        <div class="ctrl"><label for="s-noise">Measurement noise <span class="val" id="v-noise"></span></label>
+          <input type="range" id="s-noise" min="0" max="30" step="1" value="6">
+          <p class="hint">roughens stage ①</p></div>
+        <div class="ctrl"><label for="s-gauss">σ<sub>gauss</sub> · pre-smooth <span class="val" id="v-gauss"></span></label>
+          <input type="range" id="s-gauss" min="0" max="16" step="0.5" value="8">
+          <p class="hint">① → ② arrow</p></div>
+        <div class="ctrl"><label for="s-hess">σ<sub>hess</sub> · Hessian scale <span class="val" id="v-hess"></span></label>
+          <input type="range" id="s-hess" min="1" max="12" step="0.5" value="5">
+          <p class="hint">② → ③ arrow</p></div>
+      </div>
+
+      <div class="btnrow">
+        <button class="preset" data-preset="pipeline">Pipeline defaults</button>
+        <button class="preset" data-preset="sharp">Tall &amp; sharp dome</button>
+        <button class="preset" data-preset="broad">Low &amp; broad dome</button>
+        <button class="preset" data-preset="noisy">Noisy · smoothing off</button>
+      </div>
+      <div class="note" id="sandbox-hint" style="margin-bottom:0">
+        <b>Try this:</b> set <span class="mono">σ<sub>gauss</sub></span> to 0 and push noise up —
+        stage ② stays rough and the ring in stage ③ shatters into speckle. Now raise
+        <span class="mono">σ<sub>gauss</sub></span> back to 8: the pre-smooth is what makes curvature
+        meaningful before you ever measure it.</div>
+    </div>
+
+    <div class="narrow">
+      <div class="note"><b>What the two σ's do — and why order matters.</b>
+      <span class="mono">σ<sub>gauss</sub></span> (the pipeline uses <b>8.0</b>) is the ①→② arrow:
+      it blurs the raw heatmap <em>first</em>, so single noisy cells don't masquerade as curvature.
+      Then <span class="mono">σ<sub>hess</sub></span> (the pipeline uses <b>5.0</b>) is the ②→③
+      arrow: the Hessian is measured with Gaussian derivative kernels at that scale, which sets the
+      <em>scale</em> of bending you care about — small σ<sub>hess</sub> reacts to every wrinkle,
+      large σ<sub>hess</sub> sees only the broad dome. Smoothing first, measuring second: reverse it
+      and you'd be differentiating noise.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== 3 · CURVATURE IN 1-D ===================== -->
+<section id="oned">
+  <div class="wrap">
+    <div class="narrow">
+      <p class="eyebrow">03 — Slow down · one slice of your dome</p>
+      <h2 class="serif">Concave-down, concave-up, and the point between</h2>
+      <span class="fromlab">Live slice of the sandbox dome</span>
+      <p>The λmax field you just built is a 2-D object, which is a lot to hold at once. So take a
+      knife to it: this is a <b>single horizontal slice through the peak</b> of the smoothed dome
+      (stage ②) above. "Curvature" here is just the <b>second derivative</b> of that slice — how the
+      slope itself is changing. Near the top the slope is getting <em>more negative</em> as you move
+      out (curving down): second derivative <b>&lt; 0</b>. Far out on the tail the slope is levelling
+      back toward flat (curving up): second derivative <b>&gt; 0</b>. Between them sits the
+      <b>inflection point</b> — second derivative exactly <b>0</b> — the 1-D "foot".</p>
+      <p>Drag along the curve. The dot reports which way the ground is bending under it. Then go back
+      to the sandbox, change breadth or σ<sub>gauss</sub>, and watch this slice — and its
+      inflections — move with the dome.</p>
+    </div>
+
+    <div class="card" style="padding:22px; margin-top:24px">
+      <div class="scrub">
+        <canvas id="scrubCanvas" class="viz" width="720" height="360"
+          role="img" aria-label="A horizontal slice through the dome peak, coloured by its curvature sign, with a draggable probe"></canvas>
+        <div class="verdict" id="scrubVerdict">
+          <div class="badge down">λ &lt; 0 · concave-down</div>
+          <p style="margin:0" class="dim">Drag the probe. Blue stretches are the dome cap
+          (bending over); red stretches are the feet (bending up); the marked points where blue
+          meets red are the inflections — the 1-D boundary.</p>
+        </div>
+      </div>
+      <div class="legend">
+        <span><i class="sw" style="background:var(--field-neg)"></i> concave-down (curving over)</span>
+        <span><i class="sw" style="background:var(--field-pos)"></i> concave-up (flattening out)</span>
+        <span><i class="sw line" style="border-color:var(--field-ring)"></i> inflection — the foot</span>
+      </div>
+    </div>
+    <p class="cap narrow" style="color:var(--ink-faint); font-size:14px; margin-top:12px">The 2-D
+    generalisation of this second derivative is the Hessian — the very next section — and its
+    λmax&nbsp;=&nbsp;0 ring is where these 1-D inflections live all the way around the dome.</p>
+  </div>
+</section>
+
+<!-- ===================== 4 · TWO DIMENSIONS / HESSIAN ===================== -->
+<section id="twod">
+  <div class="wrap narrow">
+    <p class="eyebrow">04 — Why one number isn't enough</p>
+    <h2 class="serif">In two dimensions, curvature has directions</h2>
+    <p>On the real skin surface the dome bends in <em>every</em> direction at once, and it can bend
+    by different amounts depending on which way you look — steeply across the field's short axis,
+    gently along its long axis. A single number can't capture that. You need the bending in the
+    two <b>principal directions</b>: the sharpest bend and the gentlest bend at that spot.</p>
+
+    <p>Those two numbers are the <b>principal curvatures</b>. The tool that produces them is the
+    <b>Hessian</b> — a little 2×2 table of the surface's second derivatives at each grid cell
+    <span class="mono">(r, c)</span>:</p>
+
+    <div class="hess-wrap">
+      <div class="matrix" aria-label="Hessian matrix: g_rr, g_rc on the top row; g_rc, g_cc on the bottom row">
+        <span>g<sub>rr</sub></span><span>g<sub>rc</sub></span>
+        <span>g<sub>rc</sub></span><span>g<sub>cc</sub></span>
+      </div>
+      <p style="margin:0; max-width:34ch" class="dim"><span class="mono">g<sub>rr</sub></span> is
+      the bending as you move along rows, <span class="mono">g<sub>cc</sub></span> along columns,
+      and <span class="mono">g<sub>rc</sub></span> is the twist between them.</p>
+    </div>
+
+    <p>The two <b>eigenvalues</b> of this table <em>are</em> the two principal curvatures — no
+    directions to guess, the maths hands you the sharpest and gentlest bend directly. We keep the
+    <b>larger</b> one and call it <b>λmax</b>. Why the larger? Because at the foot, the surface is
+    already dishing upward in the radial direction (curving up out of the slope) even while it may
+    still curve down around the ring. The larger principal curvature is the first to go positive —
+    it's the earliest, most sensitive signal that the flattening has begun.</p>
+
+    <h3 class="serif">The one formula worth seeing</h3>
+    <p>For a 2×2 symmetric table the eigenvalues have a closed form — no solver needed:</p>
+    <div class="formula">
+      <div class="row">
+        λmax =
+        <span class="frac"><span>g<sub>rr</sub> + g<sub>cc</sub></span><span>2</span></span>
+        +
+        <span class="rad">√&nbsp;<span class="frac"><span>(g<sub>rr</sub> − g<sub>cc</sub>)</span><span>2</span></span><sup>2</sup> + g<sub>rc</sub><sup>2</sup></span>
+      </div>
+    </div>
+    <p class="dim" style="font-size:15px">Flip the <span class="mono">+</span> before the root to a
+    <span class="mono">−</span> and you get λmin, the gentler curvature. Two familiar quantities hide
+    inside: <span class="mono">g<sub>rr</sub>+g<sub>cc</sub></span> is the <b>trace</b> (the same
+    Laplacian you may have met before), and <span class="mono">g<sub>rr</sub>·g<sub>cc</sub> −
+    g<sub>rc</sub>²</span> is the <b>determinant</b>. So λmax is just
+    <span class="mono">trace/2 + √((trace/2)² − det)</span>.</p>
+
+    <div class="note"><b>In code, this is three lines.</b> The pipeline calls
+    <span class="mono">skimage.hessian_matrix</span> (which measures those second derivatives with
+    smooth Gaussian kernels), then <span class="mono">hessian_matrix_eigvals</span>, which returns
+    the pair <em>sorted descending</em> — so the code simply keeps <span class="mono">eigs[0]</span>
+    as λmax. See <span class="mono">_hessian_eigvals</span> in
+    <span class="mono">rf_radial_foot_boundary.py</span>.</div>
+
+    <h3 class="serif">Peek inside: the three fields that build the Hessian</h3>
+    <span class="fromlab">Live components of the sandbox dome</span>
+    <p>The Hessian isn't a black box — it's assembled from three measured second-derivative
+    fields of <b>the smoothed dome you built in the sandbox</b> (stage ②). Here they are right now:
+    <span class="mono">g<sub>rr</sub></span> (bending down the rows),
+    <span class="mono">g<sub>cc</sub></span> (bending across the columns), and
+    <span class="mono">g<sub>rc</sub></span> (the diagonal twist). Blue is negative, red positive.
+    Move the sandbox sliders and these three fields breathe with the dome.</p>
+    <div class="mini-grid">
+      <div class="mini"><canvas id="mini-grr" width="200" height="200"
+        role="img" aria-label="g_rr second-derivative field"></canvas>
+        <div class="lbl"><b>g<sub>rr</sub></b> · rows</div></div>
+      <div class="mini"><canvas id="mini-gcc" width="200" height="200"
+        role="img" aria-label="g_cc second-derivative field"></canvas>
+        <div class="lbl"><b>g<sub>cc</sub></b> · columns</div></div>
+      <div class="mini"><canvas id="mini-grc" width="200" height="200"
+        role="img" aria-label="g_rc mixed second-derivative field"></canvas>
+        <div class="lbl"><b>g<sub>rc</sub></b> · twist</div></div>
+    </div>
+    <p class="dim" style="font-size:15px">Combine these four ways
+    (<span class="mono">g<sub>rr</sub></span> and <span class="mono">g<sub>cc</sub></span> on the
+    diagonal, <span class="mono">g<sub>rc</sub></span> off it) into the 2×2 table above, take its
+    larger eigenvalue, and you get λmax — the field in stage ③ that the whole method runs on.</p>
+
+    <details class="math"><summary>The math · which direction is "λmax"? (eigenvectors)</summary>
+      <div class="body">
+        <p>λmax is a <em>number</em> — the sharpest curvature — but it also has a
+        <em>direction</em>: the way you'd walk to feel that sharpest bend. That direction is the
+        Hessian's <b>eigenvector</b> for λmax, and it always sits perpendicular to the λmin
+        direction. For the 2×2 table its angle is
+        <span class="mono">φ = ½·atan2(2·g<sub>rc</sub>, g<sub>rr</sub> − g<sub>cc</sub>)</span>.
+        Drag the probe on <b>your sandbox dome</b>: the <b style="color:var(--field-pos)">red arrow</b>
+        points along λmax (sharpest bend — near the foot it points radially, straight out from the
+        peak), the <b style="color:var(--field-neg)">blue arrow</b> along λmin (gentlest bend, around
+        the ring).</p>
+        <div class="eig">
+          <canvas id="eigCanvas" width="320" height="320"
+            role="img" aria-label="Probe on the curvature field showing the two principal-curvature direction arrows"></canvas>
+          <div>
+            <div class="rd">
+              <div class="k">λmax <b id="eig-lmax">–</b></div>
+              <div class="k">λmin <b id="eig-lmin">–</b></div>
+              <div class="k">bending <b id="eig-sign">–</b></div>
+            </div>
+            <div class="arrow-key">
+              <span><i style="border-color:var(--field-pos)"></i>λmax dir</span>
+              <span><i style="border-color:var(--field-neg)"></i>λmin dir</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </details>
+
+    <details class="math"><summary>The math · why Gaussian derivatives, not raw differences?</summary>
+      <div class="body">
+        <p>A raw second difference (<span class="mono">f(x+1) − 2f(x) + f(x−1)</span>) is brutally
+        noise-sensitive. The fix is a classic identity: differentiating a blurred field equals
+        <em>convolving with the derivative of the blur kernel</em> —
+        <span class="mono">d/dx (G<sub>σ</sub> ∗ f) = (dG<sub>σ</sub>/dx) ∗ f</span>. So
+        <span class="mono">skimage.hessian_matrix</span> never differentiates raw data; it convolves
+        the field with the <b>second derivative of a Gaussian</b> at scale
+        <span class="mono">σ<sub>hess</sub></span>, which smooths and differentiates in one stroke.
+        The <span class="mono">σ<sub>hess</sub></span> slider is choosing <em>how wide</em> that
+        derivative kernel is — i.e. the scale of bending the detector responds to. This page's
+        sandbox approximates it faithfully by blurring at <span class="mono">σ<sub>hess</sub></span>
+        and then taking simple second differences — mathematically the same operation.</p>
+      </div>
+    </details>
+  </div>
+</section>
+
+<!-- ===================== 5 · 3-D TRANSFORMATION ===================== -->
+<section id="threed">
+  <div class="wrap">
+    <div class="narrow">
+      <p class="eyebrow">05 — See it in 3-D · raw data → after the Hessian</p>
+      <h2 class="serif">Your dome, stood up — and the landscape the Hessian makes of it</h2>
+      <span class="fromlab">The sandbox dome, in 3-D</span>
+      <p>So far the heatmaps have been flat, top-down. But the response field really <em>is</em> a
+      hill — so let's stand up <b>the exact dome you built in the sandbox</b>. Drag to orbit. Then
+      drag the slider to <b>morph</b> from the <b>raw response dome</b> (stages ①–②) into the
+      <b>λmax curvature surface</b> (stage ③) the Hessian computes from it, and watch what the
+      machine actually "sees".</p>
+      <p>The colour is the same on both shapes: <b style="color:var(--field-neg)">blue where λmax &lt;
+      0</b>, <b style="color:var(--field-pos)">red where λmax &gt; 0</b>, with the
+      <b style="color:var(--field-ring)">amber foot ring</b> drawn on the surface. The raw dome is
+      a single bump; its curvature surface is a <b>crater with a raised rim</b> — a dip below zero
+      over the concave-down cap, rising to a positive ridge at the concave-up flank. The amber ring
+      rides the <b>crest of that positive rim</b>, where λmax peaks — a step outside where the crater
+      floor merely climbs back through zero. Switch to the sandbox's
+      <b>Tall&nbsp;&amp;&nbsp;sharp</b> preset and the crater goes deep and tight; <b>Low&nbsp;&amp;&nbsp;broad</b>
+      makes it shallow and wide — but both cross zero at their own foot.</p>
+    </div>
+
+    <div class="viewer">
+      <canvas id="stage" class="stage"
+        role="img" aria-label="Orbitable 3-D surface morphing between the response dome and its lambda-max curvature surface"></canvas>
+      <div class="v-controls">
+        <div class="morph">
+          <label for="s-morph">Surface <span class="val mono" id="v-morph"></span></label>
+          <input type="range" id="s-morph" min="0" max="100" step="1" value="0">
+          <div class="ends"><span>raw response dome</span><span>λmax curvature surface</span></div>
+        </div>
+      </div>
+      <p class="cap" style="margin-top:14px; color:var(--ink-faint); font-size:14px">Drag the surface
+      to orbit. This is the same dome as every other panel — change a sandbox slider and the hill
+      here re-forms to match.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== 6 · WHY SIGN-FLIP = BOUNDARY ===================== -->
+<section id="why">
+  <div class="wrap narrow">
+    <p class="eyebrow">06 — The payoff</p>
+    <h2 class="serif">Why a sign-flip beats a brightness threshold</h2>
+    <span class="fromlab">Two rings on your live dome</span>
+    <p>Here's the argument the sandbox lets you <em>check</em> rather than take on faith, and it runs
+    on <b>the very dome you built</b>. Below, the same λmax field carries two candidate boundaries:
+    the <b style="color:var(--field-ring)">amber curvature foot</b> (crest of the concave-up λmax
+    ridge) and a <b>fixed-brightness cutoff</b> at one absolute IFF level — the same number for
+    every dome.</p>
+
+    <p>Switch the fixed-brightness ring on, then go up to the sandbox and drag <b>Dome height</b>
+    (or click <b>Tall&nbsp;&amp;&nbsp;sharp</b> / <b>Low&nbsp;&amp;&nbsp;broad</b>). Watch the two
+    radii in the readout: the amber ring stays glued to the foot as the shape changes, while the
+    fixed cutoff <b>slides in and out</b> — too tight on a tall dome, too loose on a low one, and it
+    vanishes entirely once the peak drops below the cutoff. One fixed number means a different thing
+    on every neuron; the curvature sign rescales itself to each.</p>
+
+    <label class="toggle" style="margin:6px 0 2px"><input type="checkbox" id="thr-toggle">
+      Show a fixed-brightness ring for comparison</label>
+
+    <div class="card" style="padding:20px; margin-top:16px">
+      <div class="cmp-grid">
+        <canvas id="cmpCanvas" class="viz" width="440" height="440" style="cursor:default"
+          role="img" aria-label="The live sandbox dome's lambda-max field with the curvature ring and an optional fixed-brightness ring"></canvas>
+        <div>
+          <div class="rd">
+            <div class="k">λmax foot radius <b id="co-lmax">–</b></div>
+            <div class="k">fixed-brightness radius <b id="co-thr">–</b></div>
+            <div class="k delta">disagreement <b id="co-delta">–</b></div>
+          </div>
+          <div class="legend" style="margin-bottom:0; margin-top:14px">
+            <span><i class="sw line" style="border-color:var(--field-ring)"></i> foot (λmax crest)</span>
+            <span><i class="sw dash" style="border-color:var(--ink-soft)"></i> fixed-brightness cutoff</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <p class="cap" style="color:var(--ink-faint); font-size:14px; margin-top:12px">One live dome, two
+    rules. The amber curvature ring tracks the foot no matter what you do to the shape; the dashed
+    fixed cutoff can't be right for every dome at once — which is precisely the failure the curvature
+    method is built to avoid.</p>
+
+    <div class="note"><b>This is exactly the design choice in the paper pipeline.</b> The edge is a
+    <em>curvature landmark of λmax</em> — the crest of its concave-up ridge — not a fixed IFF level;
+    quoting the walkthrough, "the same rule fits a tall sharp dome and a low broad one."</div>
+  </div>
+</section>
+
+<!-- ===================== 7 · REAL PIPELINE ===================== -->
+<section id="real">
+  <div class="wrap narrow">
+    <p class="eyebrow">07 — Grounded in the real data</p>
+    <h2 class="serif">The same idea, on a real neuron</h2>
+    <p>The sandbox is synthetic so you can play; the pipeline runs the identical logic on measured
+    heatmaps. Below is neuron <b>ST16-02</b> going through the real chain — the input heatmap, the
+    Gaussian pre-smooth, the Hessian λmax field with its traced foot, and the clipped result. Read
+    it as the fixed, real-data twin of the three stages in your sandbox.</p>
+
+    <figure>
+      <img src="figures/bd_02_fields.png" alt="Four panels: input grid_z heatmap, Gaussian-smoothed field, Hessian lambda-max field with the traced foot ring, and the final contour clipped to the footprint.">
+      <figcaption><b>The field progression.</b> (1) input heatmap <span class="mono">grid_z</span> —
+      sandbox stage ①; (2) Gaussian-smoothed at σ = 8 — stage ②; (3) the Hessian <b>λmax</b> field at
+      σ = 5 — stage ③: blue cap, red foot ring, dashed line = λmax 0, red contour = the traced foot;
+      (4) the foot clipped to the painted footprint. This is your sandbox, on real data.</figcaption>
+    </figure>
+
+    <figure>
+      <img src="figures/bd_04_ray_section.png" alt="Left: the lambda-max heatmap with one ray cast from the peak. Right: lambda-max sampled along that ray versus radius, crossing zero where the dome flattens.">
+      <figcaption><b>One of 360 rays</b> — the real version of the sandbox's right panel. λmax is
+      negative (blue) near the peak and turns positive (red) down the hillside; the detector's pick
+      (green) sits at the <b>crest</b> of that positive λmax ridge — the first-positive plateau — not
+      at the earlier zero-crossing, and the traced contour (yellow) passes through it.</figcaption>
+    </figure>
+
+    <h3 class="serif">From λmax field to a closed contour — what happens next</h3>
+    <p>You've now got the whole conceptual core. Turning that λmax field into a single closed RF
+    boundary is bookkeeping on top of it:</p>
+    <ol class="steps">
+      <li><b>Cast 360 rays</b> from the peak. On each, read λmax outward and take the <b>first
+      positive-λmax plateau</b> — that ray's foot radius. <span class="dim">(The green marker in your
+      ray panel is doing exactly this.)</span></li>
+      <li><b>Snap &amp; smooth</b> the 360 radii — clip each back onto real painted skin, then
+      circular Savitzky–Golay smooth so the ring is continuous.</li>
+      <li><b>Clip to the footprint</b> — intersect with the actually-touched skin and keep the blob
+      containing the peak, so a star-shaped ray curve can't bulge into untouched cells.</li>
+    </ol>
+    <p class="dim" style="font-size:15px">The closed contour then feeds the metrics — area, perimeter,
+    circularity, a PCA ellipse — and is written to the output NPZ under the
+    <span class="mono">boundary_</span> prefix. All of it rests on the one sign-flip you just built.</p>
+
+    <div class="note"><b>The two knobs that matter, from the checked-in config:</b>
+    <span class="mono">radial_gauss_sigma = 8.0</span> and
+    <span class="mono">radial_hess_sigma = 5.0</span> — the σ<sub>gauss</sub> and σ<sub>hess</sub>
+    sliders you've been turning.</div>
+  </div>
+</section>
+
+<!-- ===================== 8 · SELF-CHECK ===================== -->
+<section id="check">
+  <div class="wrap narrow">
+    <p class="eyebrow">08 — Check yourself</p>
+    <h2 class="serif">Four questions</h2>
+    <details class="q"><summary>Why keep λmax (the larger curvature) instead of λmin?</summary>
+      <p>Because it's the earliest, most sensitive sign that flattening has begun. Walking out from
+      the peak, the radial direction dishes upward before the surface flattens all around — so the
+      larger principal curvature crosses zero right at the foot, giving the cleanest edge.</p></details>
+    <details class="q"><summary>Why smooth with σ<sub>gauss</sub> before measuring the Hessian?</summary>
+      <p>Second derivatives amplify noise ferociously. A single hot cell in the raw heatmap has huge
+      local curvature. Blurring first (σ<sub>gauss</sub> = 8) removes that speckle so the curvature
+      you measure belongs to the dome, not the noise. Set σ<sub>gauss</sub> = 0 with noise up in the
+      sandbox to watch stage ③'s ring disintegrate.</p></details>
+    <details class="q"><summary>Where exactly does the detector place the foot — at λmax = 0?</summary>
+      <p>No. The λmax = 0 crossing is only the <em>inflection</em>, where the concave-up flank begins —
+      still on the steep slope. The detector casts rays and, on each, keeps the <b>crest of the first
+      positive-λmax plateau</b> (<span class="mono">find_peaks</span> with
+      <span class="mono">require_positive</span>): the point where the surface dishes upward most
+      strongly, a step further out, right where the hillside eases into the plain. Picking the
+      zero-crossing instead would pull the ring in onto the slope.</p></details>
+    <details class="q"><summary>Why is a sign-flip better than a fixed brightness cutoff?</summary>
+      <p>A fixed IFF level means different things for a tall sharp dome and a low broad one. Curvature
+      sign is a property of shape, so it rescales to each neuron automatically — the same rule fits
+      both, as the comparison panel shows when you drag the height slider.</p></details>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <p>An interactive companion to
+    <span class="mono">docs/spatial_extract_boundaries/README.md</span> — the radial "foot of
+    mountain" boundary detector. Source of truth:
+    <span class="mono">metrics/rf_radial_foot_boundary.py</span>
+    (<span class="mono">_compute_hessian_lmax</span>). The sandbox recreates the λmax computation in
+    the browser for teaching; the pipeline uses <span class="mono">scikit-image</span> and
+    <span class="mono">SciPy</span> on real heatmaps.</p>
+  </div>
+</footer>
+
+<script>
+"use strict";
+/* ============================================================ *
+ *  Foot-of-the-mountain — interactive Hessian λmax explainer   *
+ *  ONE dome drives the whole page. The sandbox sliders own the *
+ *  state; every section is a view that reads the shared cache. *
+ *  Faithful chain: pre-smooth (σ_gauss) → Hessian via Gaussian *
+ *  -scale second differences (σ_hess) → closed-form λmax.      *
+ * ============================================================ */
+
+/* ---- tiny helpers (fail loud on degenerate input) ---- */
+function assert(cond, msg){ if(!cond) throw new Error("hessian-explainer: "+msg); }
+function cssVar(name){
+  const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  assert(v, "missing CSS variable "+name);
+  return v;
+}
+function hexToRgb(h){
+  h = h.replace('#','');
+  if(h.length===3) h = h.split('').map(c=>c+c).join('');
+  assert(h.length===6, "bad hex "+h);
+  return [parseInt(h.slice(0,2),16), parseInt(h.slice(2,4),16), parseInt(h.slice(4,6),16)];
+}
+function lerp(a,b,t){ return a+(b-a)*t; }
+function lerpRgb(a,b,t){ return [lerp(a[0],b[0],t), lerp(a[1],b[1],t), lerp(a[2],b[2],t)]; }
+
+/* ---- fixed noise grid so the field is stable across slider moves ---- */
+const N = 121;                      // grid is N×N
+const CENTER = (N-1)/2;
+const NOISE = new Float32Array(N*N);
+(function seedNoise(){
+  // simple deterministic-ish hash noise (avoids relying on call order)
+  for(let i=0;i<N*N;i++){
+    const x = Math.sin(i*12.9898 + 78.233) * 43758.5453;
+    NOISE[i] = (x - Math.floor(x)) * 2 - 1;   // in [-1,1]
+  }
+})();
+
+/* ---- separable Gaussian blur on an N×N Float32Array ---- */
+function gaussKernel(sigma){
+  if(sigma <= 0.35) return null;               // effectively identity
+  const rad = Math.max(1, Math.ceil(sigma*3));
+  const k = new Float32Array(2*rad+1);
+  let sum=0;
+  for(let i=-rad;i<=rad;i++){ const v=Math.exp(-(i*i)/(2*sigma*sigma)); k[i+rad]=v; sum+=v; }
+  for(let i=0;i<k.length;i++) k[i]/=sum;
+  return {k, rad};
+}
+function blur(src, sigma){
+  const g = gaussKernel(sigma);
+  if(!g) return src.slice();
+  const {k,rad} = g;
+  const tmp = new Float32Array(N*N);
+  const out = new Float32Array(N*N);
+  // horizontal (clamp edges — mirrors reflect-ish behaviour, no wraparound)
+  for(let r=0;r<N;r++){
+    for(let c=0;c<N;c++){
+      let acc=0;
+      for(let i=-rad;i<=rad;i++){
+        let cc=c+i; if(cc<0) cc=0; else if(cc>=N) cc=N-1;
+        acc += src[r*N+cc]*k[i+rad];
+      }
+      tmp[r*N+c]=acc;
+    }
+  }
+  // vertical
+  for(let c=0;c<N;c++){
+    for(let r=0;r<N;r++){
+      let acc=0;
+      for(let i=-rad;i<=rad;i++){
+        let rr=r+i; if(rr<0) rr=0; else if(rr>=N) rr=N-1;
+        acc += tmp[rr*N+c]*k[i+rad];
+      }
+      out[r*N+c]=acc;
+    }
+  }
+  return out;
+}
+
+/* ---- build the synthetic dome (+noise) ---- */
+function buildDome(breadth, height, noiseAmp){
+  const f = new Float32Array(N*N);
+  const s2 = 2*breadth*breadth;
+  for(let r=0;r<N;r++){
+    for(let c=0;c<N;c++){
+      const dr=r-CENTER, dc=c-CENTER;
+      const dome = height*Math.exp(-(dr*dr+dc*dc)/s2);
+      f[r*N+c] = dome + noiseAmp*NOISE[r*N+c];
+    }
+  }
+  return f;
+}
+
+/* ---- Hessian λmax field ----
+ * Faithful chain: pre-smooth at σ_gauss, then measure the Hessian at scale
+ * σ_hess by blurring again and taking finite-difference second derivatives
+ * (the derivative-of-Gaussian that skimage.hessian_matrix computes), then the
+ * closed-form larger eigenvalue of the 2×2 symmetric Hessian.
+ */
+function computeHessian(preSmoothed, sHess){
+  const g = blur(preSmoothed, sHess);          // Gaussian-scale field
+  const GRR=new Float32Array(N*N), GCC=new Float32Array(N*N), GRC=new Float32Array(N*N);
+  const lmax=new Float32Array(N*N), lmin=new Float32Array(N*N);
+  const at=(r,c)=>{ if(r<0)r=0; else if(r>=N)r=N-1; if(c<0)c=0; else if(c>=N)c=N-1; return g[r*N+c]; };
+  for(let r=0;r<N;r++){
+    for(let c=0;c<N;c++){
+      const grr = at(r+1,c) - 2*at(r,c) + at(r-1,c);
+      const gcc = at(r,c+1) - 2*at(r,c) + at(r,c-1);
+      const grc = (at(r+1,c+1) - at(r+1,c-1) - at(r-1,c+1) + at(r-1,c-1))/4;
+      const tr2=(grr+gcc)/2, d=(grr-gcc)/2, root=Math.sqrt(d*d+grc*grc);
+      const i=r*N+c;
+      GRR[i]=grr; GCC[i]=gcc; GRC[i]=grc;
+      lmax[i]=tr2+root; lmin[i]=tr2-root;
+    }
+  }
+  return {grr:GRR, gcc:GCC, grc:GRC, lmax, lmin};
+}
+
+/* ---- argmax of a field → [r,c] ---- */
+function argmax(f){
+  let bi=0, bv=-Infinity;
+  for(let i=0;i<f.length;i++){ if(f[i]>bv){ bv=f[i]; bi=i; } }
+  return [Math.floor(bi/N), bi%N];
+}
+
+/* ---- robust scale for the diverging colour map (99th pct of |λ|) ---- */
+function robustScale(f){
+  const a = Float32Array.from(f, v=>Math.abs(v)).sort();
+  const s = a[Math.floor(a.length*0.99)];
+  return s>1e-9 ? s : 1e-9;
+}
+
+/* ---- bilinear sample ---- */
+function sampleBilinear(f, r, c){
+  if(r<0||c<0||r>N-1||c>N-1) return NaN;
+  const r0=Math.floor(r), c0=Math.floor(c);
+  const r1=Math.min(r0+1,N-1), c1=Math.min(c0+1,N-1);
+  const fr=r-r0, fc=c-c0;
+  return f[r0*N+c0]*(1-fr)*(1-fc) + f[r0*N+c1]*(1-fr)*fc
+       + f[r1*N+c0]*fr*(1-fc)     + f[r1*N+c1]*fr*fc;
+}
+
+/* generic iso-contour at an arbitrary level (for the fixed-brightness ring) */
+function isoContour(f, level){
+  const segs=[];
+  const ip=(x1,y1,v1,x2,y2,v2)=>{ const t=(level-v1)/(v2-v1); return [x1+(x2-x1)*t, y1+(y2-y1)*t]; };
+  for(let r=0;r<N-1;r++){
+    for(let c=0;c<N-1;c++){
+      const tl=f[r*N+c], tr=f[r*N+c+1], br=f[(r+1)*N+c+1], bl=f[(r+1)*N+c];
+      const cr=[];
+      if((tl>level)!==(tr>level)) cr.push(ip(c,r,tl,c+1,r,tr));
+      if((tr>level)!==(br>level)) cr.push(ip(c+1,r,tr,c+1,r+1,br));
+      if((br>level)!==(bl>level)) cr.push(ip(c+1,r+1,br,c,r+1,bl));
+      if((bl>level)!==(tl>level)) cr.push(ip(c,r+1,bl,c,r,tl));
+      if(cr.length===2) segs.push([cr[0],cr[1]]);
+      else if(cr.length===4){ segs.push([cr[0],cr[1]]); segs.push([cr[2],cr[3]]); }
+    }
+  }
+  return segs;
+}
+
+/* ---- radial "foot of mountain" extractor — the REAL detector ----
+ * Mirrors metrics/rf_radial_foot_boundary._extract_radial_plateau_foot:
+ * cast rays from the peak, sample λmax outward, and take the centre of the
+ * FIRST POSITIVE λmax plateau peak (scipy find_peaks + require_positive) — the
+ * CREST of the concave-up ridge, NOT the λmax=0 crossing. The crest sits
+ * further out (nearer the true foot) than the zero-crossing inflection. The
+ * per-angle radii are then circularly smoothed (stand-in for the pipeline's
+ * Savitzky–Golay window). */
+function sampleRay(f, pr, pc, ca, sa, maxR){
+  const radii=[], vals=[];
+  for(let rad=1; rad<maxR; rad++){
+    const r=pr+sa*rad, c=pc+ca*rad;
+    if(r<0||c<0||r>N-1||c>N-1) break;
+    radii.push(rad); vals.push(sampleBilinear(f,r,c));
+  }
+  return {radii, vals};
+}
+/* index of the first local-max (plateau_size=1) of `vals` whose value > 0 */
+function firstPositivePlateau(vals){
+  for(let i=1;i<vals.length-1;i++){
+    if(vals[i]>vals[i-1] && vals[i]>=vals[i+1] && vals[i]>0) return i;
+  }
+  return -1;
+}
+/* index just past the first upward λmax=0 crossing (the inflection reference) */
+function firstZeroCross(vals){
+  for(let i=1;i<vals.length;i++) if(vals[i-1]<=0 && vals[i]>0) return i;
+  return -1;
+}
+/* circular boxcar smoothing of a per-angle radius profile */
+function smoothCircular(arr, rad){
+  const n=arr.length, out=new Float32Array(n);
+  for(let i=0;i<n;i++){
+    let s=0; for(let k=-rad;k<=rad;k++){ s+=arr[((i+k)%n+n)%n]; }
+    out[i]=s/(2*rad+1);
+  }
+  return out;
+}
+/* closed radial ring as an [x=col,y=row] segment list (same shape isoContour uses);
+ * `pick(vals)` chooses the vertex index per ray (foot = first positive plateau,
+ * reference = first upward zero-crossing). Radial casting keeps both rings clean
+ * single loops — unlike marching-squares, which also traces far-field speckle. */
+function radialRing(lmax, peak, nAngles, pick){
+  const [pr,pc]=peak;
+  const maxR=Math.ceil(Math.hypot(N,N));
+  const radii=new Float32Array(nAngles);
+  for(let a=0;a<nAngles;a++){
+    const ang=a/nAngles*2*Math.PI, ca=Math.cos(ang), sa=Math.sin(ang);
+    const {radii:rr, vals}=sampleRay(lmax,pr,pc,ca,sa,maxR);
+    const idx=pick(vals);
+    radii[a] = idx>=0 ? rr[idx] : (rr.length?rr[rr.length-1]:1);
+  }
+  const sm=smoothCircular(radii, 4);
+  const segs=[];
+  for(let a=0;a<nAngles;a++){
+    const b=(a+1)%nAngles;
+    const A=a/nAngles*2*Math.PI, B=b/nAngles*2*Math.PI;
+    segs.push([[pc+Math.cos(A)*sm[a], pr+Math.sin(A)*sm[a]],
+               [pc+Math.cos(B)*sm[b], pr+Math.sin(B)*sm[b]]]);
+  }
+  return segs;
+}
+const radialFoot = (lmax,peak,n)=> radialRing(lmax,peak,n,firstPositivePlateau);
+const radialZeroRing = (lmax,peak,n)=> radialRing(lmax,peak,n,firstZeroCross);
+
+/* ---- offscreen N×N buffer, shared by all field painters ---- */
+const _off = document.createElement('canvas'); _off.width=N; _off.height=N;
+const _offctx = _off.getContext('2d');
+
+/* paint a diverging λ-style field (blue<0, red>0) */
+function paintField(ctx, W, H, arr, scale){
+  const neg=hexToRgb(cssVar('--field-neg')), mid=hexToRgb(cssVar('--field-mid')), pos=hexToRgb(cssVar('--field-pos'));
+  const s = scale || robustScale(arr);
+  const img = _offctx.createImageData(N,N);
+  for(let i=0;i<N*N;i++){
+    let t = arr[i]/s; if(t>1)t=1; else if(t<-1)t=-1;
+    const rgb = t<0 ? lerpRgb(mid,neg,-t) : lerpRgb(mid,pos,t);
+    const j=i*4;
+    img.data[j]=rgb[0]; img.data[j+1]=rgb[1]; img.data[j+2]=rgb[2]; img.data[j+3]=255;
+  }
+  _offctx.putImageData(img,0,0);
+  ctx.imageSmoothingEnabled=true; ctx.imageSmoothingQuality='high';
+  ctx.drawImage(_off, 0,0, W,H);
+}
+/* sequential "elevation" ramp for the height maps (lo → amber → pale) */
+function paintSequential(ctx, W, H, arr){
+  const lo=hexToRgb(cssVar('--raw-lo')), mid=hexToRgb(cssVar('--raw-mid')), hi=hexToRgb(cssVar('--raw-hi'));
+  let mn=Infinity, mx=-Infinity;
+  for(const v of arr){ if(v<mn)mn=v; if(v>mx)mx=v; }
+  const rng=(mx-mn)||1;
+  const img=_offctx.createImageData(N,N);
+  for(let i=0;i<N*N;i++){
+    let t=(arr[i]-mn)/rng; if(t<0)t=0; else if(t>1)t=1;
+    const rgb = t<0.5 ? lerpRgb(lo,mid,t*2) : lerpRgb(mid,hi,(t-0.5)*2);
+    const j=i*4; img.data[j]=rgb[0]; img.data[j+1]=rgb[1]; img.data[j+2]=rgb[2]; img.data[j+3]=255;
+  }
+  _offctx.putImageData(img,0,0); ctx.imageSmoothingEnabled=true; ctx.drawImage(_off,0,0,W,H);
+}
+
+/* map grid (col,row) → canvas px, cells span [0,N-1] across [0,W] */
+function gx(c,W){ return (c/(N-1))*W; }
+function gy(r,H){ return (r/(N-1))*H; }
+
+function strokeSegs(ctx, segs, W, H, color, width, dash){
+  ctx.save();
+  ctx.strokeStyle=color; ctx.lineWidth=width; ctx.lineCap='round';
+  if(dash) ctx.setLineDash(dash);
+  ctx.beginPath();
+  for(const s of segs){
+    ctx.moveTo(gx(s[0][0],W), gy(s[0][1],H));
+    ctx.lineTo(gx(s[1][0],W), gy(s[1][1],H));
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
+/* ================= DPR-aware canvas setup ================= */
+function fitCanvas(cv){
+  const dpr = Math.max(1, Math.min(2, window.devicePixelRatio||1));
+  const rect = cv.getBoundingClientRect();
+  const w = Math.max(1, Math.round(rect.width));
+  const h = Math.max(1, Math.round(rect.height || w));  // square fallback
+  cv.width = Math.round(w*dpr); cv.height = Math.round(h*dpr);
+  const ctx = cv.getContext('2d');
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  return {ctx, w, h};
+}
+
+/* ================= SHARED STATE — the sandbox owns the page ============ */
+const state = {
+  breadth:20, height:80, noise:6, gauss:8, hess:5,      // dome + pipeline knobs
+  angle:-Math.PI/4,                                     // sandbox ray angle
+  showThr:false, thrLevel:42,                           // comparison fixed cutoff
+  morph:0, yaw:-0.7, pitch:0.92                         // 3-D camera + morph
+};
+
+/* the single source of truth: recomputed whenever any knob changes */
+let cache = null;   // {dome, pre, grr, gcc, grc, lmax, lmin, peak, segs, zero}
+function recompute(){
+  const dome = buildDome(state.breadth, state.height, state.noise);
+  const pre  = blur(dome, state.gauss);
+  const H    = computeHessian(pre, state.hess);
+  const peak = argmax(pre);
+  // segs = the REAL detector's foot (first positive-λmax plateau per ray);
+  // zero = the first λmax=0 crossing per ray, a faint inner inflection reference.
+  const segs = radialFoot(H.lmax, peak, 180);
+  const zero = radialZeroRing(H.lmax, peak, 180);
+  cache = Object.assign({dome, pre, peak, segs, zero}, H);
+}
+
+/* mean radius of a contour from the dome peak (grid px) */
+function ringRadius(segs){
+  const [pr,pc]=cache.peak;
+  let sum=0, n=0;
+  for(const s of segs){
+    const mx=(s[0][0]+s[1][0])/2, my=(s[0][1]+s[1][1])/2;   // x=col, y=row
+    sum += Math.hypot(my-pr, mx-pc); n++;
+  }
+  return n ? sum/n : null;
+}
+
+/* ================= SANDBOX (section 02) ================= */
+const rawCv    = document.getElementById('rawCanvas');
+const smoothCv = document.getElementById('smoothCanvas');
+const fieldCv  = document.getElementById('fieldCanvas');
+const rayCv    = document.getElementById('rayCanvas');
+
+/* the ray (dashed) + peak (×) overlay, shared by the three left-panel maps */
+function drawRayAndPeak(ctx, w, h, peakInk){
+  const [pr,pc]=cache.peak;
+  const px=gx(pc,w), py=gy(pr,h);
+  const len=N*1.4;
+  const er=pr + Math.sin(state.angle)*len;     // row grows "down": sin→row, cos→col
+  const ec=pc + Math.cos(state.angle)*len;
+  ctx.save();
+  ctx.strokeStyle=cssVar('--ray'); ctx.lineWidth=2.2; ctx.setLineDash([7,5]);
+  ctx.beginPath(); ctx.moveTo(px,py); ctx.lineTo(gx(ec,w),gy(er,h)); ctx.stroke();
+  ctx.restore();
+  ctx.save();
+  ctx.strokeStyle=peakInk; ctx.lineWidth=2.6;
+  ctx.beginPath();
+  ctx.moveTo(px-6,py-6); ctx.lineTo(px+6,py+6);
+  ctx.moveTo(px-6,py+6); ctx.lineTo(px+6,py-6);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawRaw(){
+  const {ctx,w,h} = fitCanvas(rawCv);
+  paintSequential(ctx, w, h, cache.dome);
+  drawRayAndPeak(ctx, w, h, cssVar('--raw-hi'));   // light × reads on the dark dome centre
+}
+function drawSmoothed(){
+  const {ctx,w,h} = fitCanvas(smoothCv);
+  paintSequential(ctx, w, h, cache.pre);
+  drawRayAndPeak(ctx, w, h, cssVar('--raw-hi'));
+}
+function drawField(){
+  const {ctx,w,h} = fitCanvas(fieldCv);
+  paintField(ctx, w, h, cache.lmax);
+  // faint λmax=0 crossing (inflection reference) then the solid detector foot
+  strokeSegs(ctx, cache.zero, w, h, cssVar('--ink-faint'), 1.4, [4,4]);
+  strokeSegs(ctx, cache.segs, w, h, cssVar('--field-ring'), 2.6);
+  drawRayAndPeak(ctx, w, h, cssVar('--ink'));
+}
+
+function drawRay(){
+  const {ctx,w,h} = fitCanvas(rayCv);
+  ctx.clearRect(0,0,w,h);
+  const {pre,lmax,peak} = cache;
+  const [pr,pc]=peak;
+  const ca=Math.cos(state.angle), sa=Math.sin(state.angle);
+  const maxR = Math.floor(N*0.62);
+  const rs=[], lv=[], iv=[];
+  for(let rad=0; rad<=maxR; rad++){
+    const rr=pr+sa*rad, cc=pc+ca*rad;
+    if(rr<0||cc<0||rr>N-1||cc>N-1) break;
+    rs.push(rad); lv.push(sampleBilinear(lmax,rr,cc)); iv.push(sampleBilinear(pre,rr,cc));
+  }
+  const n=rs.length;
+  assert(n>3, "ray too short — peak at border");
+
+  // layout
+  const padL=46, padR=40, padT=22, padB=34;
+  const plotW=w-padL-padR, plotH=h-padT-padB;
+  const x0=padL, y0=padT;
+  const rMax=rs[n-1];
+  const X = rad => x0 + (rad/rMax)*plotW;
+
+  // λmax vertical scale (symmetric)
+  let la=1e-9; for(const v of lv) la=Math.max(la,Math.abs(v));
+  const Yl = v => y0 + plotH*(0.5 - 0.5*(v/la));   // 0 at mid
+  // iff scale
+  let im=1e-9; for(const v of iv) im=Math.max(im,v);
+  const Yi = v => y0 + plotH*(1 - 0.92*(v/im));
+
+  // grid + zero line
+  ctx.strokeStyle=cssVar('--line'); ctx.lineWidth=1;
+  ctx.strokeRect(x0,y0,plotW,plotH);
+  const yZero=Yl(0);
+  ctx.save(); ctx.setLineDash([4,4]); ctx.strokeStyle=cssVar('--ink-faint');
+  ctx.beginPath(); ctx.moveTo(x0,yZero); ctx.lineTo(x0+plotW,yZero); ctx.stroke(); ctx.restore();
+
+  // λmax fill (blue below-zero region near peak, red above)
+  const neg=cssVar('--field-neg'), pos=cssVar('--field-pos');
+  for(let sgn=0; sgn<2; sgn++){
+    ctx.beginPath();
+    ctx.moveTo(X(rs[0]), yZero);
+    for(let i=0;i<n;i++){ ctx.lineTo(X(rs[i]), Yl(lv[i])); }
+    ctx.lineTo(X(rs[n-1]), yZero);
+    ctx.closePath();
+    ctx.save();
+    ctx.clip();
+    ctx.fillStyle = sgn===0
+      ? 'color-mix(in srgb,'+neg+' 34%,transparent)'
+      : 'color-mix(in srgb,'+pos+' 34%,transparent)';
+    if(sgn===0) ctx.fillRect(x0,yZero,plotW,plotH);   // below zero-line → negative fill
+    else ctx.fillRect(x0,y0,plotW,yZero-y0);           // above zero-line → positive fill
+    ctx.restore();
+  }
+  // λmax curve
+  ctx.strokeStyle=cssVar('--ink'); ctx.lineWidth=2.2; ctx.beginPath();
+  for(let i=0;i<n;i++){ const X_=X(rs[i]), Y_=Yl(lv[i]); i?ctx.lineTo(X_,Y_):ctx.moveTo(X_,Y_); }
+  ctx.stroke();
+  // IFF (dome) profile — grey, right axis
+  ctx.strokeStyle=cssVar('--ink-faint'); ctx.lineWidth=1.8; ctx.setLineDash([2,3]); ctx.beginPath();
+  for(let i=0;i<n;i++){ const X_=X(rs[i]), Y_=Yi(iv[i]); i?ctx.lineTo(X_,Y_):ctx.moveTo(X_,Y_); }
+  ctx.stroke(); ctx.setLineDash([]);
+
+  // The detector's foot = centre of the FIRST POSITIVE λmax plateau peak (the
+  // crest of the concave-up ridge). The λmax=0 crossing is only the inflection
+  // where the ridge begins — drawn faint, to show the detector walks past it.
+  const zci=firstZeroCross(lv);
+  let zeroR=null;
+  if(zci>=0){ const t=(0-lv[zci-1])/(lv[zci]-lv[zci-1]); zeroR=rs[zci-1]+t*(rs[zci]-rs[zci-1]); }
+  const fpi=firstPositivePlateau(lv);
+  const footR = fpi>=0 ? rs[fpi] : null;
+  if(zeroR!==null){
+    const zx=X(zeroR);
+    ctx.save(); ctx.strokeStyle=cssVar('--ink-faint'); ctx.lineWidth=1.4; ctx.setLineDash([4,4]);
+    ctx.beginPath(); ctx.moveTo(zx,y0); ctx.lineTo(zx,y0+plotH); ctx.stroke();
+    ctx.setLineDash([]); ctx.fillStyle=cssVar('--ink-faint');
+    ctx.font='10px ui-monospace,Consolas,monospace'; ctx.textAlign='center';
+    ctx.fillText('λ=0', zx, y0+plotH+22); ctx.textAlign='left'; ctx.restore();
+  }
+  if(footR!==null){
+    const fx=X(footR);
+    ctx.save();
+    ctx.strokeStyle=cssVar('--field-ring'); ctx.lineWidth=2;
+    ctx.beginPath(); ctx.moveTo(fx,y0); ctx.lineTo(fx,y0+plotH); ctx.stroke();
+    // green pick triangle at the crest
+    ctx.fillStyle=cssVar('--pick');
+    const yc=Yl(lv[fpi]);
+    ctx.beginPath(); ctx.moveTo(fx,yc-9); ctx.lineTo(fx-7,yc-20); ctx.lineTo(fx+7,yc-20); ctx.closePath(); ctx.fill();
+    ctx.restore();
+  }
+
+  // axis labels
+  ctx.fillStyle=cssVar('--ink-faint');
+  ctx.font='12px ui-monospace,Consolas,monospace';
+  ctx.fillText('λmax', x0+4, y0+12);
+  ctx.textAlign='right'; ctx.fillText('radius', x0+plotW, y0+plotH+22); ctx.textAlign='left';
+  ctx.fillStyle=cssVar('--ink'); ctx.font='11px ui-monospace,Consolas,monospace';
+  ctx.fillText('+', x0-16, y0+10); ctx.fillText('0', x0-16, yZero+4); ctx.fillText('−', x0-16, y0+plotH-2);
+
+  // readout
+  document.getElementById('ro-foot').textContent = footR!==null ? footR.toFixed(1)+' px' : 'none';
+  document.getElementById('ro-peak').textContent = lv[0].toFixed(3);
+}
+
+/* ---- ray dragging — works on any of the three left-panel maps ---- */
+function setAngleFromEvent(e, cv){
+  const rect = cv.getBoundingClientRect();
+  const clientX = (e.touches? e.touches[0].clientX : e.clientX);
+  const clientY = (e.touches? e.touches[0].clientY : e.clientY);
+  const x = (clientX-rect.left)/rect.width*(N-1);
+  const y = (clientY-rect.top)/rect.height*(N-1);
+  const [pr,pc]=cache.peak;
+  state.angle = Math.atan2(y-pr, x-pc);   // col=x, row=y ; matches cos→col,sin→row
+  drawRaw(); drawSmoothed(); drawField(); drawRay();
+}
+function wireRayDrag(cv){
+  let dragging=false;
+  cv.addEventListener('pointerdown', e=>{ dragging=true; cv.setPointerCapture(e.pointerId); setAngleFromEvent(e,cv); });
+  cv.addEventListener('pointermove', e=>{ if(dragging) setAngleFromEvent(e,cv); });
+  cv.addEventListener('pointerup',   ()=>{ dragging=false; });
+  cv.addEventListener('pointercancel',()=>{ dragging=false; });
+}
+wireRayDrag(fieldCv);
+wireRayDrag(rawCv);
+wireRayDrag(smoothCv);
+
+/* ---- sliders ---- */
+const sliders = [
+  ['s-breadth','v-breadth','breadth', v=>v+' px'],
+  ['s-height','v-height','height',   v=>v],
+  ['s-noise','v-noise','noise',      v=>v],
+  ['s-gauss','v-gauss','gauss',      v=>v.toFixed(1)],
+  ['s-hess','v-hess','hess',         v=>v.toFixed(1)],
+];
+let raf=null;
+function scheduleRender(){ if(raf) return; raf=requestAnimationFrame(()=>{ raf=null; renderLinked(); }); }
+sliders.forEach(([sid,vid,key,fmt])=>{
+  const el=document.getElementById(sid), lab=document.getElementById(vid);
+  const sync=()=>{ state[key]=parseFloat(el.value); lab.textContent=fmt(state[key]); };
+  el.addEventListener('input', ()=>{ sync(); scheduleRender(); });
+  sync();
+});
+
+/* ---- presets ---- */
+const PRESETS = {
+  pipeline:{breadth:20,height:80,noise:6,gauss:8,hess:5},
+  sharp:   {breadth:11,height:95,noise:5,gauss:8,hess:5},
+  broad:   {breadth:34,height:35,noise:5,gauss:8,hess:5},
+  noisy:   {breadth:20,height:70,noise:26,gauss:0,hess:5},
+};
+document.querySelectorAll('button.preset').forEach(btn=>{
+  btn.addEventListener('click', ()=>{
+    const p=PRESETS[btn.dataset.preset];
+    assert(p, "unknown preset "+btn.dataset.preset);
+    Object.assign(state, p);
+    sliders.forEach(([sid,vid,key,fmt])=>{
+      const el=document.getElementById(sid), lab=document.getElementById(vid);
+      el.value=state[key]; lab.textContent=fmt(state[key]);
+    });
+    document.querySelectorAll('button.preset').forEach(b=>b.classList.toggle('on', b===btn));
+    renderLinked();
+  });
+});
+
+/* ================= SECTION 03 · 1-D SLICE OF THE SHARED DOME ============ */
+const scrubCv = document.getElementById('scrubCanvas');
+const scrubVerdict = document.getElementById('scrubVerdict');
+let scrubX = 0.5;   // fraction across
+function drawScrub(){
+  const {ctx,w,h} = fitCanvas(scrubCv);
+  ctx.clearRect(0,0,w,h);
+  // horizontal slice through the peak row of the smoothed dome (stage ②)
+  const [pr]=cache.peak;
+  const row=Math.max(0,Math.min(N-1,Math.round(pr)));
+  const hgt=new Float32Array(N);
+  for(let c=0;c<N;c++) hgt[c]=cache.pre[row*N+c];
+  // 1-D curvature = second difference of the slice
+  const curv=new Float32Array(N);
+  for(let c=1;c<N-1;c++) curv[c]=hgt[c+1]-2*hgt[c]+hgt[c-1];
+  curv[0]=curv[1]; curv[N-1]=curv[N-2];
+
+  let mn=Infinity, mx=-Infinity; for(const v of hgt){ if(v<mn)mn=v; if(v>mx)mx=v; }
+  const rng=(mx-mn)||1;
+  const padL=24, padR=24, padT=26, padB=30;
+  const pw=w-padL-padR, ph=h-padT-padB;
+  const X = c => padL + (c/(N-1))*pw;
+  const Y = v => padT + ph*(1 - 0.9*((v-mn)/rng));
+
+  // baseline
+  ctx.strokeStyle=cssVar('--line'); ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(padL,Y(mn)); ctx.lineTo(padL+pw,Y(mn)); ctx.stroke();
+
+  // coloured curve by curvature sign
+  const neg=cssVar('--field-neg'), pos=cssVar('--field-pos');
+  ctx.lineWidth=3.2; ctx.lineCap='round';
+  let prevUp=null, started=false;
+  for(let c=0;c<N;c++){
+    const up = curv[c] > 0;
+    if(prevUp===null || up!==prevUp){
+      if(started) ctx.stroke();
+      ctx.beginPath(); ctx.strokeStyle = up?pos:neg;
+      ctx.moveTo(X(c),Y(hgt[c])); started=true; prevUp=up;
+    } else { ctx.lineTo(X(c),Y(hgt[c])); }
+  }
+  if(started) ctx.stroke();
+
+  // inflection markers where curvature changes sign
+  ctx.fillStyle=cssVar('--field-ring');
+  const infls=[];
+  for(let c=1;c<N;c++){
+    if((curv[c-1]>0)!==(curv[c]>0)){
+      const t=curv[c-1]/(curv[c-1]-curv[c]);
+      const cc=(c-1)+t;
+      infls.push(cc);
+      const hv=lerp(hgt[c-1],hgt[c],t);
+      ctx.beginPath(); ctx.arc(X(cc),Y(hv),5,0,7); ctx.fill();
+      ctx.save(); ctx.strokeStyle=cssVar('--field-ring'); ctx.setLineDash([3,3]); ctx.lineWidth=1.5;
+      ctx.beginPath(); ctx.moveTo(X(cc),Y(hv)); ctx.lineTo(X(cc),padT+ph); ctx.stroke(); ctx.restore();
+    }
+  }
+
+  // peak label at the peak column
+  const [ , pc]=cache.peak;
+  ctx.fillStyle=cssVar('--ink-faint'); ctx.font='12px ui-monospace,Consolas,monospace';
+  ctx.fillText('peak', X(pc)-14, padT-8);
+
+  // probe
+  const ccol=scrubX*(N-1);
+  const ci=Math.max(1,Math.min(N-2,Math.round(ccol)));
+  const up=curv[ci]>0;
+  ctx.fillStyle=cssVar('--ink');
+  ctx.beginPath(); ctx.arc(X(ccol),Y(cache.pre[row*N+ci]),7,0,7); ctx.fill();
+  ctx.strokeStyle=cssVar('--surface'); ctx.lineWidth=2; ctx.stroke();
+
+  // verdict
+  const nInfl = infls.length;
+  const badge = up
+    ? '<div class="badge up">λ &gt; 0 · concave-up (foot side)</div>'
+    : '<div class="badge down">λ &lt; 0 · concave-down (dome cap)</div>';
+  scrubVerdict.innerHTML = badge +
+    '<p style="margin:0" class="dim">The probe sits where the ground is bending '+
+    (up?'<b>up</b> — out past an inflection, on the foot.':'<b>over</b> — inside the cap, near the peak.')+
+    ' This slice has <b>'+nInfl+'</b> inflection'+(nInfl===1?'':'s')+' right now — raise '+
+    '<span class="mono">σ<sub>gauss</sub></span> in the sandbox to clean up spurious ones.</p>';
+}
+function scrubFromEvent(e){
+  const rect=scrubCv.getBoundingClientRect();
+  const clientX=(e.touches? e.touches[0].clientX : e.clientX);
+  scrubX = Math.min(1, Math.max(0, (clientX-rect.left)/rect.width));
+  drawScrub();
+}
+let sdrag=false;
+scrubCv.addEventListener('pointerdown', e=>{ sdrag=true; scrubCv.setPointerCapture(e.pointerId); scrubFromEvent(e); });
+scrubCv.addEventListener('pointermove', e=>{ if(sdrag) scrubFromEvent(e); });
+scrubCv.addEventListener('pointerup',   ()=>{ sdrag=false; });
+scrubCv.addEventListener('pointercancel',()=>{ sdrag=false; });
+
+/* ================= SECTION 04 · COMPONENT PANELS + EIGENVECTORS ========= *
+ * All read the SHARED cache — the same dome as the sandbox.               */
+function drawMinis(){
+  for(const [id,arr] of [['mini-grr',cache.grr],['mini-gcc',cache.gcc],['mini-grc',cache.grc]]){
+    const cv=document.getElementById(id); const {ctx,w,h}=fitCanvas(cv);
+    paintField(ctx,w,h,arr,robustScale(arr));
+  }
+}
+
+/* --- eigenvector probe --- */
+const eigCv=document.getElementById('eigCanvas');
+let eigP={r:CENTER-24, c:CENTER+24};
+function drawArrowBi(ctx,px,py,dx,dy,len,color){
+  ctx.save(); ctx.strokeStyle=color; ctx.fillStyle=color; ctx.lineWidth=3; ctx.lineCap='round';
+  for(const s of [1,-1]){
+    const ex=px+dx*len*s, ey=py+dy*len*s;
+    ctx.beginPath(); ctx.moveTo(px,py); ctx.lineTo(ex,ey); ctx.stroke();
+    const ang=Math.atan2(dy*s,dx*s);
+    ctx.beginPath();
+    ctx.moveTo(ex,ey);
+    ctx.lineTo(ex-8*Math.cos(ang-0.5), ey-8*Math.sin(ang-0.5));
+    ctx.lineTo(ex-8*Math.cos(ang+0.5), ey-8*Math.sin(ang+0.5));
+    ctx.closePath(); ctx.fill();
+  }
+  ctx.restore();
+}
+function drawEig(){
+  const {ctx,w,h}=fitCanvas(eigCv);
+  paintField(ctx,w,h,cache.lmax,robustScale(cache.lmax));
+  ctx.save(); ctx.fillStyle=cssVar('--surface'); ctx.globalAlpha=0.4; ctx.fillRect(0,0,w,h); ctx.restore();
+  strokeSegs(ctx, cache.segs, w,h, cssVar('--field-ring'), 1.6);
+  const px=gx(eigP.c,w), py=gy(eigP.r,h);
+  const ri=Math.max(0,Math.min(N-1,Math.round(eigP.r))), ci=Math.max(0,Math.min(N-1,Math.round(eigP.c)));
+  const a=cache.grr[ri*N+ci], c2=cache.gcc[ri*N+ci], b=cache.grc[ri*N+ci];
+  const lmax=cache.lmax[ri*N+ci], lmin=cache.lmin[ri*N+ci];
+  // eigenvector (vr,vc) for eigenvalue L of [[a,b],[b,c2]]:  v = (b, L-a), fallback (L-c2, b)
+  const evec=(L)=>{ let x=b, y=(L-a); if(Math.abs(x)+Math.abs(y)<1e-7){ x=(L-c2); y=b; } const n=Math.hypot(x,y)||1; return [x/n,y/n]; };
+  const vmax=evec(lmax), vmin=evec(lmin);
+  // (vr,vc): row→screen-y, col→screen-x
+  drawArrowBi(ctx, px,py, vmin[1],vmin[0], 40, cssVar('--field-neg'));
+  drawArrowBi(ctx, px,py, vmax[1],vmax[0], 46, cssVar('--field-pos'));
+  ctx.save(); ctx.fillStyle=cssVar('--ink'); ctx.strokeStyle=cssVar('--surface'); ctx.lineWidth=2;
+  ctx.beginPath(); ctx.arc(px,py,5,0,7); ctx.fill(); ctx.stroke(); ctx.restore();
+  document.getElementById('eig-lmax').textContent=lmax.toFixed(3);
+  document.getElementById('eig-lmin').textContent=lmin.toFixed(3);
+  document.getElementById('eig-sign').textContent =
+    lmax<=0 ? 'concave-down (cap)' : (lmin>=0 ? 'concave-up (foot)' : 'saddle · rolling over');
+}
+function eigFromEvent(e){
+  const rect=eigCv.getBoundingClientRect();
+  const cx=(e.touches?e.touches[0].clientX:e.clientX), cy=(e.touches?e.touches[0].clientY:e.clientY);
+  eigP.c=Math.min(N-1,Math.max(0,(cx-rect.left)/rect.width*(N-1)));
+  eigP.r=Math.min(N-1,Math.max(0,(cy-rect.top)/rect.height*(N-1)));
+  drawEig();
+}
+let edrag=false;
+eigCv.addEventListener('pointerdown', e=>{ edrag=true; eigCv.setPointerCapture(e.pointerId); eigFromEvent(e); });
+eigCv.addEventListener('pointermove', e=>{ if(edrag) eigFromEvent(e); });
+eigCv.addEventListener('pointerup',   ()=>{ edrag=false; });
+eigCv.addEventListener('pointercancel',()=>{ edrag=false; });
+
+/* ================= SECTION 05 · 3-D SURFACE VIEWER ===================== *
+ * Built from the SHARED cache — the sandbox dome, stood up.               */
+const stage=document.getElementById('stage');
+const M=46, MD=2/(M-1), ZAMP=0.85;
+let surf=null;
+function buildSurface(){
+  const pre=cache.pre, lmax=cache.lmax;
+  const stride=(N-1)/(M-1);
+  const domeZ=new Float32Array(M*M), lval=new Float32Array(M*M);
+  let dmax=1e-9; for(const v of pre) dmax=Math.max(dmax,v);
+  const lscale=robustScale(lmax);
+  for(let i=0;i<M;i++)for(let j=0;j<M;j++){
+    const r=i*stride, c=j*stride;
+    domeZ[i*M+j]=sampleBilinear(pre,r,c);
+    lval[i*M+j]=sampleBilinear(lmax,r,c);
+  }
+  surf={domeZ,lval,dmax,lscale,ring:cache.segs,stride};
+}
+function vertZ(i,j){                     // morphed height at mesh node (i,j)
+  const zDome=surf.domeZ[i*M+j]/surf.dmax;                 // 0..1
+  let t=surf.lval[i*M+j]/surf.lscale; if(t>1.2)t=1.2; else if(t<-1.2)t=-1.2;
+  return (zDome*(1-state.morph) + t*state.morph)*ZAMP;
+}
+function zAt(fi,fj){                      // morphed height at fractional mesh coord
+  const i0=Math.max(0,Math.min(M-1,Math.floor(fi))), j0=Math.max(0,Math.min(M-1,Math.floor(fj)));
+  return vertZ(i0,j0);                    // nearest is fine for the thin ring overlay
+}
+function project(x,y,z,cx,cy,sc){
+  const cyw=Math.cos(state.yaw), syw=Math.sin(state.yaw);
+  const x1=x*cyw - y*syw, y1=x*syw + y*cyw;
+  const cp=Math.cos(state.pitch), sp=Math.sin(state.pitch);
+  const y2=y1*cp - z*sp, z2=y1*sp + z*cp;
+  return {sx:cx+x1*sc, sy:cy - z2*sc, depth:y2};
+}
+function makeColT(){    // returns a mixer with the palette read once (hot-path safe)
+  const neg=hexToRgb(cssVar('--field-neg')), mid=hexToRgb(cssVar('--field-mid')), pos=hexToRgb(cssVar('--field-pos'));
+  return t=>{ if(t>1)t=1; else if(t<-1)t=-1; return t<0? lerpRgb(mid,neg,-t): lerpRgb(mid,pos,t); };
+}
+function draw3D(){
+  if(!surf) buildSurface();
+  const {ctx,w,h}=fitCanvas(stage);
+  ctx.clearRect(0,0,w,h);
+  const sc=Math.min(w,h)*0.62, cx=w/2, cy=h*0.60;
+  // world vertices + projections
+  const P=new Array(M*M);
+  const half=(M-1)/2;
+  for(let i=0;i<M;i++)for(let j=0;j<M;j++){
+    const x=(j-half)*MD, y=(i-half)*MD, z=vertZ(i,j);
+    P[i*M+j]=project(x,y,z,cx,cy,sc);
+  }
+  const L=[-0.4,-0.55,0.73];             // light direction (world)
+  const colT=makeColT();                 // palette read once, not per quad
+  const quads=[];
+  for(let i=0;i<M-1;i++)for(let j=0;j<M-1;j++){
+    const a=P[i*M+j], b=P[i*M+j+1], c=P[(i+1)*M+j+1], d=P[(i+1)*M+j];
+    // world-space normal from mesh spacing & height slopes
+    const zx=(vertZ(i,j+1)-vertZ(i,j)), zy=(vertZ(i+1,j)-vertZ(i,j));
+    let nx=-zx, ny=-zy, nz=MD; const nn=Math.hypot(nx,ny,nz)||1; nx/=nn; ny/=nn; nz/=nn;
+    let sh=nx*L[0]+ny*L[1]+nz*L[2]; sh=0.45+0.62*Math.max(0,sh);
+    const tt=surf.lval[i*M+j]/surf.lscale;
+    const base=colT(tt);
+    const col='rgb('+Math.round(base[0]*sh)+','+Math.round(base[1]*sh)+','+Math.round(base[2]*sh)+')';
+    quads.push({depth:(a.depth+b.depth+c.depth+d.depth)/4, a,b,c,d, col});
+  }
+  quads.sort((p,q)=>q.depth-p.depth);    // far first
+  for(const qd of quads){
+    ctx.beginPath();
+    ctx.moveTo(qd.a.sx,qd.a.sy); ctx.lineTo(qd.b.sx,qd.b.sy);
+    ctx.lineTo(qd.c.sx,qd.c.sy); ctx.lineTo(qd.d.sx,qd.d.sy); ctx.closePath();
+    ctx.fillStyle=qd.col; ctx.strokeStyle=qd.col; ctx.lineWidth=0.6; ctx.fill(); ctx.stroke();
+  }
+  // λmax=0 ring, lifted just above the surface
+  ctx.save(); ctx.strokeStyle=cssVar('--field-ring'); ctx.lineWidth=3; ctx.lineCap='round';
+  ctx.beginPath();
+  for(const s of surf.ring){
+    const seg=s.map(pt=>{ const fj=pt[0]/surf.stride, fi=pt[1]/surf.stride;
+      const x=(fj-half)*MD, y=(fi-half)*MD, z=zAt(fi,fj)+0.012;
+      return project(x,y,z,cx,cy,sc); });
+    ctx.moveTo(seg[0].sx,seg[0].sy); ctx.lineTo(seg[1].sx,seg[1].sy);
+  }
+  ctx.stroke(); ctx.restore();
+}
+/* orbit */
+let vdrag=false, vlx=0, vly=0;
+stage.addEventListener('pointerdown', e=>{ vdrag=true; stage.setPointerCapture(e.pointerId); vlx=e.clientX; vly=e.clientY; });
+stage.addEventListener('pointermove', e=>{ if(!vdrag) return;
+  state.yaw += (e.clientX-vlx)*0.01; state.pitch += (e.clientY-vly)*0.008;
+  state.pitch=Math.max(0.18,Math.min(1.42,state.pitch)); vlx=e.clientX; vly=e.clientY; draw3D(); });
+stage.addEventListener('pointerup',   ()=>{ vdrag=false; });
+stage.addEventListener('pointercancel',()=>{ vdrag=false; });
+/* morph control */
+const morphEl=document.getElementById('s-morph'), morphVal=document.getElementById('v-morph');
+function syncMorph(){ state.morph=parseFloat(morphEl.value)/100; morphVal.textContent=state.morph.toFixed(2); }
+morphEl.addEventListener('input', ()=>{ syncMorph(); draw3D(); }); syncMorph();
+
+/* ================= SECTION 06 · THRESHOLD COMPARISON (live dome) ======= */
+const cmpCv = document.getElementById('cmpCanvas');
+document.getElementById('thr-toggle').addEventListener('change', e=>{ state.showThr=e.target.checked; drawCmp(); });
+function drawCmp(){
+  const {ctx,w,h} = fitCanvas(cmpCv);
+  ctx.clearRect(0,0,w,h);
+  paintField(ctx,w,h,cache.lmax);
+  strokeSegs(ctx, cache.zero, w,h, cssVar('--ink-faint'), 1.4, [4,4]);
+  strokeSegs(ctx, cache.segs, w,h, cssVar('--field-ring'), 2.6);
+  // peak marker
+  const [pr,pc]=cache.peak; const px=gx(pc,w), py=gy(pr,h);
+  ctx.save(); ctx.strokeStyle=cssVar('--ink'); ctx.lineWidth=2.4;
+  ctx.beginPath();
+  ctx.moveTo(px-6,py-6); ctx.lineTo(px+6,py+6);
+  ctx.moveTo(px-6,py+6); ctx.lineTo(px+6,py-6);
+  ctx.stroke(); ctx.restore();
+
+  const lR=ringRadius(cache.segs);
+  let thrR=null, peakVal=-Infinity;
+  for(const v of cache.pre) if(v>peakVal) peakVal=v;
+  if(state.showThr){
+    if(peakVal>state.thrLevel){
+      const thrSegs=isoContour(cache.pre, state.thrLevel);
+      strokeSegs(ctx, thrSegs, w,h, cssVar('--ink-soft'), 2.2, [7,5]);
+      thrR=ringRadius(thrSegs);
+    }
+  }
+  document.getElementById('co-lmax').textContent = lR!=null ? lR.toFixed(1)+' px' : 'none';
+  if(!state.showThr) document.getElementById('co-thr').textContent = 'off';
+  else document.getElementById('co-thr').textContent = thrR!=null ? thrR.toFixed(1)+' px' : 'peak below cutoff';
+  const delta = (state.showThr && thrR!=null && lR!=null && lR>1e-6)
+    ? (Math.abs(thrR-lR)/lR*100).toFixed(0)+'%'
+    : '–';
+  document.getElementById('co-delta').textContent = delta;
+}
+
+/* ================= THEME TOGGLE ================= */
+const themebtn=document.getElementById('themebtn');
+function applyTheme(t){
+  if(t) document.documentElement.setAttribute('data-theme',t);
+  renderLinked();
+}
+themebtn.addEventListener('click', ()=>{
+  const cur=document.documentElement.getAttribute('data-theme');
+  const sysDark=window.matchMedia('(prefers-color-scheme:dark)').matches;
+  const next = cur ? (cur==='dark'?'light':'dark') : (sysDark?'light':'dark');
+  applyTheme(next);
+});
+window.matchMedia('(prefers-color-scheme:dark)').addEventListener('change', ()=>{ if(!document.documentElement.getAttribute('data-theme')) renderLinked(); });
+
+/* ================= ONE RENDER TO RULE THEM ALL ================= *
+ * Recompute the shared dome, then redraw every view that reads it. */
+function renderLinked(){
+  recompute();
+  // sandbox (02)
+  drawRaw(); drawSmoothed(); drawField(); drawRay();
+  // 1-D slice (03)
+  drawScrub();
+  // Hessian components + eigenvectors (04)
+  drawMinis(); drawEig();
+  // 3-D surface (05)
+  buildSurface(); draw3D();
+  // threshold comparison (06)
+  drawCmp();
+}
+let rz=null;
+window.addEventListener('resize', ()=>{ if(rz) cancelAnimationFrame(rz); rz=requestAnimationFrame(renderLinked); });
+
+/* init */
+document.querySelector('button.preset[data-preset="pipeline"]').classList.add('on');
+renderLinked();
+</script>
+</body>
+</html>
