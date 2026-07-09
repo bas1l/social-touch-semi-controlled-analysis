@@ -76,8 +76,10 @@ from analysis.receptive_field_mapping.rendering.neuron_type_colors import (
     SessionColorScheme,
     build_session_color_scheme,
 )
-from analysis.receptive_field_mapping.rendering.rf_population_map_renderer import (
+from analysis.receptive_field_mapping.data.rf_grid_interpolation import (
     _fill_interior_face_holes,
+)
+from analysis.receptive_field_mapping.rendering.rf_population_map_renderer import (
     compute_uv_to_mm_scale,
 )
 from analysis.receptive_field_mapping.rendering.rf_spatial_tuning_renderer import (

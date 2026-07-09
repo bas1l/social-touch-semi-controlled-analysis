@@ -21,7 +21,27 @@ from .rf_baseline_deviation import (
 from .rf_inflection_boundary import (
     InflectionBoundary,
     compute_inflection_boundary,
+    compute_laplacian_arrays,
     inflection_boundary_to_dict,
+)
+from .rf_gradient_boundary import (
+    GradientBoundary,
+    compute_gradient_magnitude,
+    compute_gradient_ridge,
+    gradient_boundary_to_dict,
+)
+from .rf_radial_foot_boundary import (
+    RadialFootBoundary,
+    compute_radial_foot_boundary,
+    envelope_contour_to_footprint,
+    radial_foot_boundary_to_dict,
+)
+from .rf_ray_sampling import (
+    uv_field_interpolator,
+    ray_contour_crossing,
+    representative_ray_direction,
+    first_positive_plateau_radius,
+    lmax_zero_crossing_radius,
 )
 
 __all__ = [
@@ -43,5 +63,22 @@ __all__ = [
     # rf_inflection_boundary
     "InflectionBoundary",
     "compute_inflection_boundary",
+    "compute_laplacian_arrays",
     "inflection_boundary_to_dict",
+    # rf_gradient_boundary
+    "GradientBoundary",
+    "compute_gradient_magnitude",
+    "compute_gradient_ridge",
+    "gradient_boundary_to_dict",
+    # rf_radial_foot_boundary
+    "RadialFootBoundary",
+    "compute_radial_foot_boundary",
+    "envelope_contour_to_footprint",
+    "radial_foot_boundary_to_dict",
+    # rf_ray_sampling
+    "uv_field_interpolator",
+    "ray_contour_crossing",
+    "representative_ray_direction",
+    "first_positive_plateau_radius",
+    "lmax_zero_crossing_radius",
 ]

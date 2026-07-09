@@ -11,7 +11,7 @@ from analysis.receptive_field_mapping.data.rf_population_heatmap import (
     clean_heatmap_islands,
     compute_threshold_from_ratio,
 )
-from analysis.receptive_field_mapping.rendering.rf_population_map_renderer import (
+from analysis.receptive_field_mapping.data.rf_grid_interpolation import (
     compute_interpolated_grid,
 )
 
