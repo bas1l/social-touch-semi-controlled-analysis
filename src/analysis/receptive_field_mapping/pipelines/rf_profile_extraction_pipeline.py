@@ -252,6 +252,21 @@ radial Hessian field (`boundary_method = 'radial'`) and are skipped otherwise.
 Each profile figure is saved in two formats:
 - **PNG** (150 dpi) for quick inspection and screen display.
 - **SVG** (vector) for publication-quality figure preparation.
+
+## Output layout
+
+Figures are grouped into per-category subfolders under each session directory
+(`iff_{metric}/{session_id}/`) rather than sitting flat:
+- `profile_raw/` — raw IFF vs U/V profiles.
+- `profile_smoothed/` — Gaussian-smoothed IFF profiles.
+- `laplacian_1d/` — 1D Laplacian along the scan axis.
+- `laplacian_2d/` — 2D Laplacian context maps with the scan line overlaid.
+- `gradient_1d/` — 1D gradient magnitude along the scan axis.
+- `combined/` — raw+smoothed+λmax overlay (radial method only).
+- `raycast/` — Hessian λmax raycast sections (radial method only).
+
+The per-gesture profile CSV tables and the `*_rf_profiles_done.json` sentinel
+stay at the session directory root.
 """
 
 
@@ -381,9 +396,26 @@ def run_rf_profile_extraction(
             if has_hessian:
                 radial_lmax = npz[radial_lmax_key]
 
+            # Category subdirectories — group figures by profile type rather
+            # than leaving every PNG/SVG flat in the session folder. Each dir
+            # is created only when its category is actually produced (gated by
+            # the same feature flags as the figures below), so no empty
+            # directories are left behind.
+            raw_dir = session_output_dir / 'profile_raw'
+            raw_dir.mkdir(parents=True, exist_ok=True)
             if has_laplacian:
+                smoothed_dir = session_output_dir / 'profile_smoothed'
+                smoothed_dir.mkdir(parents=True, exist_ok=True)
+                laplacian_1d_dir = session_output_dir / 'laplacian_1d'
+                laplacian_1d_dir.mkdir(parents=True, exist_ok=True)
                 laplacian_2d_dir = session_output_dir / 'laplacian_2d'
                 laplacian_2d_dir.mkdir(parents=True, exist_ok=True)
+            if has_gradient:
+                gradient_1d_dir = session_output_dir / 'gradient_1d'
+                gradient_1d_dir.mkdir(parents=True, exist_ok=True)
+            if has_hessian and has_laplacian:
+                combined_dir = session_output_dir / 'combined'
+                combined_dir.mkdir(parents=True, exist_ok=True)
 
             for center_type, center in centers:
                 if center is None:
@@ -394,7 +426,7 @@ def run_rf_profile_extraction(
                 iff_u = grid_z[:, j]
                 crossings_u = find_boundary_u_crossings(contour_uv, v_coords[j])
                 grad_crossings_u = find_boundary_u_crossings(gradient_contour_uv, v_coords[j])
-                u_png = session_output_dir / f'{session_id}_rf_profile_u_{center_type}_{gtype}.png'
+                u_png = raw_dir / f'{session_id}_rf_profile_u_{center_type}_{gtype}.png'
                 render_center_axis_profile(
                     coords=u_coords,
                     iff_values=iff_u,
@@ -409,7 +441,7 @@ def run_rf_profile_extraction(
 
                 if has_laplacian:
                     smoothed_u = smoothed[:, j]
-                    u_smooth_png = session_output_dir / f'{session_id}_rf_profile_smoothed_u_{center_type}_{gtype}.png'
+                    u_smooth_png = smoothed_dir / f'{session_id}_rf_profile_smoothed_u_{center_type}_{gtype}.png'
                     render_center_axis_profile(
                         coords=u_coords,
                         iff_values=smoothed_u,
@@ -424,7 +456,7 @@ def run_rf_profile_extraction(
                     produced_svgs.append(str(u_smooth_png.with_suffix('.svg')))
 
                     lap_u = laplacian[:, j]
-                    u_lap1d_png = session_output_dir / f'{session_id}_rf_laplacian_1d_u_{center_type}_{gtype}.png'
+                    u_lap1d_png = laplacian_1d_dir / f'{session_id}_rf_laplacian_1d_u_{center_type}_{gtype}.png'
                     render_laplacian_profile(
                         coords=u_coords,
                         lap_values=lap_u,
@@ -452,7 +484,7 @@ def run_rf_profile_extraction(
 
                 if has_gradient:
                     grad_u = gradient_mag[:, j]
-                    u_grad_png = session_output_dir / f'{session_id}_rf_gradient_1d_u_{center_type}_{gtype}.png'
+                    u_grad_png = gradient_1d_dir / f'{session_id}_rf_gradient_1d_u_{center_type}_{gtype}.png'
                     render_gradient_profile(
                         coords=u_coords,
                         grad_values=grad_u,
@@ -465,7 +497,7 @@ def run_rf_profile_extraction(
                     produced_svgs.append(str(u_grad_png.with_suffix('.svg')))
 
                 if has_hessian and has_laplacian:
-                    u_combined_png = session_output_dir / f'{session_id}_rf_profile_combined_u_{center_type}_{gtype}.png'
+                    u_combined_png = combined_dir / f'{session_id}_rf_profile_combined_u_{center_type}_{gtype}.png'
                     render_combined_profile(
                         coords=u_coords,
                         iff_raw=grid_z[:, j],
@@ -485,7 +517,7 @@ def run_rf_profile_extraction(
                 iff_v = grid_z[i, :]
                 crossings_v = find_boundary_v_crossings(contour_uv, u_coords[i])
                 grad_crossings_v = find_boundary_v_crossings(gradient_contour_uv, u_coords[i])
-                v_png = session_output_dir / f'{session_id}_rf_profile_v_{center_type}_{gtype}.png'
+                v_png = raw_dir / f'{session_id}_rf_profile_v_{center_type}_{gtype}.png'
                 render_center_axis_profile(
                     coords=v_coords,
                     iff_values=iff_v,
@@ -500,7 +532,7 @@ def run_rf_profile_extraction(
 
                 if has_laplacian:
                     smoothed_v = smoothed[i, :]
-                    v_smooth_png = session_output_dir / f'{session_id}_rf_profile_smoothed_v_{center_type}_{gtype}.png'
+                    v_smooth_png = smoothed_dir / f'{session_id}_rf_profile_smoothed_v_{center_type}_{gtype}.png'
                     render_center_axis_profile(
                         coords=v_coords,
                         iff_values=smoothed_v,
@@ -515,7 +547,7 @@ def run_rf_profile_extraction(
                     produced_svgs.append(str(v_smooth_png.with_suffix('.svg')))
 
                     lap_v = laplacian[i, :]
-                    v_lap1d_png = session_output_dir / f'{session_id}_rf_laplacian_1d_v_{center_type}_{gtype}.png'
+                    v_lap1d_png = laplacian_1d_dir / f'{session_id}_rf_laplacian_1d_v_{center_type}_{gtype}.png'
                     render_laplacian_profile(
                         coords=v_coords,
                         lap_values=lap_v,
@@ -543,7 +575,7 @@ def run_rf_profile_extraction(
 
                 if has_gradient:
                     grad_v = gradient_mag[i, :]
-                    v_grad_png = session_output_dir / f'{session_id}_rf_gradient_1d_v_{center_type}_{gtype}.png'
+                    v_grad_png = gradient_1d_dir / f'{session_id}_rf_gradient_1d_v_{center_type}_{gtype}.png'
                     render_gradient_profile(
                         coords=v_coords,
                         grad_values=grad_v,
@@ -556,7 +588,7 @@ def run_rf_profile_extraction(
                     produced_svgs.append(str(v_grad_png.with_suffix('.svg')))
 
                 if has_hessian and has_laplacian:
-                    v_combined_png = session_output_dir / f'{session_id}_rf_profile_combined_v_{center_type}_{gtype}.png'
+                    v_combined_png = combined_dir / f'{session_id}_rf_profile_combined_v_{center_type}_{gtype}.png'
                     render_combined_profile(
                         coords=v_coords,
                         iff_raw=grid_z[i, :],
@@ -574,7 +606,9 @@ def run_rf_profile_extraction(
                 # Raycast section (HTML-style): one representative ray from this
                 # centre. Requires the radial Hessian field and a boundary contour.
                 if has_hessian and has_laplacian and contour_uv is not None and len(contour_uv) > 0:
-                    raycast_png = session_output_dir / f'{session_id}_rf_raycast_{center_type}_{gtype}.png'
+                    raycast_dir = session_output_dir / 'raycast'
+                    raycast_dir.mkdir(parents=True, exist_ok=True)
+                    raycast_png = raycast_dir / f'{session_id}_rf_raycast_{center_type}_{gtype}.png'
                     render_raycast_section(
                         grid_u=grid_u, grid_v=grid_v,
                         lmax=radial_lmax, grid_z=grid_z, smoothed=smoothed,
