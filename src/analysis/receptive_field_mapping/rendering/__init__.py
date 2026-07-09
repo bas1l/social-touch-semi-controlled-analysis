@@ -8,7 +8,6 @@ Import it directly: from analysis.receptive_field_mapping.rendering.rf_session_c
 from .rf_2d_renderer import render_2d_heatmap
 from .rf_cluster_visualizer import RFRenderContext, render_forearm_heatmap
 from .rf_population_map_renderer import (
-    compute_interpolated_grid,
     compute_standalone_figwidth,
     render_population_rf_map,
     render_population_rf_composite,
@@ -35,7 +34,6 @@ __all__ = [
     "RFRenderContext",
     "render_forearm_heatmap",
     # rf_population_map_renderer
-    "compute_interpolated_grid",
     "render_population_rf_map",
     "render_population_rf_composite",
     "compute_standalone_figwidth",
