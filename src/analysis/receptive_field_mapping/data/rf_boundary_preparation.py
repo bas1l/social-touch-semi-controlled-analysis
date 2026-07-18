@@ -72,23 +72,29 @@ def _map_slim_to_raw(pop_data, slim_V: np.ndarray, session_id: str) -> np.ndarra
     return nearest_orig_for_slim
 
 
-def _build_gesture_results(
+def _compute_param_free_fields(
     pop_data,
     rf_data,
     n_verts: int,
     nearest_orig_for_slim: np.ndarray,
-    min_overlap_pct: float,
     session_id: str,
-):
-    """Compute per-gesture SLIM heatmaps + the synthetic ``stroke`` subset.
+) -> dict:
+    """Single source of the parameter-free per-gesture field math.
 
-    Returns ``(results, per_gesture_slim_raw, per_gesture_slim_unique_count)``
-    with ``results`` in canonical gesture order.
+    For every gesture subset (``'all'`` + :data:`GESTURE_TYPES` plus the
+    synthetic ``'stroke'`` = stroke_proximal + stroke_distal) computes, using
+    only production functions and *no* contour parameter, the SLIM-mapped raw
+    heatmap, the SLIM-mapped unique-touch count, and the touch count:
+
+        {gtype: (slim_raw, slim_unique_count, n_touches)}
+
+    in canonical gesture order. Zero-touch subsets are skipped with a warning.
+    This is the exact param-free computation the boundary extractor used to inline
+    inside ``_add_subset`` — factored out so the ``spatial_build_response_fields``
+    task and the extractor share it with no duplicated math.
     """
     subsets = ['all'] + list(GESTURE_TYPES)
-    results: dict = {}
-    per_gesture_slim_raw: dict = {}
-    per_gesture_slim_unique_count: dict = {}
+    fields: dict = {}
 
     def _add_subset(gtype: str, gesture_touch_indices: np.ndarray) -> None:
         n_gesture_touches = len(gesture_touch_indices)
@@ -105,12 +111,11 @@ def _build_gesture_results(
             cp_mask,
             n_verts,
         )
-        per_gesture_slim_raw[gtype] = heatmap[nearest_orig_for_slim]
-        per_gesture_slim_unique_count[gtype] = unique_count[nearest_orig_for_slim]
-        threshold = compute_threshold_from_ratio(min_overlap_pct, n_gesture_touches)
-        thresholded = apply_vertex_threshold(heatmap, unique_count, threshold)
-        slim_heatmap = thresholded[nearest_orig_for_slim]
-        results[gtype] = (slim_heatmap, n_gesture_touches, threshold)
+        fields[gtype] = (
+            heatmap[nearest_orig_for_slim],
+            unique_count[nearest_orig_for_slim],
+            n_gesture_touches,
+        )
 
     for gtype in subsets:
         if gtype == 'all':
@@ -130,8 +135,8 @@ def _build_gesture_results(
         _add_subset(gtype, gesture_touch_indices)
 
     # --- Synthesize 'stroke' = stroke_proximal + stroke_distal ---
-    _sp_in = 'stroke_proximal' in results
-    _sd_in = 'stroke_distal' in results
+    _sp_in = 'stroke_proximal' in fields
+    _sd_in = 'stroke_distal' in fields
     if _sp_in or _sd_in:
         parts = []
         if _sp_in:
@@ -143,29 +148,113 @@ def _build_gesture_results(
         if len(stroke_touch_indices) > 0:
             _add_subset('stroke', stroke_touch_indices)
 
-    results = {k: results[k] for k in _CANONICAL_ORDER if k in results}
+    fields = {k: fields[k] for k in _CANONICAL_ORDER if k in fields}
+    return fields
+
+
+def build_param_free_fields(inputs: BoundaryInputs) -> dict[str, tuple]:
+    """Compute the parameter-free per-(session, gesture) response fields.
+
+    Public production helper shared by the ``spatial_build_response_fields`` task
+    and the boundary extractor. Given raw :class:`BoundaryInputs`, returns
+
+        {gtype: (slim_raw, slim_unique_count, n_touches)}
+
+    in canonical gesture order (incl. the synthetic ``'stroke'`` subset). Uses
+    only production functions (``compute_rf_heatmap`` /
+    ``compute_unique_touch_count`` + the SLIM<->raw nearest-neighbour map) and no
+    contour parameter, so identical upstream inputs yield byte-identical fields.
+    ``slim_raw`` is float64, ``slim_unique_count`` is int64, ``n_touches`` is a
+    Python ``int``.
+    """
+    pop_data = inputs.pop_data
+    rf_data = inputs.rf_data
+    n_verts = len(pop_data.forearm_vertices)
+    nearest_orig_for_slim = _map_slim_to_raw(pop_data, inputs.slim_V, inputs.session_id)
+    return _compute_param_free_fields(
+        pop_data, rf_data, n_verts, nearest_orig_for_slim, inputs.session_id,
+    )
+
+
+def _build_gesture_results(
+    param_free: dict,
+    params: BoundaryParams,
+    per_gesture_params,
+):
+    """Threshold the param-free per-gesture fields into SLIM heatmaps.
+
+    Returns ``(results, per_gesture_slim_raw, per_gesture_slim_unique_count)``
+    with ``results`` in the (canonical) gesture order of ``param_free``.
+
+    ``param_free`` (``{gtype -> (slim_raw, slim_unique_count, n_touches)}``) is
+    the parameter-free field math — either recomputed via
+    :func:`build_param_free_fields` or read verbatim from the shared
+    ``spatial_build_response_fields`` NPZ (byte-identical, since float64/int64
+    round-trip exactly). Thresholding is applied on top here. Because
+    ``apply_vertex_threshold`` is elementwise, the SLIM-map-then-threshold order
+    used here is byte-identical to the previous threshold-then-SLIM-map order.
+
+    ``per_gesture_params`` (``dict[gtype -> GestureContourParams]`` or ``None``)
+    supplies the per-(session, gesture) ``min_overlap_pct`` when
+    ``use_tuned_params`` is on; when ``None`` the global
+    ``params.min_overlap_pct`` scalar is used for every subset (the unchanged,
+    byte-identical default path).
+    """
+    results: dict = {}
+    per_gesture_slim_raw: dict = {}
+    per_gesture_slim_unique_count: dict = {}
+
+    for gtype, (slim_raw, slim_unique_count, n_gesture_touches) in param_free.items():
+        per_gesture_slim_raw[gtype] = slim_raw
+        per_gesture_slim_unique_count[gtype] = slim_unique_count
+        min_overlap_pct = (
+            per_gesture_params[gtype].effective_min_overlap_pct()
+            if per_gesture_params is not None
+            else params.min_overlap_pct
+        )
+        threshold = compute_threshold_from_ratio(min_overlap_pct, n_gesture_touches)
+        slim_heatmap = apply_vertex_threshold(slim_raw, slim_unique_count, threshold)
+        results[gtype] = (slim_heatmap, n_gesture_touches, threshold)
+
     return results, per_gesture_slim_raw, per_gesture_slim_unique_count
 
 
 def prepare_session_boundary_data(
     inputs: BoundaryInputs,
     params: BoundaryParams,
+    per_gesture_params=None,
+    param_free: dict | None = None,
 ) -> PreparedBoundaryData | None:
     """Derive everything needed before boundary detection for one session.
 
     Returns ``None`` when no gesture subset had any touches (the caller then
     writes an empty sentinel and skips). Raises ``ValueError`` if the mandatory
     ``'all'`` subset is missing when other subsets are present.
+
+    ``param_free`` (``{gtype -> (slim_raw, slim_unique_count, n_touches)}`` or
+    ``None``) is the parameter-free per-gesture field math. The pipeline passes
+    the fields read verbatim from the shared ``spatial_build_response_fields``
+    NPZ (single source of truth). When ``None`` they are recomputed from
+    ``inputs`` via :func:`build_param_free_fields` — byte-identical, since
+    float64/int64 round-trip through ``np.savez`` exactly (the recompute path is
+    used by the parity test). Either way the SLIM vertex colours and the PCA/
+    interpolation mesh are still derived from the raw ``inputs`` (they are not in
+    the shared NPZ).
+
+    ``per_gesture_params`` (``dict[gtype -> GestureContourParams]`` or ``None``)
+    carries the per-(session, gesture) tuned ``min_overlap_pct`` /
+    ``median_filter_size`` when ``use_tuned_params`` is on. When ``None`` the
+    global ``params`` scalars are used unchanged (byte-identical default path).
+    It is stored verbatim on the returned :class:`PreparedBoundaryData` so the
+    extract layer can read the per-gesture radial sigmas.
     """
     session_id = inputs.session_id
     pop_data = inputs.pop_data
-    rf_data = inputs.rf_data
     slim_V = inputs.slim_V
     slim_faces = inputs.slim_faces
     forearm_uv = inputs.forearm_uv
-    n_verts = len(pop_data.forearm_vertices)
 
-    # --- SLIM -> raw vertex mapping ---
+    # --- SLIM -> raw vertex mapping (needed for the per-vertex colours) ---
     nearest_orig_for_slim = _map_slim_to_raw(pop_data, slim_V, session_id)
 
     # --- Map PLY vertex colors to SLIM vertices via the same mapping ---
@@ -176,10 +265,13 @@ def prepare_session_boundary_data(
     else:
         slim_vertex_colors = None
 
+    # --- Param-free per-gesture fields: from the shared NPZ or recomputed ---
+    if param_free is None:
+        param_free = build_param_free_fields(inputs)
+
     # --- Per-gesture heatmaps (+ synthetic stroke), canonical order ---
     results, per_gesture_slim_raw, per_gesture_slim_unique_count = _build_gesture_results(
-        pop_data, rf_data, n_verts, nearest_orig_for_slim,
-        params.min_overlap_pct, session_id,
+        param_free, params, per_gesture_params,
     )
 
     if not results:
@@ -196,6 +288,9 @@ def prepare_session_boundary_data(
         )
 
     # --- PCA alignment of the UV frame (from the 'all' heatmap) ---
+    # NB: the 'all' subset's min_overlap_pct governs this shared UV frame — the
+    # alignment is derived from the 'all' heatmap and then applied to every
+    # gesture's grid, so tuning 'all''s overlap shifts the frame for all subsets.
     all_heatmap, _, _ = results['all']
     alignment_center, alignment_rotation_matrix, alignment_angle_deg = compute_rf_pca_alignment(
         forearm_uv, all_heatmap
@@ -236,9 +331,14 @@ def prepare_session_boundary_data(
     # --- Interpolated + island-cleaned grids per gesture ---
     per_gesture_grids: dict = {}
     for gtype, (slim_heatmap, _n_touches, _threshold) in results.items():
+        median_filter_size = (
+            per_gesture_params[gtype].effective_median_filter_size()
+            if per_gesture_params is not None
+            else params.median_filter_size
+        )
         grid_u, grid_v, grid_z = compute_interpolated_grid(
             forearm_uv, slim_faces, slim_V, slim_heatmap,
-            median_filter_size=params.median_filter_size,
+            median_filter_size=median_filter_size,
         )
         grid_z = clean_heatmap_islands(grid_z)
         per_gesture_grids[gtype] = (grid_u, grid_v, grid_z)
@@ -263,4 +363,5 @@ def prepare_session_boundary_data(
         flip_u=params.flip_u,
         slim_vertex_colors=slim_vertex_colors,
         forearm_ply_path=inputs.forearm_ply_path,
+        per_gesture_params=per_gesture_params,
     )

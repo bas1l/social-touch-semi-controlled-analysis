@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import datetime
 import logging
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -30,6 +32,7 @@ from utils.gui.analysis_runner_gui.kinect_directory_selector import SessionConfi
 from utils.gui.analysis_runner_gui.runner_config import WorkflowEntry
 from utils.gui.analysis_runner_gui.prefect_server_manager import PrefectServerManager
 from utils.gui.analysis_runner_gui.process_output_reader import ProcessOutputReader
+from utils.gui.analysis_runner_gui.run_log_file import RunLogFile
 from utils.gui.analysis_runner_gui.task_panel import TaskPanel
 from utils.gui.analysis_runner_gui.workflow_selector import WorkflowSelector
 from utils.pipeline.dag_config_model import DagConfigModel
@@ -56,6 +59,7 @@ class AnalysisRunnerGUI(QMainWindow):
         self._process: subprocess.Popen | None = None
         self._poll_timer: QTimer | None = None
         self._reader: ProcessOutputReader | None = None
+        self._log_file: RunLogFile | None = None
         self._aborting: bool = False
 
         self.setWindowTitle("AnalysisRunnerGUI")
@@ -298,6 +302,9 @@ class AnalysisRunnerGUI(QMainWindow):
         if self._reader is not None:
             self._reader.wait()
             self._reader = None
+        if self._log_file is not None:
+            self._log_file.close()
+            self._log_file = None
         if self._model and self._model.dirty:
             if not self._confirm_discard():
                 event.ignore()
@@ -353,6 +360,8 @@ class AnalysisRunnerGUI(QMainWindow):
             cmd += ["--dag-config", str(self._current_entry.dag_config)]
         env = self._server_manager.get_env() if self._server_manager.is_running() else None
         self._aborting = False
+        self._console.clear()
+        self._log_file = self._open_run_log(project_root, cmd)
         self._process = subprocess.Popen(
             cmd,
             cwd=str(project_root),
@@ -360,18 +369,41 @@ class AnalysisRunnerGUI(QMainWindow):
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
         )
-        self._console.clear()
         self._reader = ProcessOutputReader(self._process)
         self._reader.line_received.connect(self._console.append_line)
         self._reader.cr_line_received.connect(self._console.replace_last_line)
+        self._reader.line_received.connect(self._log_file.write_line)
+        self._reader.cr_line_received.connect(self._log_file.write_cr)
         self._reader.start()
         self._run_button.setEnabled(False)
         self._abort_button.setVisible(True)
-        self.statusBar().showMessage("Running …")
+        self.statusBar().showMessage(f"Running … — logging to {self._log_file.path}")
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(500)
         self._poll_timer.timeout.connect(self._poll_process)
         self._poll_timer.start()
+
+    def _open_run_log(self, project_root: Path, cmd: list[str]) -> RunLogFile:
+        """Create a timestamped log file mirroring this run's console output.
+
+        Logs are written under ``<project_root>/logs/gui_runs/``.  Any failure
+        to create the directory or file propagates — the pipeline is a
+        self-controlled system and must not run with logging silently disabled.
+        """
+        assert self._current_entry is not None
+        log_dir = project_root / "logs" / "gui_runs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        slug = re.sub(r"[^0-9A-Za-z._-]+", "_", self._current_entry.name).strip("_")
+        log_path = log_dir / f"{timestamp}_{slug}.log"
+        header = (
+            f"# AnalysisRunnerGUI run log\n"
+            f"# workflow : {self._current_entry.name}\n"
+            f"# started  : {timestamp}\n"
+            f"# command  : {' '.join(cmd)}\n"
+            f"# cwd      : {project_root}\n"
+        )
+        return RunLogFile(log_path, header)
 
     def _poll_process(self) -> None:
         if self._process is None:
@@ -385,11 +417,15 @@ class AnalysisRunnerGUI(QMainWindow):
         if self._reader is not None:
             self._reader.wait()
             self._reader = None
+        log_path = self._log_file.path if self._log_file is not None else None
+        if self._log_file is not None:
+            self._log_file.close()
+            self._log_file = None
         if self._aborting:
-            self.statusBar().showMessage("Aborted")
+            self.statusBar().showMessage(f"Aborted — log: {log_path}")
         else:
             label = "Finished" if retcode == 0 else "Failed"
-            self.statusBar().showMessage(f"{label} (exit code {retcode})")
+            self.statusBar().showMessage(f"{label} (exit code {retcode}) — log: {log_path}")
         self._run_button.setEnabled(True)
         self._process = None
 

@@ -15,6 +15,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import open3d as o3d  # type: ignore
 import pandas as pd
+from scipy.spatial import KDTree
 
 from analysis.touch_analytics.touch_config import DISCRETIZATION_CONFIG
 
@@ -108,6 +109,88 @@ def resolve_forearm_ply(session_dir: Path, session_id: str) -> Optional[Path]:
         return rf_centered
 
     return None
+
+
+def _transfer_ply_colors(
+    ply_vertices: np.ndarray,
+    ply_colors_uint8: np.ndarray,
+    mesh_vertices: np.ndarray,
+) -> np.ndarray:
+    """Map PLY RGB colours to mesh vertices via KDTree nearest-neighbour.
+
+    Returns (N_mesh, 4) float64 RGBA in [0, 1] suitable for matplotlib. This is
+    the single source of truth for the PLY→mesh colour transfer, reused by both
+    :func:`load_forearm_vertex_rgba` and the SLIM precompute in
+    ``surface.forearm_slim_uv``.
+    """
+    tree = KDTree(ply_vertices)
+    _, indices = tree.query(mesh_vertices)
+    rgb = ply_colors_uint8[indices].astype(np.float64) / 255.0
+    return np.column_stack([rgb, np.ones(len(rgb), dtype=np.float64)])
+
+
+def load_forearm_vertex_rgba(
+    forearm_ply_path: Optional[Path],
+    mesh_vertices: np.ndarray,
+) -> np.ndarray:
+    """Load forearm PLY vertex colours transferred onto SLIM mesh vertices.
+
+    Composes forearm vertex load → vertex-colour load → nearest-neighbour
+    transfer onto ``mesh_vertices`` (typically a SLIM cache's cleaned ``V``),
+    returning per-vertex RGBA in [0, 1].
+
+    Parameters
+    ----------
+    forearm_ply_path:
+        Path to the session's forearm PLY (RF-centered space). Resolve it with
+        :func:`resolve_forearm_ply` before calling.
+    mesh_vertices:
+        (M, 3) mesh vertices to colour (e.g. ``SlimUvCache.V``).
+
+    Returns
+    -------
+    np.ndarray
+        (M, 4) float64 RGBA in [0, 1], one row per mesh vertex.
+
+    Raises
+    ------
+    FileNotFoundError
+        If ``forearm_ply_path`` is ``None`` or does not exist — a coloured
+        forearm requires the PLY (no silent grey fallback).
+    ValueError
+        If the PLY has no vertices (empty/unreadable) or carries no vertex
+        colours.
+    """
+    if forearm_ply_path is None:
+        raise FileNotFoundError(
+            "load_forearm_vertex_rgba: forearm PLY path is None — a coloured "
+            "forearm is required (resolve_forearm_ply returned None)."
+        )
+    forearm_ply_path = Path(forearm_ply_path)
+    if not forearm_ply_path.exists():
+        raise FileNotFoundError(
+            f"load_forearm_vertex_rgba: forearm PLY does not exist: "
+            f"{forearm_ply_path}"
+        )
+
+    raw_verts = load_forearm_vertices(forearm_ply_path)
+    if raw_verts is None:
+        raise ValueError(
+            f"load_forearm_vertex_rgba: forearm PLY has no vertices (empty or "
+            f"unreadable): {forearm_ply_path}"
+        )
+
+    ply_colors_u8 = load_forearm_vertex_colors(forearm_ply_path)
+    if ply_colors_u8 is None:
+        raise ValueError(
+            f"load_forearm_vertex_rgba: forearm PLY has no vertex colours: "
+            f"{forearm_ply_path}. A coloured forearm is required (no grey "
+            "fallback)."
+        )
+
+    return _transfer_ply_colors(
+        raw_verts, ply_colors_u8, np.asarray(mesh_vertices, dtype=np.float64)
+    )
 
 
 # ------------------------------------------------------------------

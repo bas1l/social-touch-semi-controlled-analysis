@@ -36,15 +36,21 @@ def boundary_stage_is_up_to_date(
     input_paths: List[Path],
     sentinel: Path,
     force: bool,
+    extra_input_paths: List[Path] = [],
 ) -> bool:
     """Return True when the session sentinel is newer than every upstream input.
 
     Wraps ``should_process_task`` (inputs = the four resolved upstream artifacts,
     output = the per-session sentinel). Raises ``FileNotFoundError`` via
     ``should_process_task`` if any input is missing.
+
+    ``extra_input_paths`` extends the staleness inputs with soft inputs that are
+    not part of the loaded 4-tuple — used to feed the existing per-(session,
+    gesture) contour-params JSONs when ``use_tuned_params`` is on, so editing a
+    tuned JSON (a newer mtime) marks the boundary stage stale and regenerates it.
     """
     return not should_process_task(
-        input_paths=input_paths,
+        input_paths=list(input_paths) + list(extra_input_paths),
         output_paths=[sentinel],
         force=force,
     )
