@@ -18,6 +18,9 @@ dist/
 .DS_Store
 Thumbs.db
 
+# GUI run logs
+/logs/
+
 # Environments
 .env
 .venv/

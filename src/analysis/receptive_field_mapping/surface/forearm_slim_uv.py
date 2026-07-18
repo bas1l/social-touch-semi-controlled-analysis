@@ -32,6 +32,7 @@ from scipy.spatial import KDTree
 from analysis.receptive_field_mapping.data.rf_data_loader import (
     load_forearm_vertices,
     load_forearm_vertex_colors,
+    _transfer_ply_colors,
 )
 from .rf_surface_utils import load_or_build_forearm_mesh, _VALID_MESH_METHODS
 from .slim_helpers import clean_mesh, boundary_loop, flatten_slim
@@ -73,19 +74,8 @@ def _ply_hash(ply_path: Path) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _transfer_ply_colors(
-    ply_vertices: np.ndarray,
-    ply_colors_uint8: np.ndarray,
-    mesh_vertices: np.ndarray,
-) -> np.ndarray:
-    """Map PLY RGB colours to mesh vertices via KDTree nearest-neighbour.
-
-    Returns (N_mesh, 4) float64 RGBA in [0, 1] suitable for matplotlib.
-    """
-    tree = KDTree(ply_vertices)
-    _, indices = tree.query(mesh_vertices)
-    rgb = ply_colors_uint8[indices].astype(np.float64) / 255.0
-    return np.column_stack([rgb, np.ones(len(rgb), dtype=np.float64)])
+# ``_transfer_ply_colors`` (PLY→mesh nearest-neighbour colour transfer) now lives
+# in ``data.rf_data_loader`` as the single source of truth, imported above.
 
 
 # ---------------------------------------------------------------------------

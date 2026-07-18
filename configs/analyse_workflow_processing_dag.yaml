@@ -176,6 +176,52 @@ tasks:
     - spatial_map_single_touch
     - spatial_configure_slim_uv
 
+  # Per-session manual stroke-axis GUI: opens an interactive PyQt5 2D-UV viewer
+  # per session showing each single-touch stroke's motion direction in SLIM-UV
+  # space as arrows coloured by their current proximal/distal label, lets the
+  # researcher swap the labels and draw an editable stroke axis (auto-initialised
+  # from the average per-stroke UV motion), and saves one JSON per session.
+  # Consumed by spatial_build_response_fields when use_manual_stroke_axis is
+  # enabled, so the corrected labels propagate to contour tuning, boundary
+  # extraction, and the proximal/distal comparison.
+  # Saves to 4_analysed/spatial_configure_stroke_axis/<session>/<session>_stroke_axis.json.
+  spatial_configure_stroke_axis:
+    category: viewer_required
+    enabled: true
+    options:
+      # When false (default), sessions that already have a saved stroke-axis JSON
+      # are skipped; the GUI only opens for sessions missing one. Set true to
+      # re-open the GUI for every session.
+      force_processing: false
+      # When false the task is a no-op — it is a manual GUI, there is no batch
+      # axis inference. spatial_build_response_fields keeps its current labels
+      # unless use_manual_stroke_axis is enabled with existing JSONs.
+      interactive: true
+    depends_on: [touch_prepare_sessions, spatial_precompute_slim_uv]
+
+  # Build the parameter-free per-(session, gesture) response fields once, upstream
+  # of both the RF-contour tuner and the boundary extractor. Computes the raw
+  # heatmaps, unique-touch counts, touch counts, and raw SLIM mesh purely from the
+  # single-touch RF NPZ + SLIM UV cache + merged CSV/PLY (production functions,
+  # no contour parameter), so identical upstream inputs yield byte-identical fields.
+  # Output: 4_analysed/spatial_build_response_fields/<session>/<session>_response_fields.npz
+  spatial_build_response_fields:
+    category: automated
+    enabled: true
+    options:
+      force_processing: false
+      # Which IFF aggregation NPZ to consume ('mean' or 'max'). 'both' is not
+      # supported — the response-fields NPZ path carries no metric suffix.
+      iff_metric: mean
+      # When true, overwrite each session's proximal/distal labels from the
+      # manually drawn UV stroke axis (spatial_configure_stroke_axis) before
+      # building the per-gesture fields, so the correction propagates into the
+      # NPZ heatmaps (raises if a session's stroke-axis JSON is absent — no silent
+      # fallback). When false (default), the upstream 3D labels are used unchanged.
+      use_manual_stroke_axis: false
+    depends_on: [spatial_map_single_touch, spatial_precompute_slim_uv, 
+        spatial_configure_stroke_axis]
+
   # Render per-session 2D population RF heatmap PNGs projected via SLIM UV.
   # Produces one PNG per gesture subset (all, tap, stroke_proximal, stroke_distal)
   # with a session-wide consistent colour scale.
@@ -200,7 +246,42 @@ tasks:
       radial_gauss_sigma: 8.0
       radial_hess_sigma: 5.0
       radial_envelope_smooth_sigma: 1.5   # Gaussian smoothing (vertices) of the 2D-footprint envelope
-    depends_on: [spatial_map_single_touch, spatial_precompute_slim_uv]
+      # When true, regenerate each (session, gesture) contour from its tuned JSON
+      # written by spatial_tune_rf_contours (raises, naming the combo, if any is
+      # absent). When false (default), the global scalars above are used unchanged.
+      use_tuned_params: false
+    depends_on: [spatial_build_response_fields, spatial_tune_rf_contours]
+
+  # Per-(session, gesture) RF-contour parameter tuning GUI: opens an interactive
+  # PyQt5/PyVista viewer that lets the researcher tune the five radial
+  # contour-detection parameters independently for each session and gesture
+  # subset, previewing raw/smoothed/λmax fields with the live contour, and save
+  # one JSON per (session, gesture). Consumed by spatial_extract_boundaries when
+  # use_tuned_params is enabled.
+  # Saves to 4_analysed/spatial_tune_rf_contours/iff_<metric>/<session>/
+  #   <session>_<gesture>_contour_params.json.
+  spatial_tune_rf_contours:
+    category: viewer_required
+    enabled: true
+    options:
+      # When false (default), sessions that already have a tuned JSON for every
+      # gesture subset are skipped; the GUI only opens for sessions missing at
+      # least one (session, gesture) combination. Set true to re-open the GUI
+      # for every session.
+      force_processing: false
+      # When false the task is a no-op; spatial_extract_boundaries falls back to
+      # its global DAG parameters.
+      interactive: true
+      iff_metric: mean
+      # Global seed values for a (session, gesture) that has no saved JSON.
+      # Copied from spatial_extract_boundaries; median_filter_size is a concrete
+      # positive odd window (1 = no filtering, matching the disabled global).
+      min_overlap_pct: 25
+      median_filter_size: 1
+      radial_gauss_sigma: 8.0
+      radial_hess_sigma: 5.0
+      radial_envelope_smooth_sigma: 1.5
+    depends_on: [spatial_build_response_fields]
 
   # Aggregate inflection boundary metrics across sessions and render comparison visuals.
   # Reads per-session NPZ files from spatial_extract_boundaries.
@@ -260,7 +341,7 @@ tasks:
     category: spatial_sensitivity
     enabled: true
     options:
-      force_processing: false
+      force_processing: true
       iff_metric: mean
     depends_on: [spatial_extract_boundaries]
 
