@@ -25,6 +25,8 @@ from .pipelines.rf_cluster_gui_launchers import (
     launch_rf_camera_settings_viewer,
     launch_rf_surface_viewer,
     launch_slim_uv_config_viewer,
+    launch_rf_contour_tuning_viewer,
+    launch_stroke_axis_viewer,
 )
 from .metrics.rf_metrics import RFMetrics, compute_rf_metrics
 from .surface.rf_projection import project_to_2d
@@ -36,6 +38,7 @@ from .rendering.rf_population_grid_metrics_renderer import run_population_rf_gri
 from .rendering.rf_session_comparison_renderer import run_session_comparison_visualization
 from .metrics.rf_baseline_deviation import BaselineDeviationMetrics, compute_baseline_deviation
 from .pipelines.rf_population_response_field_pipeline import run_population_response_field_extraction
+from .pipelines.rf_response_fields_pipeline import run_response_field_generation
 from .pipelines.rf_session_boundary_comparison_pipeline import run_session_rf_boundary_comparison
 from .pipelines.rf_proximal_distal_comparison_pipeline import run_proximal_distal_comparison
 from .pipelines.rf_tap_stroke_comparison_pipeline import run_tap_stroke_comparison
@@ -61,6 +64,8 @@ __all__ = [
     "launch_rf_camera_settings_viewer",
     "launch_rf_surface_viewer",
     "launch_slim_uv_config_viewer",
+    "launch_rf_contour_tuning_viewer",
+    "launch_stroke_axis_viewer",
     "RFMetrics",
     "compute_rf_metrics",
     "run_simple_rf_mapping",
@@ -74,6 +79,7 @@ __all__ = [
     "BaselineDeviationMetrics",
     "compute_baseline_deviation",
     "run_population_response_field_extraction",
+    "run_response_field_generation",
     "run_session_rf_boundary_comparison",
     "run_proximal_distal_comparison",
     "run_tap_stroke_comparison",

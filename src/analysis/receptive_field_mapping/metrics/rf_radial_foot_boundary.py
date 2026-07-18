@@ -145,6 +145,33 @@ def _hessian_eigvals(ex: np.ndarray, sigma: float):
     return eigs[0], eigs[1]
 
 
+def _compute_smoothed_and_lmax(
+    grid_z: np.ndarray,
+    gauss_sigma: float = 8.0,
+    hess_sigma: float = 5.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Gaussian-smoothed field and its Hessian λmax (shared smoothed→λmax math).
+
+    Pipeline: NaN-aware Gaussian smoothing (``compute_laplacian_arrays``) →
+    nearest-neighbour extrapolation of the smoothed field → Hessian at
+    ``hess_sigma`` → descending eigenvalues, keep the larger.  ``lmax`` is
+    re-masked to the original NaN cells of ``grid_z``.  The intermediate
+    ``smoothed`` stage is returned alongside ``lmax`` so callers that need it
+    (e.g. the tuning GUI) don't recompute the same smoothing.
+
+    Returns
+    -------
+    (smoothed, lmax): both (R, C); ``smoothed`` is the NaN-aware Gaussian
+    normalisation of *grid_z*, ``lmax`` is NaN where *grid_z* is NaN.
+    """
+    smoothed = compute_laplacian_arrays(grid_z, gauss_sigma)[0]
+    ex = _extrapolate(smoothed)
+    lmax, _lmin = _hessian_eigvals(ex, hess_sigma)
+    lmax = np.asarray(lmax, dtype=float)
+    lmax[np.isnan(grid_z)] = np.nan
+    return smoothed, lmax
+
+
 def _compute_hessian_lmax(
     grid_z: np.ndarray,
     gauss_sigma: float = 8.0,
@@ -161,12 +188,7 @@ def _compute_hessian_lmax(
     -------
     (R, C) λmax array, NaN where *grid_z* is NaN.
     """
-    smoothed = compute_laplacian_arrays(grid_z, gauss_sigma)[0]
-    ex = _extrapolate(smoothed)
-    lmax, _lmin = _hessian_eigvals(ex, hess_sigma)
-    lmax = np.asarray(lmax, dtype=float)
-    lmax[np.isnan(grid_z)] = np.nan
-    return lmax
+    return _compute_smoothed_and_lmax(grid_z, gauss_sigma, hess_sigma)[1]
 
 
 # ---------------------------------------------------------------------------
@@ -242,6 +264,10 @@ def _extract_radial_plateau_foot(
         rows = peak_r + radii * cos_a
         cols = peak_c + radii * sin_a
         inside = (rows >= 0) & (rows < n_rows - 1) & (cols >= 0) & (cols < n_cols - 1)
+        # Edge-peak tolerance: for a near-border peak some rays leave the grid
+        # immediately (all-outside). They contribute no foot (``found[i]`` stays
+        # False) instead of raising — the extractor only fails fast later if NO
+        # ray on the whole star yields a plateau.
         if not np.any(inside):
             natural_radii[i] = snapped_radii[i] = 1.0
             clipped[i] = True
@@ -299,6 +325,10 @@ def _extract_radial_plateau_foot(
             "(field too flat or peak runs off the data footprint)"
         )
 
+    # ``_smooth_radii_circular`` smooths the per-angle radii array (length
+    # n_angles), not a ray profile, and already no-ops when the profile is shorter
+    # than ``savgol_window`` — so a short/degenerate star can never trigger a
+    # savgol window-length error.
     snapped_radii = _smooth_radii_circular(snapped_radii, savgol_window)
     natural_radii = _smooth_radii_circular(natural_radii, savgol_window)
     cos_a = np.cos(angles)
@@ -547,6 +577,211 @@ def _save_radial_snapshots(
 
 
 # ---------------------------------------------------------------------------
+# Shared contour stages (single source of truth for GUI == pipeline)
+# ---------------------------------------------------------------------------
+
+
+def _extract_contour_stage(
+    grid_u: np.ndarray,
+    grid_v: np.ndarray,
+    grid_z: np.ndarray,
+    lmax: np.ndarray,
+    peak_rc: tuple[int, int],
+    n_angles: int,
+    savgol_window: int | None,
+    plateau_size: int,
+    prominence: float | None,
+    require_positive: bool,
+    envelope_smooth_sigma: float | None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Radial foot → footprint envelope → UV mapping for an already-located peak.
+
+    The param-dependent stage that turns a precomputed λmax field + located peak
+    into a closed foot contour.  There is **no positional border veto**: a
+    near-border / edge peak is attempted like any other — the ray-marcher tolerates
+    rays that immediately leave the grid (they contribute no foot rather than
+    erroring), and the envelope is index-safe for a peak at row/col 0 or n-1.  It
+    fails fast (``ValueError``) only when extraction is genuinely impossible: no
+    ray yields a λmax foot plateau, or no footprint contour encloses the seed.
+
+    ``peak_rc`` is located by the caller (so a partial GUI result can still report
+    it); this function does not re-locate it.
+
+    Returns
+    -------
+    (contour_uv, contour_rc)
+        Both (M, 2): the foot contour in UV and (row, col) grid coordinates.
+    """
+    res = _extract_radial_plateau_foot(
+        grid_z, lmax, peak_rc,
+        n_angles=n_angles, plateau_size=plateau_size,
+        prominence=prominence, savgol_window=savgol_window,
+        require_positive=require_positive,
+    )
+
+    env = envelope_contour_to_footprint(
+        res["contour_unsnapped_rc"], grid_z, peak_rc,
+        smooth_sigma=envelope_smooth_sigma,
+    )
+
+    contour_rc = env["contour_rc"]
+    contour_uv = contour_pixels_to_uv(contour_rc, grid_u, grid_v)
+    return contour_uv, contour_rc
+
+
+def compute_radial_foot_stages(
+    grid_u: np.ndarray,
+    grid_v: np.ndarray,
+    grid_z: np.ndarray,
+    gauss_sigma: float = 8.0,
+    hess_sigma: float = 5.0,
+    envelope_smooth_sigma: float | None = 1.5,
+    n_angles: int = 360,
+    savgol_window: int | None = 31,
+    plateau_size: int = 1,
+    prominence: float | None = None,
+    require_positive: bool = True,
+    allow_partial: bool = False,
+) -> dict:
+    """Compute the intermediate radial-foot stages shared by the GUI and pipeline.
+
+    Single source of truth for the raw → smoothed → λmax → contour chain, so the
+    interactive tuning GUI preview and ``compute_radial_foot_boundary`` produce
+    byte-for-byte identical contours.  Unlike the public orchestrator (which
+    returns ``None`` on degenerate inputs), this fails fast: every unusable input
+    or intermediate raises ``ValueError`` so callers see exactly why no contour
+    could be traced.
+
+    Parameters
+    ----------
+    grid_u, grid_v:
+        (R, C) coordinate grids (axis 0 = U, axis 1 = V).
+    grid_z:
+        (R, C) raw IFF values; NaN where no data exists.
+    gauss_sigma:
+        Sigma for the NaN-aware Gaussian pre-smoothing of grid_z
+        (``radial_gauss_sigma``).
+    hess_sigma:
+        Sigma for the Hessian derivative kernel (``radial_hess_sigma``).
+    envelope_smooth_sigma:
+        Circular Gaussian smoothing (in vertices) applied to the 2D-footprint
+        envelope contour (``radial_envelope_smooth_sigma``); ``None``/``<= 0`` to
+        skip.
+    n_angles, savgol_window, plateau_size, prominence, require_positive:
+        Radial-extraction controls forwarded verbatim to
+        ``_extract_radial_plateau_foot``.
+    allow_partial:
+        **Interactive callers only** (the tuning GUI); the pipeline path leaves
+        this ``False``.  When ``False`` (default) the behaviour is strictly
+        fail-fast: any unusable input or intermediate raises ``ValueError`` and no
+        ``error`` key is returned.  When ``True`` this enables *explicit graceful
+        degradation* — NOT a silent fallback: the "no data" case (``grid_z`` None
+        or all-NaN, so ``smoothed``/``lmax`` cannot be computed) STILL raises
+        loudly, but if the field IS computable and only the *contour* stage fails
+        (radial-extraction / envelope failure) the dict is returned with
+        ``smoothed`` and ``lmax`` populated, ``contour_uv``/``contour_rc`` set to
+        ``None``, and an extra ``error`` key carrying the human-readable failure
+        reason.  ``peak_rc`` is still returned as the located (row, col) peak
+        whenever the peak WAS found — it is only ``None`` when the peak itself
+        could not be located.  This lets the GUI still render raw / smoothed /
+        λmax (and mark the peak) while reporting (via pop-up) why the contour
+        could not be drawn.  Note there is no positional border veto: a near-border
+        peak is attempted, so it only lands in the partial branch if extraction is
+        genuinely impossible.
+
+    Returns
+    -------
+    dict with keys:
+      ``smoothed``    (R, C) NaN-aware Gaussian-smoothed grid_z (raw → smoothed).
+      ``lmax``        (R, C) Hessian λmax field, NaN where grid_z is NaN.
+      ``contour_uv``  (M, 2) foot contour in UV coordinates (``None`` in a
+                      partial return).
+      ``contour_rc``  (M, 2) foot contour in (row, col) grid coordinates (``None``
+                      in a partial return).
+      ``peak_rc``     (row, col) int tuple of the response peak.  ``None`` only in
+                      a partial return where the peak could not be located.
+      ``error``       (partial return only) str explaining why the contour could
+                      not be traced.  Absent on a full (contour present) return
+                      and never present when ``allow_partial`` is ``False``.
+
+    Raises
+    ------
+    ValueError
+        Always if grid_z is None / all-NaN (the "no data" case — even when
+        ``allow_partial`` is ``True``).  When ``allow_partial`` is ``False`` also
+        raised if the peak cannot be located, or the radial extraction / footprint
+        envelope fails.
+    """
+    if grid_z is None:
+        raise ValueError("radial_foot stages: grid_z is None")
+
+    if np.all(np.isnan(grid_z)):
+        raise ValueError(f"radial_foot stages: all-NaN grid, shape={grid_z.shape}")
+
+    # smoothed/lmax are the param-free "there is data to show" stages; a failure
+    # here IS the no-data case and must still raise even under allow_partial.
+    smoothed, lmax = _compute_smoothed_and_lmax(grid_z, gauss_sigma, hess_sigma)
+
+    peak_rc = find_peak_location(grid_z)
+
+    if allow_partial:
+        if peak_rc is None:
+            return {
+                "smoothed": smoothed,
+                "lmax": lmax,
+                "contour_uv": None,
+                "contour_rc": None,
+                "peak_rc": None,
+                "error": "radial_foot stages: find_peak_location returned None",
+            }
+        try:
+            contour_uv, contour_rc = _extract_contour_stage(
+                grid_u, grid_v, grid_z, lmax, peak_rc,
+                n_angles=n_angles, savgol_window=savgol_window,
+                plateau_size=plateau_size, prominence=prominence,
+                require_positive=require_positive,
+                envelope_smooth_sigma=envelope_smooth_sigma,
+            )
+        except ValueError as exc:
+            # Peak WAS located; only the contour stage failed. Return the located
+            # peak so the GUI can still mark it (Change B) — no silent fallback.
+            return {
+                "smoothed": smoothed,
+                "lmax": lmax,
+                "contour_uv": None,
+                "contour_rc": None,
+                "peak_rc": peak_rc,
+                "error": str(exc),
+            }
+        return {
+            "smoothed": smoothed,
+            "lmax": lmax,
+            "contour_uv": contour_uv,
+            "contour_rc": contour_rc,
+            "peak_rc": peak_rc,
+        }
+
+    if peak_rc is None:
+        raise ValueError("radial_foot stages: find_peak_location returned None")
+
+    contour_uv, contour_rc = _extract_contour_stage(
+        grid_u, grid_v, grid_z, lmax, peak_rc,
+        n_angles=n_angles, savgol_window=savgol_window,
+        plateau_size=plateau_size, prominence=prominence,
+        require_positive=require_positive,
+        envelope_smooth_sigma=envelope_smooth_sigma,
+    )
+
+    return {
+        "smoothed": smoothed,
+        "lmax": lmax,
+        "contour_uv": contour_uv,
+        "contour_rc": contour_rc,
+        "peak_rc": peak_rc,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Public orchestrator
 # ---------------------------------------------------------------------------
 
@@ -625,39 +860,36 @@ def compute_radial_foot_boundary(
         logger.warning("radial_foot: find_peak_location returned None")
         return None
 
-    n_rows, n_cols = grid_z.shape
-    pr, pc = peak_rc
-    if pr < 2 or pr >= n_rows - 2 or pc < 2 or pc >= n_cols - 2:
-        logger.warning(
-            "radial_foot: peak at border — peak_rc=(%d, %d), grid=%dx%d",
-            pr, pc, n_rows, n_cols,
-        )
-        return None
+    # NB: no positional border veto here — it was removed to stay byte-for-byte
+    # consistent with the shared ``compute_radial_foot_stages`` (which likewise no
+    # longer rejects a near-border peak).  A near-border peak is attempted; a
+    # genuinely impossible one surfaces as the informative radial/envelope
+    # ValueError translated to None just below.
 
-    lmax = _compute_hessian_lmax(grid_z, gauss_sigma, hess_sigma)
-
+    # Delegate the smoothed → λmax → radial-foot → footprint-envelope chain to the
+    # shared stages helper (single source of truth with the tuning GUI).  The
+    # preliminary None/all-NaN/peak guards above already returned None with their
+    # own warnings, so here we only translate the stages fail-fast (radial
+    # extraction or envelope raising) into the orchestrator's None contract.
     try:
-        res = _extract_radial_plateau_foot(
-            grid_z, lmax, peak_rc,
-            n_angles=n_angles, plateau_size=plateau_size,
-            prominence=prominence, savgol_window=savgol_window,
+        stages = compute_radial_foot_stages(
+            grid_u, grid_v, grid_z,
+            gauss_sigma=gauss_sigma,
+            hess_sigma=hess_sigma,
+            envelope_smooth_sigma=envelope_smooth_sigma,
+            n_angles=n_angles,
+            savgol_window=savgol_window,
+            plateau_size=plateau_size,
+            prominence=prominence,
             require_positive=require_positive,
         )
     except ValueError as exc:
-        logger.warning("radial_foot: extractor raised — %s", exc)
+        logger.warning("radial_foot: stages raised — %s", exc)
         return None
 
-    try:
-        env = envelope_contour_to_footprint(
-            res["contour_unsnapped_rc"], grid_z, peak_rc,
-            smooth_sigma=envelope_smooth_sigma,
-        )
-    except ValueError as exc:
-        logger.warning("radial_foot: envelope raised — %s", exc)
-        return None
-
-    contour_rc = env["contour_rc"]
-    contour_uv = contour_pixels_to_uv(contour_rc, grid_u, grid_v)
+    lmax = stages["lmax"]
+    contour_rc = stages["contour_rc"]
+    contour_uv = stages["contour_uv"]
 
     area_uv = compute_polygon_area(contour_uv)
     perimeter_uv = compute_polygon_perimeter(contour_uv)

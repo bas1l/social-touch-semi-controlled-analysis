@@ -20,12 +20,16 @@ import logging
 from pathlib import Path
 from typing import List, Tuple
 
+import numpy as np
+
 from analysis.pipeline.shared_constants import session_id_from_path
 from analysis.receptive_field_mapping.data.rf_boundary_io import (
     boundary_sentinel_path,
     boundary_session_output_dir,
     load_boundary_inputs,
+    load_param_free_fields_npz,
     resolve_boundary_input_paths,
+    resolve_response_fields_npz,
     save_boundary_outputs_npz,
     write_boundary_sentinel,
 )
@@ -36,6 +40,10 @@ from analysis.receptive_field_mapping.data.rf_boundary_types import (
     BoundaryParams,
     BoundaryResults,
     PreparedBoundaryData,
+)
+from analysis.receptive_field_mapping.data.rf_contour_params_io import (
+    contour_params_path,
+    load_gesture_contour_params,
 )
 from analysis.receptive_field_mapping.metrics.rf_boundary_extraction import (
     extract_session_boundaries,
@@ -74,6 +82,7 @@ def run_population_response_field_extraction(
     radial_gauss_sigma: float = 8.0,
     radial_hess_sigma: float = 5.0,
     radial_envelope_smooth_sigma: float = 1.5,
+    contour_params_dir: Path | None = None,
 ) -> None:
     """Render per-session 2D population RF heatmap PNGs projected via SLIM UV.
 
@@ -110,6 +119,14 @@ def run_population_response_field_extraction(
         If True, negate the U-axis (column 0) of the aligned forearm UV
         coordinates after PCA alignment. Mirrors the heatmap and all
         boundary metrics along the vertical axis of the output plots.
+    contour_params_dir:
+        Root of the per-(session, gesture) tuned contour-params JSONs
+        (``contour_params_root(database_path, iff_metric)``) when
+        ``use_tuned_params`` is on; ``None`` when off. When set, each session
+        loads its per-gesture params ``strict``ly (raising, naming the combo, if
+        any required JSON is absent) and applies them in place of the global
+        scalars; when ``None`` the global BoundaryParams scalars are used
+        unchanged (byte-identical to the pre-tuning pipeline).
     """
     validate_boundary_params(iff_metric, boundary_method)
 
@@ -144,7 +161,45 @@ def run_population_response_field_extraction(
         input_paths = resolve_boundary_input_paths(
             csv_path, database_path, session_id, iff_metric,
         )
-        if boundary_stage_is_up_to_date(input_paths, sentinel, force_processing):
+
+        # --- Shared param-free response fields (spatial_build_response_fields) ---
+        # The param-free per-gesture arrays + mesh are materialised once upstream
+        # and consumed here (single source of truth). Fail-fast if the upstream
+        # task has not run for this session.
+        response_fields_npz = resolve_response_fields_npz(database_path, session_id)
+        if not response_fields_npz.exists():
+            raise FileNotFoundError(
+                f"[Population Response Fields] {session_id}: shared response-fields "
+                f"NPZ missing: {response_fields_npz}. Enable "
+                "'spatial_build_response_fields' in the DAG config and re-run."
+            )
+
+        # --- Per-(session, gesture) tuned contour params (use_tuned_params) ---
+        # Off (contour_params_dir is None): per_gesture_params stays None and the
+        # stage reads the global scalars unchanged. On: enumerate the session's
+        # gesture subsets from the shared response-fields NPZ — the same combo set
+        # the tuner GUI writes JSONs for — and load them strictly.
+        per_gesture_params = None
+        override_json_paths: List[Path] = []
+        if contour_params_dir is not None:
+            with np.load(response_fields_npz, allow_pickle=True) as d:
+                gesture_keys = [str(g) for g in d["gesture_types"]]
+            per_gesture_params = load_gesture_contour_params(
+                contour_params_dir, session_id, gesture_keys, params, strict=True,
+            )
+            # strict=True guarantees each JSON exists; feed them to the staleness
+            # gate so editing a tuned JSON marks the stage stale (mtime gate).
+            override_json_paths = [
+                contour_params_path(contour_params_dir, session_id, gtype)
+                for gtype in gesture_keys
+            ]
+
+        # The shared response-fields NPZ is a staleness input: regenerating it
+        # (newer mtime) marks the boundary stage stale and forces a re-run.
+        if boundary_stage_is_up_to_date(
+            input_paths, sentinel, force_processing,
+            extra_input_paths=[response_fields_npz] + override_json_paths,
+        ):
             print(f"[Population Response Fields] {session_id}: up-to-date, skipping.")
             continue
 
@@ -153,7 +208,13 @@ def run_population_response_field_extraction(
         inputs = load_boundary_inputs(
             session_id, session_output_dir, sentinel, input_paths,
         )
-        prepared = prepare_session_boundary_data(inputs, params)
+        # Consume the param-free per-gesture fields from the shared NPZ (byte-
+        # identical to recomputing them from `inputs`). SLIM vertex colours + the
+        # PCA/interpolation mesh are still derived from `inputs` inside prepare.
+        param_free = load_param_free_fields_npz(response_fields_npz)
+        prepared = prepare_session_boundary_data(
+            inputs, params, per_gesture_params, param_free=param_free,
+        )
 
         if prepared is None:
             session_output_dir.mkdir(parents=True, exist_ok=True)

@@ -12,10 +12,12 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 from analysis.pipeline.output_dirs import (
+    SPATIAL_BUILD_RESPONSE_FIELDS,
     SPATIAL_EXTRACT_BOUNDARIES,
     SPATIAL_MAP_SINGLE_TOUCH,
     SPATIAL_SET_CAMERA,
     SPATIAL_SLIM_UV,
+    TOUCH_PREPARE_SESSIONS,
 )
 from analysis.pipeline.shared_constants import (
     resolve_single_touch_npz,
@@ -508,6 +510,201 @@ def launch_slim_uv_config_viewer(
     viewer = SlimUvConfigViewer(
         sessions=sessions,
         dag_defaults=dag_defaults,
+    )
+    viewer.show()
+    app.exec_()
+
+
+def launch_rf_contour_tuning_viewer(
+    missing_items: List[Tuple[Path, Path]],
+    dag_defaults: dict,
+) -> None:
+    """Launch the per-(session, gesture) RF-contour parameter tuning GUI.
+
+    For each session, resolves the shared param-free response-fields NPZ produced
+    by ``spatial_build_response_fields`` under
+    ``spatial_build_response_fields/<session>/`` (no iff-metric subfolder — the
+    param-free arrays the tuner reads are metric-independent) and opens the
+    ``RFContourTuningViewer`` window.  Blocks until the user closes the window.
+    Per-(session, gesture) ``<session>_<gesture>_contour_params.json`` files are
+    written under ``spatial_tune_rf_contours/iff_<metric>/`` on "Validate" (the
+    JSON-output convention still keys on ``iff_metric``).
+
+    Parameters
+    ----------
+    missing_items:
+        List of ``(aggregated_csv_path, database_path)`` tuples — the same shape
+        used throughout the analysis pipeline.  Typically the subset of sessions
+        that still have at least one un-tuned (session, gesture) combination.
+    dag_defaults:
+        DAG-level defaults.  Required keys: ``iff_metric`` (str) and the five
+        global contour parameters (``min_overlap_pct``, ``median_filter_size``,
+        ``radial_gauss_sigma``, ``radial_hess_sigma``,
+        ``radial_envelope_smooth_sigma``), used to seed a session/gesture that
+        has no saved JSON.
+
+    Raises
+    ------
+    ValueError
+        If ``missing_items`` is empty or a session's response-fields NPZ is
+        absent (fail-fast — the tuner cannot preview a session without it).
+    """
+    from analysis.receptive_field_mapping.data.rf_boundary_types import BoundaryParams
+    from analysis.receptive_field_mapping.data.rf_contour_params_io import (
+        contour_params_root,
+    )
+    from analysis.receptive_field_mapping.gui.rf_contour_tuning_viewer import (
+        RFContourTuningViewer,
+    )
+    from PyQt5.QtWidgets import QApplication
+
+    n = len(missing_items)
+    if n == 0:
+        raise ValueError("launch_rf_contour_tuning_viewer: no sessions to display.")
+
+    iff_metric = dag_defaults["iff_metric"]
+
+    # Global boundary params used only to seed the five sliders for an un-tuned
+    # (session, gesture).  neuron_mode is irrelevant to contour tuning (never read
+    # by the GUI) — it is a required BoundaryParams field, not a data fallback.
+    boundary_params = BoundaryParams(
+        neuron_mode="iff",
+        min_overlap_pct=dag_defaults["min_overlap_pct"],
+        median_filter_size=dag_defaults["median_filter_size"],
+        radial_gauss_sigma=dag_defaults["radial_gauss_sigma"],
+        radial_hess_sigma=dag_defaults["radial_hess_sigma"],
+        radial_envelope_smooth_sigma=dag_defaults["radial_envelope_smooth_sigma"],
+        iff_metric=iff_metric,
+    )
+
+    sessions: list[dict] = []
+    for csv_path, database_path in missing_items:
+        session_id = session_id_from_path(csv_path)
+        npz_path = (
+            database_path / "4_analysed" / SPATIAL_BUILD_RESPONSE_FIELDS
+            / session_id / f"{session_id}_response_fields.npz"
+        )
+        if not npz_path.exists():
+            raise ValueError(
+                f"launch_rf_contour_tuning_viewer: response-fields NPZ not found "
+                f"for session '{session_id}': {npz_path}. Run "
+                "spatial_build_response_fields first."
+            )
+        # Forearm PLY (RF-centered space, sibling of the aggregated CSV) is the
+        # colour source for the 2D forearm background — the same always-present
+        # source the stroke-axis viewer reads (independent of NPZ regeneration).
+        forearm_ply_path = resolve_forearm_ply(csv_path.parent, session_id)
+        if forearm_ply_path is None:
+            raise FileNotFoundError(
+                f"launch_rf_contour_tuning_viewer: forearm PLY not found for "
+                f"session '{session_id}': expected "
+                f"{csv_path.parent / f'{session_id}_forearm.ply'}."
+            )
+        sessions.append({
+            "session_id": session_id,
+            "npz_path": npz_path,
+            "forearm_ply_path": forearm_ply_path,
+        })
+
+    root = contour_params_root(missing_items[0][1], iff_metric)
+
+    print(f"[RF Contour Tuning] Launching viewer for {n} session(s)...")
+
+    app = QApplication.instance() or QApplication(sys.argv)
+    viewer = RFContourTuningViewer(
+        sessions=sessions,
+        boundary_params=boundary_params,
+        contour_params_root=root,
+    )
+    viewer.show()
+    app.exec_()
+
+
+def launch_stroke_axis_viewer(
+    missing_items: List[Tuple[Path, Path]],
+    dag_defaults: dict,
+) -> None:
+    """Launch the per-session manual stroke-axis GUI.
+
+    For each session, resolves the per-frame ``_prepared.csv`` (written by
+    ``touch_prepare_sessions``, carrying ``contact_location_{x,y,z}`` +
+    ``gesture_type``) and the SLIM-UV ``.npz`` cache (written by
+    ``spatial_precompute_slim_uv``), then opens the ``RFStrokeAxisViewer`` window.
+    Blocks until the user closes the window. Per-session
+    ``<session>_stroke_axis.json`` files are written under
+    ``4_analysed/spatial_configure_stroke_axis/<session>/`` on "Validate".
+
+    Parameters
+    ----------
+    missing_items:
+        List of ``(aggregated_csv_path, database_path)`` tuples — the same shape
+        used throughout the analysis pipeline. Typically the subset of sessions
+        that still have no saved stroke-axis JSON.
+    dag_defaults:
+        DAG-level defaults, accepted for interface consistency with the other
+        ``viewer_required`` launchers (the stroke-axis GUI seeds its axis from the
+        data, so no scalar defaults are consumed).
+
+    Raises
+    ------
+    ValueError
+        If ``missing_items`` is empty.
+    FileNotFoundError
+        If a session's prepared CSV or SLIM-UV cache is absent (fail-fast — the
+        GUI cannot derive the UV motion without them).
+    """
+    from analysis.receptive_field_mapping.data.rf_stroke_axis_io import (
+        stroke_axis_root,
+    )
+    from analysis.receptive_field_mapping.gui.rf_stroke_axis_viewer import (
+        RFStrokeAxisViewer,
+    )
+    from PyQt5.QtWidgets import QApplication
+
+    n = len(missing_items)
+    if n == 0:
+        raise ValueError("launch_stroke_axis_viewer: no sessions to display.")
+
+    sessions: list[dict] = []
+    for csv_path, database_path in missing_items:
+        session_id = session_id_from_path(csv_path)
+        prepared_csv = (
+            database_path / "4_analysed" / TOUCH_PREPARE_SESSIONS
+            / f"{session_id}_prepared.csv"
+        )
+        if not prepared_csv.exists():
+            raise FileNotFoundError(
+                f"launch_stroke_axis_viewer: prepared CSV not found for session "
+                f"'{session_id}': {prepared_csv}. Run 'touch_prepare_sessions' first."
+            )
+        slim_cache_path = (
+            database_path / "4_analysed" / SPATIAL_SLIM_UV
+            / session_id / f"{session_id}_slim_uv.npz"
+        )
+        if not slim_cache_path.exists():
+            raise FileNotFoundError(
+                f"launch_stroke_axis_viewer: SLIM UV cache not found for session "
+                f"'{session_id}': {slim_cache_path}. Run "
+                "'spatial_precompute_slim_uv' first."
+            )
+        # Forearm PLY (RF-centered space, sibling of the aggregated CSV) provides
+        # the per-triangle skin colour used to fill the forearm mesh background.
+        forearm_ply_path = resolve_forearm_ply(csv_path.parent, session_id)
+        sessions.append({
+            "session_id": session_id,
+            "prepared_csv": prepared_csv,
+            "slim_cache_path": slim_cache_path,
+            "forearm_ply_path": forearm_ply_path,
+        })
+
+    root = stroke_axis_root(missing_items[0][1])
+
+    print(f"[Stroke Axis] Launching viewer for {n} session(s)...")
+
+    app = QApplication.instance() or QApplication(sys.argv)
+    viewer = RFStrokeAxisViewer(
+        sessions=sessions,
+        stroke_axis_root=root,
     )
     viewer.show()
     app.exec_()
