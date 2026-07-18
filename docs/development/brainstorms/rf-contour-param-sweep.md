@@ -1,6 +1,6 @@
 # Brainstorm: RF contour parameter sweep / auto-tuning
 
-**Started:** 2026-07-18   **Last matured:** 2026-07-18   **Status:** Brainstorming
+**Started:** 2026-07-18   **Last matured:** 2026-07-18   **Status:** Handed off
 
 ## Real goal (north star) — PIVOTED 2026-07-18
 The true pain is NOT searching the landscape. It is: *the IFF heatmap looks
@@ -116,3 +116,6 @@ Ring-present failures are ALWAYS one of 3 branches in `rf_radial_foot_boundary.p
 ## Session log
 - 2026-07-18: Framed intent; grounded in current tuner; posed the compute-vs-eye
   crux and 4 candidate forms (A gallery / B sensitivity / C optimizer / D guide).
+- 2026-07-18: Matured to Tier-2 diagnostic; mapped 3-branch failure taxonomy;
+  confirmed prominence/plateau_size hardcoded; user chose to expose the gate.
+  Handed off to plan `docs/development/plans/pending/rf-contour-failure-diagnostics.md`.
