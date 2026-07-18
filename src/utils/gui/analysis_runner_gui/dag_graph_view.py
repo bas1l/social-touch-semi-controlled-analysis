@@ -61,6 +61,7 @@ class DagGraphView(QGraphicsView):
         self._panning = False
         self._pan_start = QPoint()
         self._config_path: Path | None = None
+        self._pending_view: dict | None = None
 
         self._save_timer = QTimer(self)
         self._save_timer.setSingleShot(True)
@@ -147,6 +148,7 @@ class DagGraphView(QGraphicsView):
             self.fit_all()
         else:
             self._update_scene_rect()
+            self._apply_view()
 
     # ------------------------------------------------------------------
     # Public interface
@@ -189,27 +191,56 @@ class DagGraphView(QGraphicsView):
         return self._config_path.with_suffix(".layout.json")
 
     def _load_layout(self) -> bool:
-        """Apply saved positions. Returns True if layout was loaded."""
+        """Apply saved node positions and stash the saved view transform.
+
+        Returns True if any node position was loaded. The view (zoom/pan)
+        is stashed on ``self._pending_view`` for :meth:`_apply_view` to
+        restore once the scene rect has been established.
+        """
         path = self._layout_path()
         if path is None or not path.exists():
             return False
         try:
-            saved: dict[str, list[float]] = json.loads(path.read_text(encoding="utf-8"))
+            saved: dict = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             logger.warning("Failed to read layout file %s", path)
             return False
+        nodes: dict[str, list[float]] = saved.get("nodes", {})
+        self._pending_view = saved.get("view")
         loaded_any = False
-        for name, (x, y) in saved.items():
+        for name, (x, y) in nodes.items():
             if name in self._nodes:
                 self._nodes[name].setPos(x, y)
                 loaded_any = True
         return loaded_any
 
+    def _capture_view(self) -> dict:
+        """Current zoom scale and scene-space center of the viewport."""
+        center = self.mapToScene(self.viewport().rect().center())
+        return {"scale": self.transform().m11(), "center": [center.x(), center.y()]}
+
+    def _apply_view(self) -> None:
+        """Restore the zoom/pan stashed by :meth:`_load_layout`, if any."""
+        view = self._pending_view
+        self._pending_view = None
+        if not view:
+            return
+        scale = view["scale"]
+        if scale <= 0:
+            return
+        cx, cy = view["center"]
+        self.resetTransform()
+        self.scale(scale, scale)
+        self.centerOn(cx, cy)
+
     def _save_layout(self) -> None:
         path = self._layout_path()
         if path is None:
             return
-        data = {name: [node.pos().x(), node.pos().y()] for name, node in self._nodes.items()}
+        data = {
+            "nodes": {name: [node.pos().x(), node.pos().y()] for name, node in self._nodes.items()},
+            "view": self._capture_view(),
+        }
         try:
             path.write_text(json.dumps(data, indent=2), encoding="utf-8")
         except Exception:
@@ -228,6 +259,7 @@ class DagGraphView(QGraphicsView):
     def wheelEvent(self, event) -> None:
         factor = 1.15 if event.angleDelta().y() > 0 else 1.0 / 1.15
         self.scale(factor, factor)
+        self._save_timer.start()
 
     # ------------------------------------------------------------------
     # Middle-click pan
@@ -258,5 +290,6 @@ class DagGraphView(QGraphicsView):
         if event.button() == Qt.MiddleButton:
             self._panning = False
             self.setCursor(Qt.ArrowCursor)
+            self._save_timer.start()
         else:
             super().mouseReleaseEvent(event)

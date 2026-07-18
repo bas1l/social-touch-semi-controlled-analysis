@@ -62,12 +62,16 @@ from analysis.receptive_field_mapping.metrics.rf_radial_foot_boundary import (  
     compute_radial_foot_boundary,
     compute_radial_foot_stages,
     radial_foot_boundary_to_dict,
+    _select_enclosing_contour,
 )
 from analysis.receptive_field_mapping.data.rf_population_heatmap import (  # noqa: E402
     clean_heatmap_islands,
 )
 from analysis.receptive_field_mapping.data.rf_boundary_types import (  # noqa: E402
     ContourParamToggles,
+    ContourExtractionError,
+    ContourFailureBranch,
+    ContourFailureDiagnostics,
     GestureContourParams,
 )
 
@@ -632,3 +636,217 @@ class TestTogglesParity:
         params = self._params(radial_envelope_smooth_sigma=False)
         assert params.effective_envelope_smooth_sigma() == 0.0
         self._assert_stages_matches_boundary(params)
+
+
+# ---------------------------------------------------------------------------
+# Test: per-branch failure diagnostics (known-answer)
+#
+# Each fixture below is a minimal synthetic grid crafted to FORCE exactly one of
+# the three ``ContourFailureBranch`` values through the public partial entry
+# ``compute_radial_foot_stages(allow_partial=True)`` (the same path the tuner GUI
+# uses). Every numeric field is asserted against a hand-computed value — a wrong
+# formula would still return a plausible number, so we pin the exact quantities
+# (guide 03: known-answer tests). The fields belonging to the OTHER two branches
+# must stay ``None`` on each payload, keeping "zero" (a measured count of 0)
+# distinct from "absent" (not applicable to this branch).
+# ---------------------------------------------------------------------------
+
+
+class TestContourFailureDiagnostics:
+    """Force each failure branch and assert its diagnostics payload numerically."""
+
+    # -- Branch fixtures -----------------------------------------------------
+
+    @staticmethod
+    def _no_plateau_grid(
+        size: int = 120, k: float = 0.05, amp: float = 1000.0
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Full-grid strictly-concave paraboloid: λmax stays negative on every ray.
+
+        ``grid_z = amp - k * r^2`` has a constant negative-definite Hessian, so no
+        ray forms a *positive* λmax plateau (``require_positive`` rejects them all)
+        and ``found.sum() == 0`` -> ``NO_RADIAL_PLATEAU``. There is deliberately no
+        NaN footprint mask: a footprint edge would inject a positive λmax ring and
+        let a plateau form. ``amp`` keeps the whole grid > 0 so the peak is at the
+        centre and the field is not the all-NaN "no data" case.
+        """
+        u = np.linspace(0.0, 1.0, size)
+        grid_u, grid_v = np.meshgrid(u, u, indexing="ij")
+        rows = np.arange(size)[:, None].astype(float)
+        cols = np.arange(size)[None, :].astype(float)
+        cr = cc = (size - 1) * 0.5
+        r2 = (rows - cr) ** 2 + (cols - cc) ** 2
+        grid_z = amp - k * r2
+        return grid_u, grid_v, grid_z
+
+    @staticmethod
+    def _seed_outside_footprint_grid(
+        size: int = 120, sigma: float = 12.0, offset: float = 200.0
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """A Gaussian dome pushed entirely below zero: the footprint is empty.
+
+        The Gaussian's curvature ring still forms a λmax plateau (a contour IS
+        traced), but ``footprint = grid_z > 0`` is empty everywhere, so the seed
+        cell is not in ``contour ∩ footprint`` -> ``SEED_OUTSIDE_FOOTPRINT``.
+        ``offset`` (> amplitude 100) drives every finite cell negative; the disk
+        NaN mask keeps a real edge so the field is not all-NaN.
+        """
+        grid_u, grid_v, grid_z = _make_gaussian_grid(
+            size=size, sigma_u=sigma, sigma_v=sigma
+        )
+        grid_z = grid_z - offset
+        return grid_u, grid_v, grid_z
+
+    @staticmethod
+    def _no_enclosing_grid(
+        size: int = 60,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """A monotone plane ramp: a plateau forms but no contour encloses the seed.
+
+        ``grid_z = grid_u + grid_v`` locates the peak at the far corner. A λmax
+        plateau does form (so extraction reaches the envelope), but the
+        seed-connected footprint component has no marching-squares contour that
+        encloses the corner seed -> ``NO_ENCLOSING_CONTOUR``.
+        """
+        u = np.linspace(0.0, 1.0, size)
+        grid_u, grid_v = np.meshgrid(u, u, indexing="ij")
+        grid_z = grid_u + grid_v
+        return grid_u, grid_v, grid_z
+
+    # -- NO_RADIAL_PLATEAU ---------------------------------------------------
+
+    def test_no_radial_plateau_branch_and_numbers(self) -> None:
+        grid_u, grid_v, grid_z = self._no_plateau_grid()
+        assert np.nanmin(grid_z) > 0.0, "fixture must keep the whole grid > 0"
+
+        stages = compute_radial_foot_stages(
+            grid_u, grid_v, grid_z, allow_partial=True, n_angles=180
+        )
+        diag = stages["diagnostics"]
+        assert isinstance(diag, ContourFailureDiagnostics)
+        assert diag.branch is ContourFailureBranch.NO_RADIAL_PLATEAU
+
+        # Hand-computed: no ray formed a plateau, n_angles echoes the arg, and
+        # peak_lmax is the finite nanmax of the very λmax field returned.
+        assert diag.found_count == 0
+        assert diag.n_angles == 180
+        assert math.isfinite(diag.peak_lmax)
+        assert diag.peak_lmax == pytest.approx(float(np.nanmax(stages["lmax"])))
+
+        # Other branches' fields absent (zero-vs-absent kept distinct).
+        assert diag.footprint_at_seed is None
+        assert diag.footprint_cells is None
+        assert diag.n_candidate_contours is None
+
+    # -- SEED_OUTSIDE_FOOTPRINT ---------------------------------------------
+
+    def test_seed_outside_footprint_branch_and_numbers(self) -> None:
+        grid_u, grid_v, grid_z = self._seed_outside_footprint_grid()
+        # Hand-computed footprint size: every finite cell is negative -> 0 painted.
+        expected_cells = int(np.count_nonzero(grid_z > 0))
+        assert expected_cells == 0, "fixture must have an empty grid_z > 0 footprint"
+
+        stages = compute_radial_foot_stages(grid_u, grid_v, grid_z, allow_partial=True)
+        diag = stages["diagnostics"]
+        assert isinstance(diag, ContourFailureDiagnostics)
+        assert diag.branch is ContourFailureBranch.SEED_OUTSIDE_FOOTPRINT
+
+        assert diag.footprint_at_seed is False
+        assert diag.footprint_cells == expected_cells  # == 0
+
+        # Other branches' fields absent.
+        assert diag.n_angles is None
+        assert diag.found_count is None
+        assert diag.peak_lmax is None
+        assert diag.n_candidate_contours is None
+
+    # -- NO_ENCLOSING_CONTOUR -----------------------------------------------
+
+    def test_no_enclosing_contour_branch_and_numbers(self) -> None:
+        grid_u, grid_v, grid_z = self._no_enclosing_grid()
+        stages = compute_radial_foot_stages(grid_u, grid_v, grid_z, allow_partial=True)
+        diag = stages["diagnostics"]
+        assert isinstance(diag, ContourFailureDiagnostics)
+        assert diag.branch is ContourFailureBranch.NO_ENCLOSING_CONTOUR
+
+        # At least one candidate contour was traced (none enclosed the seed).
+        assert diag.n_candidate_contours is not None
+        assert diag.n_candidate_contours >= 1
+
+        # Other branches' fields absent.
+        assert diag.n_angles is None
+        assert diag.found_count is None
+        assert diag.peak_lmax is None
+        assert diag.footprint_at_seed is None
+        assert diag.footprint_cells is None
+
+    # -- Cross-branch sanity -------------------------------------------------
+
+    def test_three_fixtures_reach_three_distinct_branches(self) -> None:
+        """The three fixtures cover all three branches (no accidental overlap)."""
+        branches = set()
+        for builder, na in (
+            (self._no_plateau_grid, 180),
+            (self._seed_outside_footprint_grid, 360),
+            (self._no_enclosing_grid, 360),
+        ):
+            gu, gv, gz = builder()
+            stages = compute_radial_foot_stages(
+                gu, gv, gz, allow_partial=True, n_angles=na
+            )
+            branches.add(stages["diagnostics"].branch)
+        assert branches == {
+            ContourFailureBranch.NO_RADIAL_PLATEAU,
+            ContourFailureBranch.SEED_OUTSIDE_FOOTPRINT,
+            ContourFailureBranch.NO_ENCLOSING_CONTOUR,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Test: ContourExtractionError / ContourFailureDiagnostics unit coverage
+# (supplementary — the branch-forcing tests above are the primary coverage).
+# ---------------------------------------------------------------------------
+
+
+class TestContourExtractionErrorUnit:
+    """Direct unit coverage of the diagnostics DTO and its carrying exception."""
+
+    def test_is_value_error_subclass_and_carries_payload(self) -> None:
+        diag = ContourFailureDiagnostics(
+            branch=ContourFailureBranch.NO_RADIAL_PLATEAU,
+            n_angles=360,
+            found_count=0,
+            peak_lmax=0.5,
+        )
+        err = ContourExtractionError("boom", diag)
+        # Subclass of ValueError so the existing ``except ValueError`` still catches.
+        assert isinstance(err, ValueError)
+        assert err.diagnostics is diag
+        assert str(err) == "boom"
+
+    def test_wrong_diagnostics_type_raises(self) -> None:
+        with pytest.raises(ValueError):
+            ContourExtractionError("bad", diagnostics="not-a-payload")
+
+    def test_diagnostics_optional_fields_default_to_none(self) -> None:
+        diag = ContourFailureDiagnostics(
+            branch=ContourFailureBranch.SEED_OUTSIDE_FOOTPRINT
+        )
+        assert diag.n_angles is None
+        assert diag.found_count is None
+        assert diag.peak_lmax is None
+        assert diag.footprint_at_seed is None
+        assert diag.footprint_cells is None
+        assert diag.n_candidate_contours is None
+
+    def test_select_enclosing_contour_raises_with_branch(self) -> None:
+        # A filled blob in one corner and a peak far from it: contour(s) exist but
+        # none enclose the peak -> NO_ENCLOSING_CONTOUR with n_candidate_contours>=1.
+        binary = np.zeros((40, 40), dtype=bool)
+        binary[5:12, 5:12] = True
+        with pytest.raises(ContourExtractionError) as excinfo:
+            _select_enclosing_contour(binary, (30, 30))
+        diag = excinfo.value.diagnostics
+        assert diag.branch is ContourFailureBranch.NO_ENCLOSING_CONTOUR
+        assert diag.n_candidate_contours is not None
+        assert diag.n_candidate_contours >= 1

@@ -89,15 +89,21 @@ def extract_session_boundaries(
                 radial_gauss_sigma = gp.effective_gauss_sigma()
                 radial_hess_sigma = gp.radial_hess_sigma
                 radial_envelope_smooth_sigma = gp.effective_envelope_smooth_sigma()
+                radial_prominence = gp.effective_prominence()
+                radial_plateau_size = gp.effective_plateau_size()
             else:
                 radial_gauss_sigma = params.radial_gauss_sigma
                 radial_hess_sigma = params.radial_hess_sigma
                 radial_envelope_smooth_sigma = params.radial_envelope_smooth_sigma
+                radial_prominence = params.radial_prominence
+                radial_plateau_size = params.radial_plateau_size
             radial_boundary = compute_radial_foot_boundary(
                 grid_u, grid_v, grid_z,
                 gauss_sigma=radial_gauss_sigma,
                 hess_sigma=radial_hess_sigma,
                 envelope_smooth_sigma=radial_envelope_smooth_sigma,
+                prominence=radial_prominence,
+                plateau_size=radial_plateau_size,
                 snapshot_dir=inspection_dir, snapshot_label=gtype,
                 contour_color=contour_color,
             )

@@ -246,6 +246,8 @@ tasks:
       radial_gauss_sigma: 8.0
       radial_hess_sigma: 5.0
       radial_envelope_smooth_sigma: 1.5   # Gaussian smoothing (vertices) of the 2D-footprint envelope
+      radial_prominence:                  # null = no prominence gate on the per-ray λmax plateau detection
+      radial_plateau_size: 1              # min plateau length for find_peaks (1 = no plateau-length constraint)
       # When true, regenerate each (session, gesture) contour from its tuned JSON
       # written by spatial_tune_rf_contours (raises, naming the combo, if any is
       # absent). When false (default), the global scalars above are used unchanged.
@@ -281,6 +283,8 @@ tasks:
       radial_gauss_sigma: 8.0
       radial_hess_sigma: 5.0
       radial_envelope_smooth_sigma: 1.5
+      radial_prominence:                  # null = no prominence gate (seed for a session/gesture with no saved JSON)
+      radial_plateau_size: 1              # min plateau length for find_peaks (1 = no plateau-length constraint)
     depends_on: [spatial_build_response_fields]
 
   # Aggregate inflection boundary metrics across sessions and render comparison visuals.

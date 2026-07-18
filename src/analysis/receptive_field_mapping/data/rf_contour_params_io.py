@@ -13,13 +13,20 @@ The five parameters live on :class:`GestureContourParams` (defined in
 I/O here is fail-fast: missing files, missing/unknown/mistyped keys, and an
 invalid ``median_filter_size`` all raise rather than silently defaulting.
 
-Four of the five parameters are also *toggleable* (see ``TOGGLEABLE_PARAM_KEYS``
-and :class:`ContourParamToggles`): the JSON may carry an optional nested
-``param_enabled`` object recording their enable/disable state. It is the one
-*sanctioned* optional key — absent entirely, it resolves to the documented
-default toggle state at this loader boundary (backward-compatible with a
-flag-less JSON); present but malformed (wrong type, unknown sub-key, non-bool
-flag), it still raises with file context.
+Several parameters are also *toggleable* (see ``TOGGLEABLE_PARAM_KEYS`` and
+:class:`ContourParamToggles`): the JSON may carry an optional nested
+``param_enabled`` object recording their enable/disable state.
+
+In addition to the five required parameters above, the JSON carries the
+plateau-detection gate as two *sanctioned-optional* top-level keys:
+``prominence`` (a positive real or ``null`` = no prominence gate) and
+``plateau_size`` (an int ``>= 1``; ``1`` = no plateau-length constraint). Like
+``param_enabled``, these are the sanctioned exceptions to "no silent fallbacks":
+absent entirely, each resolves to its documented default (``prominence`` -> None,
+``plateau_size`` -> 1) at this loader boundary (backward-compatible with an older
+JSON written before the gate was exposed); present but malformed (wrong type,
+unknown sub-key, non-bool flag, non-positive prominence, ``plateau_size < 1``),
+they still raise with file context.
 
 The grid helper (``load_session_arrays`` / ``build_session_grid`` /
 ``load_session_grid``) is the production promotion of the sandbox
@@ -62,15 +69,19 @@ PARAM_KEYS: tuple[str, ...] = (
     "radial_envelope_smooth_sigma",
 )
 
-# The subset of PARAM_KEYS that can be individually enabled/disabled. Excludes
-# radial_hess_sigma (the core Hessian-λmax detector scale, always applied).
-# Kept as the authoritative key list so the toggle UI/JSON never drift from
+# The parameters that can be individually enabled/disabled. Excludes
+# radial_hess_sigma (the core Hessian-λmax detector scale, always applied) and
+# plateau_size (its natural "off" is the value 1, so it needs no flag). Includes
+# ``prominence`` — a sanctioned-optional key (not in PARAM_KEYS) whose toggle
+# resolves an unchecked box to ``None`` (no prominence gate). Kept as the
+# authoritative key list so the toggle UI/JSON never drift from
 # ContourParamToggles' fields.
 TOGGLEABLE_PARAM_KEYS: tuple[str, ...] = (
     "min_overlap_pct",
     "median_filter_size",
     "radial_gauss_sigma",
     "radial_envelope_smooth_sigma",
+    "prominence",
 )
 
 # Metadata keys stored alongside the parameters (not part of the tuned identity).
@@ -78,10 +89,12 @@ _META_KEYS: tuple[str, ...] = ("session_id", "gesture", "created_at", "modified_
 
 _REQUIRED_JSON_KEYS: tuple[str, ...] = PARAM_KEYS + _META_KEYS
 
-# Optional top-level keys: sanctioned to be *absent* (backward-compat with a
-# flag-less JSON, resolved to the default toggle state at the loader boundary
-# below) but, when present, must still be well-formed (fail-fast).
-_OPTIONAL_JSON_KEYS: tuple[str, ...] = ("param_enabled",)
+# Optional top-level keys: sanctioned to be *absent* (backward-compat with an
+# older JSON, resolved to documented defaults at the loader boundary below) but,
+# when present, must still be well-formed (fail-fast). ``param_enabled`` -> the
+# default toggle state; ``prominence`` -> None (no prominence gate);
+# ``plateau_size`` -> 1 (no plateau-length constraint).
+_OPTIONAL_JSON_KEYS: tuple[str, ...] = ("param_enabled", "prominence", "plateau_size")
 
 
 # ---------------------------------------------------------------------------
@@ -131,10 +144,11 @@ def save_contour_params(
     """Write one (session, gesture) parameter JSON to ``path``.
 
     Serialises the five tuned parameters, the ``param_enabled`` toggle state,
-    plus ``session_id`` / ``gesture`` / ``created_at`` / ``modified_at``.
-    Creates the parent directory, stamps ``modified_at`` to now (UTC), and
-    stamps ``created_at`` to now when the passed value is empty (a fresh
-    Validate). Round-trips through :func:`load_contour_params`.
+    the plateau-detection gate (``prominence`` / ``plateau_size``), plus
+    ``session_id`` / ``gesture`` / ``created_at`` / ``modified_at``. Creates the
+    parent directory, stamps ``modified_at`` to now (UTC), and stamps
+    ``created_at`` to now when the passed value is empty (a fresh Validate).
+    Round-trips through :func:`load_contour_params`.
     """
     if not isinstance(params, GestureContourParams):
         raise ValueError(
@@ -158,6 +172,10 @@ def save_contour_params(
         "radial_gauss_sigma": float(params.radial_gauss_sigma),
         "radial_hess_sigma": float(params.radial_hess_sigma),
         "radial_envelope_smooth_sigma": float(params.radial_envelope_smooth_sigma),
+        "prominence": (
+            float(params.prominence) if params.prominence is not None else None
+        ),
+        "plateau_size": int(params.plateau_size),
         "param_enabled": params.toggles.to_dict(),
         "created_at": created_at if created_at else now,
         "modified_at": now,
@@ -179,13 +197,16 @@ def load_contour_params(path: Path) -> GestureContourParams:
       * a non-positive or even ``median_filter_size`` -> ``ValueError``
         (also enforced by :class:`GestureContourParams`);
       * a present-but-malformed ``param_enabled`` (not a mapping, unknown
-        sub-key, non-bool flag) -> ``ValueError``.
+        sub-key, non-bool flag) -> ``ValueError``;
+      * a present-but-malformed ``prominence`` (not a positive real or null) or
+        ``plateau_size`` (not an int, or ``< 1``) -> ``ValueError``.
 
-    The optional ``param_enabled`` key is the single sanctioned exception to
-    "no silent fallbacks": when *absent entirely*, it resolves to the
-    documented default :class:`ContourParamToggles` state at this loader
-    boundary (backward-compat with a flag-less JSON) — not a scattered inline
-    default, but one resolution point for every caller.
+    The optional ``param_enabled`` / ``prominence`` / ``plateau_size`` keys are
+    the sanctioned exceptions to "no silent fallbacks": when *absent entirely*,
+    each resolves to its documented default at this loader boundary
+    (``param_enabled`` -> default :class:`ContourParamToggles` state;
+    ``prominence`` -> ``None``; ``plateau_size`` -> ``1``) — not a scattered
+    inline default, but one resolution point for every caller.
 
     Metadata keys (``session_id`` etc.) are validated for presence but not
     returned — the object carries only the five tuned parameters (plus the
@@ -252,6 +273,35 @@ def load_contour_params(path: Path) -> GestureContourParams:
     except ValueError as exc:
         raise ValueError(f"{exc} (in {path})") from exc
 
+    # plateau_size / prominence are sanctioned-optional keys (like param_enabled):
+    # absent -> documented defaults (1 / None) resolved here at the single loader
+    # boundary; present -> validated loudly with file context. plateau_size must
+    # be a genuine int (reject bool/float like median_filter_size); prominence
+    # must be a positive real or JSON null.
+    if "plateau_size" in data:
+        raw_ps = data["plateau_size"]
+        if isinstance(raw_ps, bool) or not isinstance(raw_ps, int):
+            raise ValueError(
+                f"plateau_size must be an integer, got {raw_ps!r} in {path}"
+            )
+        plateau_size = int(raw_ps)
+    else:
+        plateau_size = 1
+
+    if "prominence" in data:
+        raw_prom = data["prominence"]
+        if raw_prom is None:
+            prominence: float | None = None
+        elif isinstance(raw_prom, bool) or not isinstance(raw_prom, (int, float)):
+            raise ValueError(
+                f"prominence must be a real number or null, got {raw_prom!r} in "
+                f"{path}"
+            )
+        else:
+            prominence = float(raw_prom)
+    else:
+        prominence = None
+
     try:
         return GestureContourParams(
             min_overlap_pct=float(data["min_overlap_pct"]),
@@ -259,6 +309,8 @@ def load_contour_params(path: Path) -> GestureContourParams:
             radial_gauss_sigma=float(data["radial_gauss_sigma"]),
             radial_hess_sigma=float(data["radial_hess_sigma"]),
             radial_envelope_smooth_sigma=float(data["radial_envelope_smooth_sigma"]),
+            prominence=prominence,
+            plateau_size=plateau_size,
             toggles=toggles,
         )
     except ValueError as exc:
@@ -271,8 +323,10 @@ def defaults_from_boundary_params(params: BoundaryParams) -> GestureContourParam
     Used to bootstrap the GUI (and the ``strict=False`` consume path) from the
     DAG-level scalars. Raises if the global ``median_filter_size`` is ``None``
     (the tuner needs a concrete positive odd window to seed from) — a loud
-    prerequisite, not a silent fallback. Toggles are seeded to the default
-    :class:`ContourParamToggles` state (median OFF, the rest ON).
+    prerequisite, not a silent fallback. The plateau-detection gate is seeded
+    from the global ``radial_prominence`` / ``radial_plateau_size`` scalars.
+    Toggles are seeded to the default :class:`ContourParamToggles` state (median
+    and prominence OFF, the rest ON).
     """
     if params.median_filter_size is None:
         raise ValueError(
@@ -286,6 +340,12 @@ def defaults_from_boundary_params(params: BoundaryParams) -> GestureContourParam
         radial_gauss_sigma=float(params.radial_gauss_sigma),
         radial_hess_sigma=float(params.radial_hess_sigma),
         radial_envelope_smooth_sigma=float(params.radial_envelope_smooth_sigma),
+        prominence=(
+            float(params.radial_prominence)
+            if params.radial_prominence is not None
+            else None
+        ),
+        plateau_size=int(params.radial_plateau_size),
         toggles=ContourParamToggles(),
     )
 

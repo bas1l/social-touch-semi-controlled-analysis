@@ -578,6 +578,8 @@ def spatial_extract_boundaries_flow(
     radial_gauss_sigma: float = 8.0,
     radial_hess_sigma: float = 5.0,
     radial_envelope_smooth_sigma: float = 1.5,
+    radial_prominence: float | None = None,
+    radial_plateau_size: int = 1,
     use_tuned_params: bool = False,
 ) -> None:
     """Render per-session 2D population RF heatmap PNGs projected via SLIM UV.
@@ -624,6 +626,8 @@ def spatial_extract_boundaries_flow(
             radial_gauss_sigma=radial_gauss_sigma,
             radial_hess_sigma=radial_hess_sigma,
             radial_envelope_smooth_sigma=radial_envelope_smooth_sigma,
+            radial_prominence=radial_prominence,
+            radial_plateau_size=radial_plateau_size,
             contour_params_dir=contour_params_dir,
         )
 
@@ -1921,6 +1925,12 @@ def _build_pipeline_stages(dag_handler: DagConfigHandler, items_to_process) -> l
                 "radial_gauss_sigma": float(dag_handler.get_task_options("spatial_extract_boundaries").get("radial_gauss_sigma", 8.0)),
                 "radial_hess_sigma": float(dag_handler.get_task_options("spatial_extract_boundaries").get("radial_hess_sigma", 5.0)),
                 "radial_envelope_smooth_sigma": float(dag_handler.get_task_options("spatial_extract_boundaries").get("radial_envelope_smooth_sigma", 1.5)),
+                **(
+                    {"radial_prominence": float(dag_handler.get_task_options("spatial_extract_boundaries")["radial_prominence"])}
+                    if dag_handler.get_task_options("spatial_extract_boundaries").get("radial_prominence") is not None
+                    else {}
+                ),
+                "radial_plateau_size": int(dag_handler.get_task_options("spatial_extract_boundaries").get("radial_plateau_size", 1)),
                 "use_tuned_params": bool(dag_handler.get_task_options("spatial_extract_boundaries").get("use_tuned_params", False)),
             },
         },

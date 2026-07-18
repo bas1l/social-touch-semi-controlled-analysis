@@ -46,6 +46,11 @@ from scipy.signal import find_peaks, savgol_filter
 from skimage.feature import hessian_matrix, hessian_matrix_eigvals
 from skimage.measure import find_contours
 
+from analysis.receptive_field_mapping.data.rf_boundary_types import (
+    ContourExtractionError,
+    ContourFailureBranch,
+    ContourFailureDiagnostics,
+)
 from analysis.receptive_field_mapping.metrics.rf_inflection_boundary import (
     compute_contour_pca,
     compute_laplacian_arrays,
@@ -320,9 +325,16 @@ def _extract_radial_plateau_foot(
         snapped_radii[i] = float(radii[snapped_idx])
 
     if not np.any(found):
-        raise ValueError(
-            "radial-plateau: no λmax foot plateau found on any ray "
-            "(field too flat or peak runs off the data footprint)"
+        raise ContourExtractionError(
+            f"radial-plateau: no ray formed a qualifying λmax plateau "
+            f"(the peak-detection gate found no radial ridge on any of the "
+            f"{n_angles} rays)",
+            ContourFailureDiagnostics(
+                branch=ContourFailureBranch.NO_RADIAL_PLATEAU,
+                n_angles=n_angles,
+                found_count=int(found.sum()),
+                peak_lmax=float(np.nanmax(lmax)),
+            ),
         )
 
     # ``_smooth_radii_circular`` smooths the per-angle radii array (length
@@ -396,7 +408,13 @@ def _select_enclosing_contour(
         )
         enclosing.append((area, c))
     if not enclosing:
-        raise ValueError("region-growth: no contour encloses the peak")
+        raise ContourExtractionError(
+            "region-growth: no contour encloses the peak",
+            ContourFailureDiagnostics(
+                branch=ContourFailureBranch.NO_ENCLOSING_CONTOUR,
+                n_candidate_contours=len(contours),
+            ),
+        )
     enclosing.sort(key=lambda t: t[0])
     return enclosing[-1][1]
 
@@ -444,9 +462,14 @@ def envelope_contour_to_footprint(
     region = inside & footprint
 
     if not region[peak_r, peak_c]:
-        raise ValueError(
+        raise ContourExtractionError(
             "envelope: seed is not inside the contour ∩ footprint intersection — "
-            "cannot envelope an empty region (check the radial contour and seed)"
+            "cannot envelope an empty region (check the radial contour and seed)",
+            ContourFailureDiagnostics(
+                branch=ContourFailureBranch.SEED_OUTSIDE_FOOTPRINT,
+                footprint_at_seed=bool(footprint[peak_r, peak_c]),
+                footprint_cells=int(footprint.sum()),
+            ),
         )
 
     labeled, _n = label(region)
@@ -703,6 +726,10 @@ def compute_radial_foot_stages(
       ``error``       (partial return only) str explaining why the contour could
                       not be traced.  Absent on a full (contour present) return
                       and never present when ``allow_partial`` is ``False``.
+      ``diagnostics`` (partial return only) a ``ContourFailureDiagnostics`` payload
+                      of structured per-branch numbers, present only when the
+                      contour stage failed with a ``ContourExtractionError``.
+                      Absent when the failing exception was a plain ``ValueError``.
 
     Raises
     ------
@@ -745,7 +772,7 @@ def compute_radial_foot_stages(
         except ValueError as exc:
             # Peak WAS located; only the contour stage failed. Return the located
             # peak so the GUI can still mark it (Change B) — no silent fallback.
-            return {
+            partial = {
                 "smoothed": smoothed,
                 "lmax": lmax,
                 "contour_uv": None,
@@ -753,6 +780,12 @@ def compute_radial_foot_stages(
                 "peak_rc": peak_rc,
                 "error": str(exc),
             }
+            # A ContourExtractionError (subclass of ValueError) carries structured
+            # per-branch numbers; attach them so the GUI can render a live
+            # quantitative diagnostic. A plain ValueError surfaces "error" only.
+            if isinstance(exc, ContourExtractionError):
+                partial["diagnostics"] = exc.diagnostics
+            return partial
         return {
             "smoothed": smoothed,
             "lmax": lmax,
