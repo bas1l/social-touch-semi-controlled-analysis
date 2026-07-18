@@ -19,6 +19,7 @@ from typing import List
 import numpy as np
 
 from analysis.pipeline.output_dirs import (
+    SPATIAL_BUILD_RESPONSE_FIELDS,
     SPATIAL_MAP_SINGLE_TOUCH,
     SPATIAL_SLIM_UV,
     TOUCH_COMPUTE_SERIES,
@@ -117,6 +118,67 @@ def resolve_boundary_input_paths(
         )
 
     return [series_csv_path, forearm_ply_path, npz_path, slim_cache_path]
+
+
+# ---------------------------------------------------------------------------
+# Shared response-fields NPZ (spatial_build_response_fields) — consumer side
+# ---------------------------------------------------------------------------
+
+def resolve_response_fields_npz(database_path: Path, session_id: str) -> Path:
+    """Resolve the shared param-free response-fields NPZ for one session.
+
+    Points at
+    ``<database>/4_analysed/spatial_build_response_fields/<session>/<session>_response_fields.npz``
+    — the single source of truth written by ``spatial_build_response_fields`` and
+    consumed by both the RF-contour tuner and the boundary extractor. The path
+    carries **no** iff-metric subfolder (the param-free fields are metric-
+    independent).
+    """
+    return (
+        Path(database_path) / '4_analysed' / SPATIAL_BUILD_RESPONSE_FIELDS
+        / session_id / f'{session_id}_response_fields.npz'
+    )
+
+
+def load_param_free_fields_npz(npz_path: Path) -> dict[str, tuple]:
+    """Read the param-free per-gesture fields from a shared response-fields NPZ.
+
+    Inverse of ``build_session_response_fields``' packing: returns
+
+        {gtype: (slim_raw float64, slim_unique_count int64, n_touches int)}
+
+    in the NPZ's stored gesture order (canonical, incl. the synthetic
+    ``'stroke'`` subset when present). float64/int64 arrays round-trip through
+    ``np.savez`` / ``np.load`` exactly, so the returned fields are byte-identical
+    to recomputing them via ``build_param_free_fields`` on the same inputs.
+
+    Fail-fast (``FileNotFoundError`` / ``KeyError``) on a missing file or any
+    missing per-gesture key.
+    """
+    npz_path = Path(npz_path)
+    if not npz_path.exists():
+        raise FileNotFoundError(
+            f"Response-fields NPZ not found: {npz_path}. Run "
+            "'spatial_build_response_fields' first."
+        )
+    fields: dict = {}
+    with np.load(npz_path, allow_pickle=True) as d:
+        gesture_types = [str(g) for g in d["gesture_types"]]
+        for gtype in gesture_types:
+            raw_key = f"heatmap_pre_threshold_{gtype}"
+            cnt_key = f"unique_count_{gtype}"
+            n_key = f"n_touches_{gtype}"
+            for key in (raw_key, cnt_key, n_key):
+                if key not in d:
+                    raise KeyError(
+                        f"Response-fields NPZ {npz_path} is missing key '{key}'."
+                    )
+            fields[gtype] = (
+                d[raw_key].astype(np.float64),
+                d[cnt_key].astype(np.int64),
+                int(d[n_key]),
+            )
+    return fields
 
 
 # ---------------------------------------------------------------------------

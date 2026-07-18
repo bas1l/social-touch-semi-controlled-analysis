@@ -37,6 +37,7 @@ from analysis.receptive_field_mapping import (
     run_population_rf_grid_metrics_visualization,
     run_session_comparison_visualization,
     run_population_response_field_extraction,
+    run_response_field_generation,
     run_session_rf_boundary_comparison,
     run_proximal_distal_comparison,
     run_tap_stroke_comparison,
@@ -48,6 +49,8 @@ from analysis.receptive_field_mapping import (
     run_rf_profile_extraction,
     launch_rf_camera_settings_viewer,
     launch_slim_uv_config_viewer,
+    launch_rf_contour_tuning_viewer,
+    launch_stroke_axis_viewer,
 )
 from analysis.receptive_field_mapping.pipelines.rf_response_tuning_pipeline import (
     _resolve_response_metric,
@@ -70,6 +73,7 @@ from analysis.pipeline.output_dirs import (
     SPATIAL_COMPARE_BOUNDARIES,
     SPATIAL_COMPARE_PROXIMAL_DISTAL,
     SPATIAL_COMPARE_TAP_STROKE,
+    SPATIAL_BUILD_RESPONSE_FIELDS,
     SPATIAL_EXTRACT_BOUNDARIES,
     SPATIAL_EXTRACT_RF_PROFILES,
     SPATIAL_TUNING_RF_METRICS,
@@ -444,6 +448,118 @@ def spatial_map_single_touch_flow(
     )
 
 
+@flow(name="spatial_configure_stroke_axis")
+def spatial_configure_stroke_axis_flow(
+    input_items: List[Tuple[Path, Path]],
+    force_processing: bool = False,
+    interactive: bool = True,
+) -> None:
+    """Launch the per-session manual stroke-axis GUI.
+
+    For each session, opens a 2D-UV viewer that shows the single-touch stroke
+    motion arrows coloured by their current proximal/distal label with an
+    editable, auto-initialised stroke axis, lets the researcher swap labels /
+    redraw the axis, and persists one
+    ``4_analysed/spatial_configure_stroke_axis/<session>/<session>_stroke_axis.json``
+    on "Validate". Consumed by ``spatial_build_response_fields`` when its
+    ``use_manual_stroke_axis`` toggle is enabled, so the corrected labels
+    propagate to contour tuning, boundary extraction, and the proximal/distal
+    comparison.
+
+    The node is a **manual GUI**: when ``interactive`` is False the flow is a
+    no-op (per plan — there is no batch axis inference). When ``force_processing``
+    is False, sessions that already have a saved stroke-axis JSON are skipped and
+    the GUI only opens for sessions still missing one; set ``force_processing``
+    True to re-open the GUI for every session.
+    """
+    if not input_items:
+        return
+
+    if not interactive:
+        print(
+            "[Stroke Axis] interactive=false — skipping GUI; "
+            "spatial_build_response_fields keeps its current (3D) labels unless "
+            "use_manual_stroke_axis is enabled with existing JSONs."
+        )
+        return
+
+    from analysis.receptive_field_mapping.data.rf_stroke_axis_io import (
+        stroke_axis_path,
+        stroke_axis_root,
+    )
+
+    if force_processing:
+        missing_items = list(input_items)
+        print(
+            f"[Stroke Axis] force_processing=true — launching viewer for all "
+            f"{len(missing_items)} session(s)."
+        )
+    else:
+        missing_items = []
+        for csv_path, db_path in input_items:
+            session_id = session_id_from_path(csv_path)
+            json_path = stroke_axis_path(stroke_axis_root(db_path), session_id)
+            if not json_path.exists():
+                missing_items.append((csv_path, db_path))
+
+        if not missing_items:
+            print(
+                f"[Stroke Axis] All {len(input_items)} session(s) already have a "
+                "stroke-axis JSON — skipping. Set force_processing=true to re-open."
+            )
+            return
+
+        print(
+            f"[Stroke Axis] {len(missing_items)}/{len(input_items)} session(s) "
+            "missing a stroke-axis JSON — launching viewer."
+        )
+
+    launch_stroke_axis_viewer(missing_items, dag_defaults={})
+
+
+@flow(name="spatial_build_response_fields")
+def spatial_build_response_fields_flow(
+    input_items: List[Tuple[Path, Path]],
+    force_processing: bool = False,
+    iff_metric: str = "mean",
+    use_manual_stroke_axis: bool = False,
+) -> None:
+    """Materialise the param-free per-(session, gesture) response fields.
+
+    For each session, computes the parameter-independent raw heatmaps, unique
+    touch counts, touch counts, and the raw SLIM mesh purely from the upstream
+    single-touch RF NPZ + SLIM UV cache + merged CSV/PLY, and saves them to
+    ``4_analysed/spatial_build_response_fields/<session>/<session>_response_fields.npz``.
+    Idempotent via an mtime gate on the NPZ. Both ``spatial_tune_rf_contours``
+    and ``spatial_extract_boundaries`` consume these shared fields.
+
+    When ``use_manual_stroke_axis`` is True, each session's proximal/distal labels
+    are overwritten from the manually drawn UV stroke axis
+    (``spatial_configure_stroke_axis``) before the fields are built, so the
+    correction propagates into the NPZ heatmaps (raises ``FileNotFoundError`` if a
+    session's stroke-axis JSON is absent — no silent fallback).
+    """
+    print(f"[Batch Analysis] Building population response fields for {len(input_items)} item(s)...")
+    if not input_items:
+        return
+
+    if iff_metric == "both":
+        raise ValueError(
+            "spatial_build_response_fields_flow: iff_metric='both' is not supported "
+            "— the response-fields NPZ path carries no metric suffix. Set iff_metric "
+            "to 'mean' or 'max'."
+        )
+
+    output_dir = input_items[0][1] / '4_analysed' / SPATIAL_BUILD_RESPONSE_FIELDS
+    run_response_field_generation(
+        input_items=input_items,
+        force_processing=force_processing,
+        output_dir=output_dir,
+        iff_metric=iff_metric,
+        use_manual_stroke_axis=use_manual_stroke_axis,
+    )
+
+
 @flow(name="spatial_extract_boundaries")
 def spatial_extract_boundaries_flow(
     input_items: List[Tuple[Path, Path]],
@@ -462,6 +578,7 @@ def spatial_extract_boundaries_flow(
     radial_gauss_sigma: float = 8.0,
     radial_hess_sigma: float = 5.0,
     radial_envelope_smooth_sigma: float = 1.5,
+    use_tuned_params: bool = False,
 ) -> None:
     """Render per-session 2D population RF heatmap PNGs projected via SLIM UV.
 
@@ -469,14 +586,26 @@ def spatial_extract_boundaries_flow(
     stroke_proximal, stroke_distal) under
     ``4_analysed/spatial_extract_boundaries/<session_id>/``.
     Idempotent via sentinel JSON.
+
+    When ``use_tuned_params`` is True, each session/gesture regenerates its
+    contour from the per-combination JSON written by ``spatial_tune_rf_contours``
+    (raising, naming the combo, if any required JSON is absent); when False the
+    global DAG scalars are used unchanged.
     """
     print(f"[Batch Analysis] Extracting population response field boundaries for {len(input_items)} item(s)...")
     if not input_items:
         return
 
+    from analysis.receptive_field_mapping.data.rf_contour_params_io import (
+        contour_params_root,
+    )
+
     metrics = ["mean", "max"] if iff_metric == "both" else [iff_metric]
     for metric in metrics:
         output_dir = input_items[0][1] / '4_analysed' / SPATIAL_EXTRACT_BOUNDARIES / f"iff_{metric}"
+        contour_params_dir = (
+            contour_params_root(input_items[0][1], metric) if use_tuned_params else None
+        )
         run_population_response_field_extraction(
             session_configs=input_items,
             neuron_mode=neuron_mode,
@@ -495,7 +624,118 @@ def spatial_extract_boundaries_flow(
             radial_gauss_sigma=radial_gauss_sigma,
             radial_hess_sigma=radial_hess_sigma,
             radial_envelope_smooth_sigma=radial_envelope_smooth_sigma,
+            contour_params_dir=contour_params_dir,
         )
+
+
+@flow(name="spatial_tune_rf_contours")
+def spatial_tune_rf_contours_flow(
+    input_items: List[Tuple[Path, Path]],
+    force_processing: bool = False,
+    interactive: bool = True,
+    iff_metric: str = "mean",
+    min_overlap_pct: float = 25.0,
+    median_filter_size: int = 1,
+    radial_gauss_sigma: float = 8.0,
+    radial_hess_sigma: float = 5.0,
+    radial_envelope_smooth_sigma: float = 1.5,
+) -> None:
+    """Launch the per-(session, gesture) RF-contour tuning GUI for missing combos.
+
+    For each session, resolves the shared param-free response-fields NPZ produced
+    by ``spatial_build_response_fields`` under
+    ``spatial_build_response_fields/<session>/`` (no iff-metric subfolder) and,
+    for every gesture subset in the NPZ ``gesture_types``, checks whether a
+    per-combination ``<session>_<gesture>_contour_params.json`` already exists
+    under ``spatial_tune_rf_contours/iff_<metric>/``. Sessions that already have a
+    JSON for every gesture are skipped (unless ``force_processing`` is True,
+    which re-opens the GUI for every session). The GUI saves one JSON per
+    (session, gesture) on "Validate"; those JSONs are consumed by
+    ``spatial_extract_boundaries`` when ``use_tuned_params`` is enabled.
+
+    When ``interactive`` is False the flow is a no-op: ``spatial_extract_boundaries``
+    simply falls back to its global DAG parameters.
+    """
+    if not input_items:
+        return
+
+    if not interactive:
+        print(
+            "[RF Contour Tuning] interactive=false — skipping GUI; "
+            "spatial_extract_boundaries will use its global DAG parameters."
+        )
+        return
+
+    if iff_metric == "both":
+        raise ValueError(
+            "spatial_tune_rf_contours_flow: iff_metric='both' is not supported — "
+            "the tuner operates on a single metric NPZ. Set iff_metric to 'mean' "
+            "or 'max'."
+        )
+
+    import numpy as _np
+    from analysis.receptive_field_mapping.data.rf_contour_params_io import (
+        contour_params_root,
+        contour_params_path,
+    )
+
+    def _response_fields_npz(db_path: Path, session_id: str) -> Path:
+        return (
+            db_path / '4_analysed' / SPATIAL_BUILD_RESPONSE_FIELDS
+            / session_id / f"{session_id}_response_fields.npz"
+        )
+
+    if force_processing:
+        missing_items = list(input_items)
+        print(
+            f"[RF Contour Tuning] force_processing=true — launching viewer for "
+            f"all {len(missing_items)} session(s)."
+        )
+    else:
+        missing_items = []
+        for csv_path, db_path in input_items:
+            session_id = session_id_from_path(csv_path)
+            npz_path = _response_fields_npz(db_path, session_id)
+            if not npz_path.exists():
+                raise ValueError(
+                    f"spatial_tune_rf_contours_flow: response-fields NPZ not found "
+                    f"for session '{session_id}': {npz_path}. "
+                    "Run spatial_build_response_fields first."
+                )
+            with _np.load(npz_path, allow_pickle=True) as d:
+                gesture_keys = [str(g) for g in d["gesture_types"]]
+            root = contour_params_root(db_path, iff_metric)
+            all_present = all(
+                contour_params_path(root, session_id, gtype).exists()
+                for gtype in gesture_keys
+            )
+            if not all_present:
+                missing_items.append((csv_path, db_path))
+
+        if not missing_items:
+            print(
+                f"[RF Contour Tuning] All {len(input_items)} session(s) already have "
+                "tuned contour params for every gesture — skipping. "
+                "Set force_processing=true to re-open."
+            )
+            return
+
+        print(
+            f"[RF Contour Tuning] {len(missing_items)}/{len(input_items)} session(s) "
+            "missing at least one (session, gesture) contour params JSON — "
+            "launching viewer."
+        )
+
+    dag_defaults = {
+        "iff_metric": iff_metric,
+        "min_overlap_pct": float(min_overlap_pct),
+        "median_filter_size": int(median_filter_size),
+        "radial_gauss_sigma": float(radial_gauss_sigma),
+        "radial_hess_sigma": float(radial_hess_sigma),
+        "radial_envelope_smooth_sigma": float(radial_envelope_smooth_sigma),
+    }
+
+    launch_rf_contour_tuning_viewer(missing_items, dag_defaults)
 
 
 @flow(name="spatial_compare_boundaries")
@@ -1642,6 +1882,21 @@ def _build_pipeline_stages(dag_handler: DagConfigHandler, items_to_process) -> l
             },
         },
         {
+            "name": "spatial_configure_stroke_axis",
+            "func": spatial_configure_stroke_axis_flow,
+            "params": lambda: {
+                "interactive": bool(dag_handler.get_task_options("spatial_configure_stroke_axis").get("interactive", True)),
+            },
+        },
+        {
+            "name": "spatial_build_response_fields",
+            "func": spatial_build_response_fields_flow,
+            "params": lambda: {
+                "iff_metric": dag_handler.get_task_options("spatial_build_response_fields").get("iff_metric", "mean"),
+                "use_manual_stroke_axis": bool(dag_handler.get_task_options("spatial_build_response_fields").get("use_manual_stroke_axis", False)),
+            },
+        },
+        {
             "name": "spatial_extract_boundaries",
             "func": spatial_extract_boundaries_flow,
             "params": lambda: {
@@ -1666,6 +1921,20 @@ def _build_pipeline_stages(dag_handler: DagConfigHandler, items_to_process) -> l
                 "radial_gauss_sigma": float(dag_handler.get_task_options("spatial_extract_boundaries").get("radial_gauss_sigma", 8.0)),
                 "radial_hess_sigma": float(dag_handler.get_task_options("spatial_extract_boundaries").get("radial_hess_sigma", 5.0)),
                 "radial_envelope_smooth_sigma": float(dag_handler.get_task_options("spatial_extract_boundaries").get("radial_envelope_smooth_sigma", 1.5)),
+                "use_tuned_params": bool(dag_handler.get_task_options("spatial_extract_boundaries").get("use_tuned_params", False)),
+            },
+        },
+        {
+            "name": "spatial_tune_rf_contours",
+            "func": spatial_tune_rf_contours_flow,
+            "params": lambda: {
+                "interactive": bool(dag_handler.get_task_options("spatial_tune_rf_contours").get("interactive", True)),
+                "iff_metric": dag_handler.get_task_options("spatial_tune_rf_contours").get("iff_metric", "mean"),
+                "min_overlap_pct": float(dag_handler.get_task_options("spatial_tune_rf_contours").get("min_overlap_pct", 25.0)),
+                "median_filter_size": int(dag_handler.get_task_options("spatial_tune_rf_contours").get("median_filter_size", 1)),
+                "radial_gauss_sigma": float(dag_handler.get_task_options("spatial_tune_rf_contours").get("radial_gauss_sigma", 8.0)),
+                "radial_hess_sigma": float(dag_handler.get_task_options("spatial_tune_rf_contours").get("radial_hess_sigma", 5.0)),
+                "radial_envelope_smooth_sigma": float(dag_handler.get_task_options("spatial_tune_rf_contours").get("radial_envelope_smooth_sigma", 1.5)),
             },
         },
         {

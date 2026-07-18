@@ -60,10 +60,15 @@ _stub("analysis.receptive_field_mapping")
 from analysis.receptive_field_mapping.metrics.rf_radial_foot_boundary import (  # noqa: E402
     RadialFootBoundary,
     compute_radial_foot_boundary,
+    compute_radial_foot_stages,
     radial_foot_boundary_to_dict,
 )
 from analysis.receptive_field_mapping.data.rf_population_heatmap import (  # noqa: E402
     clean_heatmap_islands,
+)
+from analysis.receptive_field_mapping.data.rf_boundary_types import (  # noqa: E402
+    ContourParamToggles,
+    GestureContourParams,
 )
 
 
@@ -270,15 +275,89 @@ class TestNoneCases:
         result = compute_radial_foot_boundary(grid_u, grid_v, None)
         assert result is None
 
-    def test_peak_at_border_returns_none(self) -> None:
+    def test_near_border_peak_is_attempted_not_vetoed(self) -> None:
+        # Intent change: the positional "peak within 2 cells of the edge" veto was
+        # removed, so a near-border peak is now ATTEMPTED rather than rejected.
+        # This single-spike grid can still form a foot, so extraction succeeds and
+        # a boundary is returned (previously this returned None purely because of
+        # the border veto).
         size = 120
         u = np.linspace(0, 1, size)
         grid_u, grid_v = np.meshgrid(u, u, indexing="ij")
         grid_z = np.zeros((size, size))
-        # Peak placed within 2 cells of an edge (row 1).
-        grid_z[1, size // 2] = 100.0
+        grid_z[1, size // 2] = 100.0  # peak within 2 cells of the top edge (row 1)
         result = compute_radial_foot_boundary(grid_u, grid_v, grid_z)
-        assert result is None
+        assert result is not None
+
+
+# ---------------------------------------------------------------------------
+# Test: compute_radial_foot_stages allow_partial — graceful degradation contract
+# ---------------------------------------------------------------------------
+
+
+class TestStagesAllowPartial:
+    """``allow_partial=True`` degrades gracefully; ``False`` stays fail-fast.
+
+    A monotone ramp keeps a fully computable field (raw/smoothed/λmax) and a
+    locatable peak (the corner) while the contour stage cannot be traced (a plane
+    has no curvature ring / no footprint contour encloses the seed), so it
+    exercises exactly the partial branch: the field stages come back populated,
+    the contour stages are ``None`` but ``peak_rc`` still carries the located peak
+    (Change B), and an ``error`` message explains why — whereas the default
+    fail-fast path raises the same underlying ``ValueError``.
+    """
+
+    @staticmethod
+    def _no_contour_grid() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        # A monotone ramp: fully computable field, peak locatable at the corner,
+        # but no closed foot contour can be traced around it.
+        size = 60
+        u = np.linspace(0, 1, size)
+        grid_u, grid_v = np.meshgrid(u, u, indexing="ij")
+        grid_z = grid_u + grid_v
+        return grid_u, grid_v, grid_z
+
+    def test_allow_partial_returns_field_and_peak_without_contour(self) -> None:
+        grid_u, grid_v, grid_z = self._no_contour_grid()
+        stages = compute_radial_foot_stages(
+            grid_u, grid_v, grid_z, allow_partial=True
+        )
+        # Field stages present...
+        assert stages["smoothed"] is not None
+        assert stages["lmax"] is not None
+        assert stages["smoothed"].shape == grid_z.shape
+        assert stages["lmax"].shape == grid_z.shape
+        # ...contour stages omitted, with a loud reason...
+        assert stages["contour_uv"] is None
+        assert stages["contour_rc"] is None
+        assert isinstance(stages.get("error"), str) and stages["error"]
+        # ...but the LOCATED peak is still returned (Change B), so the GUI can
+        # still mark it even though no contour is drawn.
+        assert stages["peak_rc"] is not None
+        assert tuple(stages["peak_rc"]) == (grid_z.shape[0] - 1, grid_z.shape[1] - 1)
+
+    def test_default_fail_fast_raises_on_same_input(self) -> None:
+        grid_u, grid_v, grid_z = self._no_contour_grid()
+        with pytest.raises(ValueError):
+            compute_radial_foot_stages(grid_u, grid_v, grid_z)
+
+    def test_all_nan_raises_even_with_allow_partial(self) -> None:
+        # The "no data" case must still raise loudly under allow_partial=True.
+        u = np.linspace(0, 1, 120)
+        grid_u, grid_v = np.meshgrid(u, u, indexing="ij")
+        grid_z = np.full((120, 120), np.nan)
+        with pytest.raises(ValueError):
+            compute_radial_foot_stages(grid_u, grid_v, grid_z, allow_partial=True)
+
+    def test_full_return_has_no_error_key(self) -> None:
+        grid_u, grid_v, grid_z = _make_gaussian_grid(
+            size=120, sigma_u=12.0, sigma_v=12.0
+        )
+        stages = compute_radial_foot_stages(
+            grid_u, grid_v, grid_z, allow_partial=True
+        )
+        assert stages["contour_uv"] is not None
+        assert "error" not in stages
 
 
 # ---------------------------------------------------------------------------
@@ -476,3 +555,80 @@ class TestCleanHeatmapIslands:
         grid_z = np.full((40, 40), np.nan)
         with pytest.raises(ValueError):
             clean_heatmap_islands(grid_z)
+
+
+# ---------------------------------------------------------------------------
+# Test: toggle parity -- the GUI preview entry point (compute_radial_foot_stages)
+# and the pipeline entry point (compute_radial_foot_boundary) produce identical
+# contours for the same GestureContourParams.effective_*()-resolved values.
+# ---------------------------------------------------------------------------
+
+
+class TestTogglesParity:
+    """``effective_*()`` feeds both entry points identically, ON and OFF.
+
+    ``min_overlap_pct`` / ``median_filter_size`` act earlier, in grid building
+    (``rf_contour_params_io.build_session_grid``) -- out of scope here (see
+    ``docs/development/plans/active/rf-contour-tuning-param-toggles-and-help.md``,
+    "Testing Plan"). This covers the two toggles that map directly onto
+    ``compute_radial_foot_stages`` / ``compute_radial_foot_boundary``
+    parameters: ``radial_gauss_sigma`` -> ``gauss_sigma`` (skip value ``0.0``)
+    and ``radial_envelope_smooth_sigma`` -> ``envelope_smooth_sigma`` (skip
+    value ``0.0``). ``radial_hess_sigma`` has no toggle and is passed through
+    raw in every case.
+    """
+
+    @staticmethod
+    def _grid() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        return _make_gaussian_grid(size=120, sigma_u=12.0, sigma_v=12.0)
+
+    @staticmethod
+    def _params(**toggle_overrides) -> GestureContourParams:
+        toggles = ContourParamToggles(
+            min_overlap_pct=toggle_overrides.get("min_overlap_pct", True),
+            median_filter_size=toggle_overrides.get("median_filter_size", True),
+            radial_gauss_sigma=toggle_overrides.get("radial_gauss_sigma", True),
+            radial_envelope_smooth_sigma=toggle_overrides.get(
+                "radial_envelope_smooth_sigma", True
+            ),
+        )
+        return GestureContourParams(
+            min_overlap_pct=25.0,
+            median_filter_size=5,
+            radial_gauss_sigma=8.0,
+            radial_hess_sigma=5.0,
+            radial_envelope_smooth_sigma=1.5,
+            toggles=toggles,
+        )
+
+    def _assert_stages_matches_boundary(self, params: GestureContourParams) -> None:
+        grid_u, grid_v, grid_z = self._grid()
+        stages = compute_radial_foot_stages(
+            grid_u, grid_v, grid_z,
+            gauss_sigma=params.effective_gauss_sigma(),
+            hess_sigma=params.radial_hess_sigma,
+            envelope_smooth_sigma=params.effective_envelope_smooth_sigma(),
+        )
+        boundary = compute_radial_foot_boundary(
+            grid_u, grid_v, grid_z,
+            gauss_sigma=params.effective_gauss_sigma(),
+            hess_sigma=params.radial_hess_sigma,
+            envelope_smooth_sigma=params.effective_envelope_smooth_sigma(),
+        )
+        assert boundary is not None, "expected a boundary for the parity fixture"
+        assert stages["contour_uv"] is not None
+        np.testing.assert_array_equal(stages["contour_uv"], boundary.contour_uv)
+
+    def test_all_toggles_on(self) -> None:
+        params = self._params()
+        self._assert_stages_matches_boundary(params)
+
+    def test_radial_gauss_sigma_off(self) -> None:
+        params = self._params(radial_gauss_sigma=False)
+        assert params.effective_gauss_sigma() == 0.0
+        self._assert_stages_matches_boundary(params)
+
+    def test_radial_envelope_smooth_sigma_off(self) -> None:
+        params = self._params(radial_envelope_smooth_sigma=False)
+        assert params.effective_envelope_smooth_sigma() == 0.0
+        self._assert_stages_matches_boundary(params)

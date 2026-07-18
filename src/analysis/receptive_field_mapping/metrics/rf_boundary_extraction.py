@@ -82,11 +82,22 @@ def extract_session_boundaries(
 
         # --- Radial foot (only when selected) ---
         if boundary_method == "radial":
+            # Per-(session, gesture) tuned sigmas when use_tuned_params is on;
+            # otherwise the global BoundaryParams sigmas (unchanged default path).
+            if prepared.per_gesture_params is not None:
+                gp = prepared.per_gesture_params[gtype]
+                radial_gauss_sigma = gp.effective_gauss_sigma()
+                radial_hess_sigma = gp.radial_hess_sigma
+                radial_envelope_smooth_sigma = gp.effective_envelope_smooth_sigma()
+            else:
+                radial_gauss_sigma = params.radial_gauss_sigma
+                radial_hess_sigma = params.radial_hess_sigma
+                radial_envelope_smooth_sigma = params.radial_envelope_smooth_sigma
             radial_boundary = compute_radial_foot_boundary(
                 grid_u, grid_v, grid_z,
-                gauss_sigma=params.radial_gauss_sigma,
-                hess_sigma=params.radial_hess_sigma,
-                envelope_smooth_sigma=params.radial_envelope_smooth_sigma,
+                gauss_sigma=radial_gauss_sigma,
+                hess_sigma=radial_hess_sigma,
+                envelope_smooth_sigma=radial_envelope_smooth_sigma,
                 snapshot_dir=inspection_dir, snapshot_label=gtype,
                 contour_color=contour_color,
             )
