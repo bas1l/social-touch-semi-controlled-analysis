@@ -130,6 +130,7 @@ class TestContourParamTogglesRoundTrip:
             "median_filter_size": True,
             "radial_gauss_sigma": False,
             "radial_envelope_smooth_sigma": True,
+            "prominence": False,
         }
         rebuilt = ContourParamToggles.from_dict(d)
         assert rebuilt == toggles
@@ -294,6 +295,228 @@ class TestMalformedParamEnabled:
     def test_param_enabled_unknown_sub_key_raises(self, tmp_path: Path) -> None:
         doc = _required_json_doc()
         doc["param_enabled"] = {"radial_hess_sigma": True}
+        path = tmp_path / "S1_tap_contour_params.json"
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh)
+
+        with pytest.raises(ValueError):
+            load_contour_params(path)
+
+
+# ---------------------------------------------------------------------------
+# Plateau-detection gate: prominence / plateau_size (sanctioned-optional keys)
+# ---------------------------------------------------------------------------
+
+
+def _gate_params(
+    *,
+    prominence: float | None,
+    plateau_size: int,
+    prominence_toggle: bool,
+) -> GestureContourParams:
+    """A valid GestureContourParams carrying an explicit plateau-detection gate."""
+    toggles = ContourParamToggles(
+        min_overlap_pct=True,
+        median_filter_size=True,
+        radial_gauss_sigma=True,
+        radial_envelope_smooth_sigma=True,
+        prominence=prominence_toggle,
+    )
+    return GestureContourParams(
+        min_overlap_pct=25.0,
+        median_filter_size=5,
+        radial_gauss_sigma=8.0,
+        radial_hess_sigma=5.0,
+        radial_envelope_smooth_sigma=1.5,
+        prominence=prominence,
+        plateau_size=plateau_size,
+        toggles=toggles,
+    )
+
+
+class TestGateSaveLoadRoundTrip:
+    """``prominence`` (float and None) and ``plateau_size`` survive save -> load."""
+
+    def test_round_trips_float_prominence_and_plateau_size(
+        self, tmp_path: Path
+    ) -> None:
+        params = _gate_params(
+            prominence=2.5, plateau_size=3, prominence_toggle=True
+        )
+        path = tmp_path / "S1_tap_contour_params.json"
+        save_contour_params(path, params, session_id="S1", gesture="tap")
+
+        loaded = load_contour_params(path)
+        assert loaded.prominence == pytest.approx(2.5)
+        assert loaded.plateau_size == 3
+        assert loaded.toggles.prominence is True
+
+    def test_round_trips_none_prominence(self, tmp_path: Path) -> None:
+        params = _gate_params(
+            prominence=None, plateau_size=1, prominence_toggle=False
+        )
+        path = tmp_path / "S1_tap_contour_params.json"
+        save_contour_params(path, params, session_id="S1", gesture="tap")
+
+        loaded = load_contour_params(path)
+        assert loaded.prominence is None
+        assert loaded.plateau_size == 1
+        assert loaded.toggles.prominence is False
+
+    def test_saved_json_carries_gate_keys(self, tmp_path: Path) -> None:
+        params = _gate_params(
+            prominence=1.25, plateau_size=4, prominence_toggle=True
+        )
+        path = tmp_path / "S1_tap_contour_params.json"
+        save_contour_params(path, params, session_id="S1", gesture="tap")
+
+        with open(path, "r", encoding="utf-8") as fh:
+            doc = json.load(fh)
+        assert doc["prominence"] == pytest.approx(1.25)
+        assert doc["plateau_size"] == 4
+
+
+class TestGateBackwardCompat:
+    """A JSON omitting the gate keys resolves to documented defaults (None, 1)."""
+
+    def test_absent_gate_keys_resolve_to_defaults(self, tmp_path: Path) -> None:
+        doc = _required_json_doc()
+        assert "prominence" not in doc
+        assert "plateau_size" not in doc
+
+        path = tmp_path / "S1_tap_contour_params.json"
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh)
+
+        loaded = load_contour_params(path)
+        assert loaded.prominence is None
+        assert loaded.plateau_size == 1
+
+
+class TestGateMalformed:
+    """A present-but-malformed gate key raises with file context (fail-fast)."""
+
+    def _write(self, tmp_path: Path, **overrides) -> Path:
+        doc = _required_json_doc()
+        doc.update(overrides)
+        path = tmp_path / "S1_tap_contour_params.json"
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh)
+        return path
+
+    def test_prominence_non_positive_raises(self, tmp_path: Path) -> None:
+        path = self._write(tmp_path, prominence=-1.0)
+        with pytest.raises(ValueError) as excinfo:
+            load_contour_params(path)
+        assert path.name in str(excinfo.value)
+
+    def test_prominence_zero_raises(self, tmp_path: Path) -> None:
+        path = self._write(tmp_path, prominence=0.0)
+        with pytest.raises(ValueError) as excinfo:
+            load_contour_params(path)
+        assert path.name in str(excinfo.value)
+
+    def test_prominence_wrong_type_raises(self, tmp_path: Path) -> None:
+        path = self._write(tmp_path, prominence="big")
+        with pytest.raises(ValueError) as excinfo:
+            load_contour_params(path)
+        assert path.name in str(excinfo.value)
+
+    def test_prominence_bool_raises(self, tmp_path: Path) -> None:
+        path = self._write(tmp_path, prominence=True)
+        with pytest.raises(ValueError) as excinfo:
+            load_contour_params(path)
+        assert path.name in str(excinfo.value)
+
+    def test_plateau_size_zero_raises(self, tmp_path: Path) -> None:
+        path = self._write(tmp_path, plateau_size=0)
+        with pytest.raises(ValueError) as excinfo:
+            load_contour_params(path)
+        assert path.name in str(excinfo.value)
+
+    def test_plateau_size_negative_raises(self, tmp_path: Path) -> None:
+        path = self._write(tmp_path, plateau_size=-2)
+        with pytest.raises(ValueError) as excinfo:
+            load_contour_params(path)
+        assert path.name in str(excinfo.value)
+
+    def test_plateau_size_float_raises(self, tmp_path: Path) -> None:
+        path = self._write(tmp_path, plateau_size=2.5)
+        with pytest.raises(ValueError) as excinfo:
+            load_contour_params(path)
+        assert path.name in str(excinfo.value)
+
+    def test_plateau_size_bool_raises(self, tmp_path: Path) -> None:
+        path = self._write(tmp_path, plateau_size=True)
+        with pytest.raises(ValueError) as excinfo:
+            load_contour_params(path)
+        assert path.name in str(excinfo.value)
+
+
+class TestGateEffectiveResolvers:
+    """``effective_prominence()`` honours the toggle; ``effective_plateau_size()``."""
+
+    def test_effective_prominence_off_returns_none(self) -> None:
+        params = _gate_params(
+            prominence=2.5, plateau_size=1, prominence_toggle=False
+        )
+        assert params.effective_prominence() is None
+
+    def test_effective_prominence_on_returns_stored_float(self) -> None:
+        params = _gate_params(
+            prominence=2.5, plateau_size=1, prominence_toggle=True
+        )
+        assert params.effective_prominence() == pytest.approx(2.5)
+
+    def test_effective_prominence_on_but_value_none_returns_none(self) -> None:
+        params = _gate_params(
+            prominence=None, plateau_size=1, prominence_toggle=True
+        )
+        assert params.effective_prominence() is None
+
+    def test_effective_plateau_size_returns_stored_int(self) -> None:
+        params = _gate_params(
+            prominence=None, plateau_size=6, prominence_toggle=False
+        )
+        assert params.effective_plateau_size() == 6
+
+
+class TestGateParamEnabledToggle:
+    """``param_enabled`` handling of the new ``prominence`` sub-flag."""
+
+    def test_param_enabled_without_prominence_defaults_toggle_false(
+        self, tmp_path: Path
+    ) -> None:
+        doc = _required_json_doc()
+        # A param_enabled block that omits 'prominence' (a pre-feature toggle map).
+        doc["param_enabled"] = {
+            "min_overlap_pct": True,
+            "median_filter_size": False,
+            "radial_gauss_sigma": True,
+            "radial_envelope_smooth_sigma": True,
+        }
+        path = tmp_path / "S1_tap_contour_params.json"
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh)
+
+        loaded = load_contour_params(path)
+        assert loaded.toggles.prominence is False
+
+    def test_param_enabled_prominence_true_loads(self, tmp_path: Path) -> None:
+        doc = _required_json_doc()
+        doc["param_enabled"] = {"prominence": True}
+        doc["prominence"] = 1.5  # a stored value for the enabled toggle to expose
+        path = tmp_path / "S1_tap_contour_params.json"
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh)
+
+        loaded = load_contour_params(path)
+        assert loaded.toggles.prominence is True
+        assert loaded.effective_prominence() == pytest.approx(1.5)
+
+    def test_param_enabled_prominence_non_bool_raises(self, tmp_path: Path) -> None:
+        doc = _required_json_doc()
+        doc["param_enabled"] = {"prominence": "yes"}
         path = tmp_path / "S1_tap_contour_params.json"
         with open(path, "w", encoding="utf-8") as fh:
             json.dump(doc, fh)

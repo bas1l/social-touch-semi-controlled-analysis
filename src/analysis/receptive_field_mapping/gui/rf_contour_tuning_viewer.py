@@ -80,6 +80,7 @@ from pyvistaqt import QtInteractor
 
 from analysis.receptive_field_mapping.data.rf_boundary_types import (
     BoundaryParams,
+    ContourFailureBranch,
     ContourParamToggles,
     GestureContourParams,
 )
@@ -117,6 +118,8 @@ _PARAM_LABELS: tuple[tuple[str, str], ...] = (
     ("median_filter_size", "median filter size"),
     ("radial_gauss_sigma", "radial gauss σ"),
     ("radial_hess_sigma", "radial hess σ"),
+    ("prominence", "radial prominence"),
+    ("plateau_size", "plateau size"),
     ("radial_envelope_smooth_sigma", "envelope smooth σ"),
 )
 
@@ -134,6 +137,7 @@ _TOGGLEABLE_PARAM_KEYS: tuple[str, ...] = (
     "min_overlap_pct",
     "median_filter_size",
     "radial_gauss_sigma",
+    "prominence",
     "radial_envelope_smooth_sigma",
 )
 
@@ -156,6 +160,14 @@ _PARAM_TOOLTIPS: dict[str, str] = {
         "Sigma of the Hessian kernel used to find the λmax curvature ring "
         "(core detector; always applied, no toggle)."
     ),
+    "prominence": (
+        "Minimum prominence a λmax ray-profile peak must clear to count as a "
+        "plateau (scipy.signal.find_peaks). Lower to accept a weaker ridge."
+    ),
+    "plateau_size": (
+        "Minimum plateau length (samples) a λmax ray peak must span to qualify. "
+        "1 = no plateau-length constraint (the pre-feature behaviour)."
+    ),
     "radial_envelope_smooth_sigma": (
         "Sigma of the light smoothing applied to the final contour to remove "
         "the marching-squares staircase."
@@ -169,7 +181,34 @@ _TOGGLE_TOOLTIPS: dict[str, str] = {
     "radial_gauss_sigma": (
         "Unchecked: no pre-smoothing (Hessian runs on the raw normalised field)."
     ),
+    "prominence": (
+        "Unchecked: no prominence gate (find_peaks runs without a prominence "
+        "requirement — the pre-feature behaviour)."
+    ),
     "radial_envelope_smooth_sigma": "Unchecked: no contour smoothing.",
+}
+
+# Single authoritative branch -> plain-language cause + which-knob advice map.
+# The compute layer (``rf_radial_foot_boundary``) emits presentation-free
+# ``ContourFailureDiagnostics`` numbers; the human wording lives HERE (one place,
+# DRY) so the compute/metrics/data layers stay free of GUI phrasing. Keys use the
+# GUI's own widget labels so the advice names the actual on-screen knobs.
+_BRANCH_ADVICE: dict[ContourFailureBranch, str] = {
+    ContourFailureBranch.NO_RADIAL_PLATEAU: (
+        "The peak-detection gate found no radial λmax ridge on any ray. Lower "
+        "'radial prominence' (or untick its toggle), reduce 'plateau size', "
+        "and/or adjust 'radial gauss σ' / 'radial hess σ' to sharpen the λmax "
+        "ridge — all four are now tunable here."
+    ),
+    ContourFailureBranch.SEED_OUTSIDE_FOOTPRINT: (
+        "The response footprint does not cover the peak cell, so the traced ring "
+        "was clipped away. Lower 'min overlap %' to grow the footprint until it "
+        "reaches the peak."
+    ),
+    ContourFailureBranch.NO_ENCLOSING_CONTOUR: (
+        "A ring was traced but none closed around the peak. Adjust 'envelope "
+        "smooth σ' or 'median filter size' so a ring can close around the peak."
+    ),
 }
 
 # Long-form help dialog content (accurate to the math in ``rf_boundary_types.py``
@@ -199,15 +238,40 @@ defines the boundary. This is the core detector and is always applied (no
 checkbox).
 </p>
 <p>
+<b>radial prominence</b> — Minimum prominence a peak in the per-ray
+&lambda;max profile must clear to count as a plateau
+(<code>scipy.signal.find_peaks</code>). Lowering it accepts weaker ridges;
+raising it rejects shallow ones. <i>Checkbox off:</i> no prominence gate —
+<code>find_peaks</code> runs without a prominence requirement (the pre-feature
+behaviour).
+</p>
+<p>
+<b>plateau size</b> — Minimum plateau length (in samples) a &lambda;max ray
+peak must span to qualify. <b>1</b> imposes no plateau-length constraint (the
+pre-feature default); raise it to demand a broader, flatter ridge. No checkbox:
+<b>1</b> is the natural "off".
+</p>
+<p>
 <b>envelope smooth &sigma;</b> — Light circular Gaussian smoothing (in
 contour-vertex units) applied to the final footprint-clipped contour to
 remove the marching-squares staircase.
 <i>Checkbox off:</i> no contour smoothing.
 </p>
+<h3>When no contour is drawn</h3>
+<p>
+On a failed contour the status line below the buttons now explains <i>why</i>
+and <i>which knob</i> to turn — the failing branch in plain language, the
+numbers that gated it, and the specific parameter(s) to adjust. The three
+branches: <b>no radial plateau</b> (the peak-detection gate found no ridge —
+lower prominence / plateau size, or sharpen the &sigma;s), <b>seed outside
+footprint</b> (the footprint misses the peak — lower min overlap %), and
+<b>no enclosing contour</b> (a ring traced but none closed — adjust envelope
+smooth &sigma; / median filter size).
+</p>
 <h3>Buttons</h3>
 <p>
-<b>Default</b> — Reset all five values and the four checkboxes to the global
-boundary defaults (from the DAG config).
+<b>Default</b> — Reset every value and checkbox to the global boundary
+defaults (from the DAG config).
 </p>
 <p>
 <b>Recompute</b> — Re-run the preview (raw &rarr; smoothed &rarr; &lambda;max
@@ -735,6 +799,24 @@ class RFContourTuningViewer(QMainWindow):
             spin.setToolTip(_PARAM_TOOLTIPS[key])
             self._param_spins[key] = spin
 
+        # Plateau-detection gate (scipy.signal.find_peaks on each ray's λmax
+        # profile). ``prominence`` is toggleable (unchecked -> None = no gate);
+        # its minimum is a small positive so the always-persisted field stays a
+        # valid ``> 0`` value (GestureContourParams rejects prominence <= 0 when
+        # set). The λmax scale is not fixed by the code, so the range is generous.
+        prominence = QDoubleSpinBox()
+        prominence.setRange(0.001, 50.0)
+        prominence.setSingleStep(0.1)
+        prominence.setDecimals(3)
+        prominence.setToolTip(_PARAM_TOOLTIPS["prominence"])
+        self._param_spins["prominence"] = prominence
+
+        plateau = QSpinBox()
+        plateau.setRange(1, 99)
+        plateau.setSingleStep(1)
+        plateau.setToolTip(_PARAM_TOOLTIPS["plateau_size"])
+        self._param_spins["plateau_size"] = plateau
+
         env = QDoubleSpinBox()
         env.setRange(0.0, 20.0)
         env.setSingleStep(0.5)
@@ -985,6 +1067,13 @@ class RFContourTuningViewer(QMainWindow):
             "median_filter_size": int(params.median_filter_size),
             "radial_gauss_sigma": float(params.radial_gauss_sigma),
             "radial_hess_sigma": float(params.radial_hess_sigma),
+            # prominence is None when its gate is unset; display a valid positive
+            # default (1.0) so ticking the toggle yields an immediately-valid
+            # value. The unticked toggle makes effective_prominence() None anyway.
+            "prominence": (
+                float(params.prominence) if params.prominence is not None else 1.0
+            ),
+            "plateau_size": int(params.plateau_size),
             "radial_envelope_smooth_sigma": float(params.radial_envelope_smooth_sigma),
         }
         for key, spin in self._param_spins.items():
@@ -996,6 +1085,7 @@ class RFContourTuningViewer(QMainWindow):
             "min_overlap_pct": params.toggles.min_overlap_pct,
             "median_filter_size": params.toggles.median_filter_size,
             "radial_gauss_sigma": params.toggles.radial_gauss_sigma,
+            "prominence": params.toggles.prominence,
             "radial_envelope_smooth_sigma": params.toggles.radial_envelope_smooth_sigma,
         }
         for key in _TOGGLEABLE_PARAM_KEYS:
@@ -1021,6 +1111,11 @@ class RFContourTuningViewer(QMainWindow):
             radial_envelope_smooth_sigma=float(
                 self._param_spins["radial_envelope_smooth_sigma"].value()
             ),
+            # prominence field is always persisted (like the other toggleable
+            # params); the spin minimum keeps it a valid ``> 0`` value. Whether it
+            # applies is governed by toggles.prominence via effective_prominence().
+            prominence=float(self._param_spins["prominence"].value()),
+            plateau_size=int(self._param_spins["plateau_size"].value()),
             toggles=toggles,
         )
 
@@ -1082,6 +1177,8 @@ class RFContourTuningViewer(QMainWindow):
                 gauss_sigma=params.effective_gauss_sigma(),
                 hess_sigma=params.radial_hess_sigma,
                 envelope_smooth_sigma=params.effective_envelope_smooth_sigma(),
+                prominence=params.effective_prominence(),
+                plateau_size=params.effective_plateau_size(),
                 allow_partial=True,
             )
         except ValueError as exc:
@@ -1107,23 +1204,28 @@ class RFContourTuningViewer(QMainWindow):
         valid = int(np.count_nonzero(~np.isnan(self._grid_z)))
         if partial:
             self._set_led(_LED_RED)
-            short_reason = str(stages["error"]).split(".")[0]
+            # Compose the live quantitative diagnostic (branch numbers + which
+            # knob) from the structured ``diagnostics`` payload when present, or
+            # fall back to the raw ``error`` string otherwise. Rendered into the
+            # status line on the QUIET path too (Recompute button / checkbox
+            # toggle, ``notify_no_contour=False``) — the moments the user is
+            # actively tuning — not only on a session/gesture switch.
+            message = _compose_failure_message(stages)
             self._info_label.setText(
-                f"n_touches={n_touches}  valid cells={valid}  "
-                f"contour: none — {short_reason}"
+                f"n_touches={n_touches}  valid cells={valid}  contour: none\n"
+                f"{message}"
             )
             # The peak (if located) is still drawn on the panels / 3D via the
             # non-None peak_rc handed to set_stages / _render_3d above; only the
             # contour polyline and cross-section crossings stay omitted. The
             # detailed modal is shown only on a session/gesture switch
-            # (``notify_no_contour=True``); a Recompute-button / checkbox-toggle
-            # refresh stays quiet — the LED + text above are the only feedback.
+            # (``notify_no_contour=True``) and carries the SAME composed text; a
+            # Recompute-button / checkbox-toggle refresh stays quiet — the LED +
+            # status text above are the only feedback.
             if notify_no_contour:
-                hint = _classify_contour_error(str(stages["error"]))
                 QMessageBox.warning(
                     self, "Contour not drawn",
-                    f"Contour could not be drawn: {stages['error']}.\n\n"
-                    f"{hint}\n\n"
+                    f"Contour could not be drawn.\n\n{message}\n\n"
                     "Showing raw / smoothed / λmax only.",
                 )
         else:
@@ -1329,38 +1431,59 @@ class RFContourTuningViewer(QMainWindow):
 # ---------------------------------------------------------------------------
 
 
-def _classify_contour_error(error: str) -> str:
-    """Map a partial ``compute_radial_foot_stages`` error to a plain-language
-    cause + the specific slider to try.
+def _compose_failure_message(stages: dict) -> str:
+    """Compose the human-readable contour-failure message from a partial result.
 
-    Substring-matched against the ``error`` string the shared stages helper
-    returns on a partial result.  Unrecognised text falls through to the raw
-    error so nothing is ever hidden (fail-loud, not a silent fallback).
+    When the partial dict carries a structured ``diagnostics``
+    (:class:`ContourFailureDiagnostics`) payload, build a per-branch message that
+    fuses BOTH the numbers that gated the failure AND the branch's plain-language
+    cause + which-knob advice (from the single authoritative ``_BRANCH_ADVICE``
+    map — the compute layer stays free of wording). Every payload field is guarded
+    for ``None`` (a field is ``None`` when it does not apply to that branch).
+
+    When there is NO ``diagnostics`` payload (e.g. the ``find_peak_location``
+    returned ``None`` partial, or any plain ``ValueError`` that carries no branch),
+    surface the raw ``error`` string verbatim — never fabricate a branch, never
+    crash (fail-loud, not a silent fallback).
     """
-    if "no λmax foot plateau" in error:
-        return (
-            "The response field has no clear curvature ring around the peak "
-            "(too flat, or the scale is off). Try raising radial_hess_sigma, and "
-            "adjusting radial_gauss_sigma; lowering min_overlap_pct can also help "
-            "so the field extends past the peak."
+    diagnostics = stages.get("diagnostics")
+    if diagnostics is None:
+        return str(stages["error"])
+
+    branch = diagnostics.branch
+    advice = _BRANCH_ADVICE[branch]
+    if branch is ContourFailureBranch.NO_RADIAL_PLATEAU:
+        found = diagnostics.found_count
+        n_angles = diagnostics.n_angles
+        peak_lmax = diagnostics.peak_lmax
+        rays = (
+            f"{found}/{n_angles}"
+            if found is not None and n_angles is not None
+            else "no"
         )
-    if "no contour encloses the peak" in error or "seed is not inside" in error:
-        return (
-            "The contour could not be clipped to the visible footprint. Try "
-            "adjusting radial_envelope_smooth_sigma, or a slightly larger (odd) "
-            "median_filter_size."
+        lmax_txt = f" (peak λmax={peak_lmax:.3g})" if peak_lmax is not None else ""
+        headline = f"No radial plateau: {rays} rays formed a plateau{lmax_txt}. "
+    elif branch is ContourFailureBranch.SEED_OUTSIDE_FOOTPRINT:
+        at_seed = diagnostics.footprint_at_seed
+        cells = diagnostics.footprint_cells
+        if at_seed is False:
+            seed_txt = "peak cell is not painted in the footprint"
+        elif at_seed is True:
+            seed_txt = "peak cell is painted in the footprint"
+        else:
+            seed_txt = "peak-cell footprint status unknown"
+        cells_txt = f" (footprint covers {cells} cells)" if cells is not None else ""
+        headline = f"Seed outside footprint: {seed_txt}{cells_txt}. "
+    elif branch is ContourFailureBranch.NO_ENCLOSING_CONTOUR:
+        n = diagnostics.n_candidate_contours
+        n_txt = str(n) if n is not None else "some"
+        headline = (
+            f"No enclosing contour: {n_txt} candidate ring(s) traced, none "
+            "closed around the peak. "
         )
-    if "find_peak_location returned None" in error:
-        return (
-            "No response peak could be located — the field is essentially flat. "
-            "Lower min_overlap_pct to keep more of the field."
-        )
-    if "peak at border" in error:
-        return (
-            "The response peak is at the edge of the mapped data. Lower "
-            "min_overlap_pct, or this RF may genuinely sit at the region boundary."
-        )
-    return error
+    else:  # pragma: no cover - exhaustive over ContourFailureBranch
+        headline = ""
+    return headline + advice
 
 
 def _read_gesture_types(npz_path: Path) -> list[str]:

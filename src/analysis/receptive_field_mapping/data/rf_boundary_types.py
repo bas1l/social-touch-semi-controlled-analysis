@@ -13,6 +13,7 @@ module (with no heavy imports of their own) avoids import cycles between the
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field, fields
+from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, List
 
@@ -43,6 +44,12 @@ class BoundaryParams:
     radial_gauss_sigma: float = 8.0
     radial_hess_sigma: float = 5.0
     radial_envelope_smooth_sigma: float = 1.5
+    # Plateau-detection gate defaults for the radial foot detector. ``None`` /
+    # ``1`` reproduce the pre-feature hardcoded behaviour (no prominence gate;
+    # ``find_peaks`` plateau_size floor of 1). Seeded into per-gesture
+    # GestureContourParams by ``defaults_from_boundary_params``.
+    radial_prominence: float | None = None
+    radial_plateau_size: int = 1
 
 
 @dataclass(frozen=True)
@@ -61,14 +68,17 @@ class ContourParamToggles:
     in place as it threads through the GUI and pipeline layers.
 
     Defaults (a combination with no saved flags): ``min_overlap_pct`` and the
-    two ``radial_*`` toggles start **ON**; ``median_filter_size`` starts
-    **OFF** (explicit user decision — the median filter is opt-in).
+    two ``radial_*`` toggles start **ON**; ``median_filter_size`` and
+    ``prominence`` start **OFF** (explicit user decisions — the median filter is
+    opt-in, and the pre-feature detector imposed no prominence gate, i.e.
+    ``prominence=None``).
     """
 
     min_overlap_pct: bool = True
     median_filter_size: bool = False
     radial_gauss_sigma: bool = True
     radial_envelope_smooth_sigma: bool = True
+    prominence: bool = False
 
     def __post_init__(self) -> None:
         for f in fields(self):
@@ -122,13 +132,19 @@ class GestureContourParams:
     positive odd integer. The three ``radial_*`` sigmas feed the Gaussian ->
     Hessian-λmax -> envelope chain of the ``radial`` foot-of-mountain detector.
 
-    ``toggles`` carries the enable/disable state for the four *toggleable*
-    parameters (see :class:`ContourParamToggles`); it does not change the
-    validation of the five value fields above, which stay valid numbers even
-    when their toggle is off. The ``effective_*()`` methods below are the
-    *single* place a disabled step is resolved to its concrete "skip" value —
-    both the GUI preview and the pipeline call these rather than re-deriving
-    the skip decision.
+    ``prominence`` and ``plateau_size`` tune the per-ray plateau-detection gate
+    (``scipy.signal.find_peaks``) inside the radial detector. ``prominence`` is
+    optional (``None`` = no prominence requirement) and *toggleable*: when its
+    toggle is off it resolves to ``None`` regardless of the stored value.
+    ``plateau_size`` is a plain minimum-plateau length (``>= 1``); ``1`` is the
+    natural "off" (no plateau-length constraint), so it carries no toggle.
+
+    ``toggles`` carries the enable/disable state for the *toggleable* parameters
+    (see :class:`ContourParamToggles`); it does not change the validation of the
+    value fields above, which stay valid numbers even when their toggle is off.
+    The ``effective_*()`` methods below are the *single* place a disabled step is
+    resolved to its concrete "skip" value — both the GUI preview and the pipeline
+    call these rather than re-deriving the skip decision.
     """
 
     min_overlap_pct: float
@@ -136,6 +152,8 @@ class GestureContourParams:
     radial_gauss_sigma: float
     radial_hess_sigma: float
     radial_envelope_smooth_sigma: float
+    prominence: float | None = None
+    plateau_size: int = 1
     toggles: ContourParamToggles = field(default_factory=ContourParamToggles)
 
     def __post_init__(self) -> None:
@@ -185,6 +203,33 @@ class GestureContourParams:
                 f"radial_envelope_smooth_sigma must be >= 0, got {env}"
             )
 
+        # plateau_size is a discrete find_peaks gate: genuine int >= 1 (1 = off).
+        if isinstance(self.plateau_size, bool) or not isinstance(
+            self.plateau_size, int
+        ):
+            raise ValueError(
+                f"plateau_size must be an int, got {self.plateau_size!r}"
+            )
+        if self.plateau_size < 1:
+            raise ValueError(
+                f"plateau_size must be >= 1, got {self.plateau_size}"
+            )
+
+        # prominence is optional (None = no prominence gate); when set it must
+        # be a positive real number.
+        if self.prominence is not None:
+            if isinstance(self.prominence, bool) or not isinstance(
+                self.prominence, (int, float)
+            ):
+                raise ValueError(
+                    f"prominence must be a real number or None, got "
+                    f"{self.prominence!r}"
+                )
+            if not float(self.prominence) > 0.0:
+                raise ValueError(
+                    f"prominence must be > 0 when set, got {self.prominence}"
+                )
+
         if not isinstance(self.toggles, ContourParamToggles):
             raise ValueError(
                 f"toggles must be a ContourParamToggles, got "
@@ -227,6 +272,100 @@ class GestureContourParams:
         if self.toggles.radial_envelope_smooth_sigma:
             return float(self.radial_envelope_smooth_sigma)
         return 0.0
+
+    def effective_prominence(self) -> float | None:
+        """Return the plateau-detection prominence, or ``None`` when disabled.
+
+        ``None`` is the pre-feature default: no prominence requirement is passed
+        to ``scipy.signal.find_peaks``. When the ``prominence`` toggle is off (or
+        the stored value is ``None``), the detector runs without a prominence
+        gate. This is the *single* place that decision is resolved.
+        """
+        if self.toggles.prominence and self.prominence is not None:
+            return float(self.prominence)
+        return None
+
+    def effective_plateau_size(self) -> int:
+        """Return the minimum plateau length (``>= 1``); ``1`` is the "off" state.
+
+        ``plateau_size`` is not toggleable — ``1`` (the natural no-op) already
+        imposes no plateau-length constraint on ``find_peaks``.
+        """
+        return int(self.plateau_size)
+
+
+class ContourFailureBranch(Enum):
+    """The three ring-present failure modes of the radial-foot contour detector.
+
+    Each value names exactly one site inside ``rf_radial_foot_boundary`` where a
+    contour cannot be produced *despite* a visible λmax curvature ring. The branch
+    is set at the raising site (never re-inferred downstream), so it is a stable,
+    explicit contract the GUI maps to plain-language cause + which-knob advice.
+
+    - ``NO_RADIAL_PLATEAU`` — no ray produced a qualifying λmax plateau
+      (``contour_unsnapped_rc`` never produced; ``found.sum() == 0``).
+    - ``SEED_OUTSIDE_FOOTPRINT`` — a contour was traced but the seed cell is not
+      painted in the footprint (``footprint[peak] is False``).
+    - ``NO_ENCLOSING_CONTOUR`` — contour(s) traced but none enclose the peak.
+    """
+
+    NO_RADIAL_PLATEAU = "no_radial_plateau"
+    SEED_OUTSIDE_FOOTPRINT = "seed_outside_footprint"
+    NO_ENCLOSING_CONTOUR = "no_enclosing_contour"
+
+
+@dataclass(frozen=True)
+class ContourFailureDiagnostics:
+    """Structured, presentation-free numbers behind one contour-extraction failure.
+
+    The compute layer emits this DATA (not a formatted sentence); the GUI owns the
+    branch → wording map. Optional fields stay ``None`` when the branch did not
+    measure them, so "zero" (a measured count of 0) and "absent" (not applicable
+    to this branch) stay distinct in the payload. Each field surfaces the exact
+    quantity the failing branch tested on.
+
+    Fields
+    ------
+    branch:
+        Which :class:`ContourFailureBranch` was hit (set at the raising site).
+    n_angles, found_count, peak_lmax:
+        Site 3 (``NO_RADIAL_PLATEAU``): the number of rays cast, how many formed a
+        qualifying plateau (``0`` on this branch), and the peak λmax
+        (``nanmax``; ``> 0`` proves a curvature ridge is present).
+    footprint_at_seed, footprint_cells:
+        Site 5 (``SEED_OUTSIDE_FOOTPRINT``): whether the seed cell is painted in
+        the ``grid_z > 0`` footprint, and how many cells the footprint contains.
+    n_candidate_contours:
+        Site 4 (``NO_ENCLOSING_CONTOUR``): how many candidate contours were traced
+        (none of which enclosed the peak).
+    """
+
+    branch: ContourFailureBranch
+    n_angles: int | None = None
+    found_count: int | None = None
+    peak_lmax: float | None = None
+    footprint_at_seed: bool | None = None
+    footprint_cells: int | None = None
+    n_candidate_contours: int | None = None
+
+
+class ContourExtractionError(ValueError):
+    """Raised at a radial-foot contour-extraction failure, carrying diagnostics.
+
+    Subclasses :class:`ValueError` so the existing ``except ValueError`` in
+    ``compute_radial_foot_stages`` (and the public orchestrator) still catches it
+    unchanged. The ``diagnostics`` payload lets the ``allow_partial`` path surface
+    structured numbers without the compute layer formatting any human wording.
+    """
+
+    def __init__(self, message: str, diagnostics: ContourFailureDiagnostics) -> None:
+        if not isinstance(diagnostics, ContourFailureDiagnostics):
+            raise ValueError(
+                f"ContourExtractionError: diagnostics must be a "
+                f"ContourFailureDiagnostics, got {type(diagnostics).__name__}"
+            )
+        super().__init__(message)
+        self.diagnostics = diagnostics
 
 
 def _validate_uv_endpoint(name: str, value) -> tuple[float, float]:

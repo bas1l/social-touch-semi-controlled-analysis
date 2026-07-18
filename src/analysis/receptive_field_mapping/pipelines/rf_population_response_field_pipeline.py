@@ -82,6 +82,8 @@ def run_population_response_field_extraction(
     radial_gauss_sigma: float = 8.0,
     radial_hess_sigma: float = 5.0,
     radial_envelope_smooth_sigma: float = 1.5,
+    radial_prominence: float | None = None,
+    radial_plateau_size: int = 1,
     contour_params_dir: Path | None = None,
 ) -> None:
     """Render per-session 2D population RF heatmap PNGs projected via SLIM UV.
@@ -145,6 +147,8 @@ def run_population_response_field_extraction(
         radial_gauss_sigma=radial_gauss_sigma,
         radial_hess_sigma=radial_hess_sigma,
         radial_envelope_smooth_sigma=radial_envelope_smooth_sigma,
+        radial_prominence=radial_prominence,
+        radial_plateau_size=radial_plateau_size,
     )
 
     # ---- Phase A: per-session verify -> load -> prepare -> process -> persist ----
