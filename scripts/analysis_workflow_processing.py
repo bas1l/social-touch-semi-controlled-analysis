@@ -6,7 +6,7 @@ import argparse
 import logging
 from multiprocessing import Queue, freeze_support
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from prefect import flow
 
@@ -54,6 +54,12 @@ from analysis.receptive_field_mapping import (
 )
 from analysis.receptive_field_mapping.pipelines.rf_response_tuning_pipeline import (
     _resolve_response_metric,
+)
+from analysis.receptive_field_mapping.boundary import registry as boundary_registry
+from analysis.receptive_field_mapping.data.rf_boundary_io import (
+    boundary_method_output_dir,
+    boundary_sentinel_path,
+    boundary_session_output_dir,
 )
 from analysis.receptive_field_mapping.data.rf_data_loader import resolve_forearm_ply
 from analysis.receptive_field_mapping.data.rf_extraction_io import load_rf_camera_settings
@@ -560,41 +566,43 @@ def spatial_build_response_fields_flow(
     )
 
 
-@flow(name="spatial_extract_boundaries")
-def spatial_extract_boundaries_flow(
+@flow(name="spatial_extract_boundary")
+def spatial_extract_boundary_flow(
     input_items: List[Tuple[Path, Path]],
+    method: str,
+    method_params: dict,
     force_processing: bool = False,
     neuron_mode: str = "iff",
     iff_metric: str = "mean",
     min_overlap_pct: float = 25.0,
     median_filter_size: int | None = None,
-    inflection_sigma: float | None = None,
     heatmap_space: str = "linear",
     cmap: str = "inferno",
     flip_u: bool = False,
     contour_color: str = "red",
     circular_crop_margin: float = 0.0,
-    boundary_method: str = "gradient",
-    radial_gauss_sigma: float = 8.0,
-    radial_hess_sigma: float = 5.0,
-    radial_envelope_smooth_sigma: float = 1.5,
-    radial_prominence: float | None = None,
-    radial_plateau_size: int = 1,
     use_tuned_params: bool = False,
 ) -> None:
-    """Render per-session 2D population RF heatmap PNGs projected via SLIM UV.
+    """Run ONE registry boundary method (``method``) across all sessions.
 
-    For each session, produces one PNG per gesture subset (all, tap,
-    stroke_proximal, stroke_distal) under
-    ``4_analysed/spatial_extract_boundaries/<session_id>/``.
-    Idempotent via sentinel JSON.
+    Generic, method-blind fan-out flow: one DAG node per registered method points
+    here with a distinct ``method`` + ``method_params`` (that method's declared
+    schema values, read generically from its node's options). Dispatch is through
+    the registry inside :func:`run_population_response_field_extraction` — this flow
+    never branches on the method string.
 
-    When ``use_tuned_params`` is True, each session/gesture regenerates its
-    contour from the per-combination JSON written by ``spatial_tune_rf_contours``
-    (raising, naming the combo, if any required JSON is absent); when False the
-    global DAG scalars are used unchanged.
+    Each method writes/renders its own per-method folder
+    ``4_analysed/spatial_extract_boundaries/iff_<metric>/<session_id>/<method>/`` so
+    running several methods produces non-overlapping trees.
+
+    When ``use_tuned_params`` is True, each session/gesture regenerates its contour
+    from the per-combination JSON written by ``spatial_tune_rf_contours`` (the tuned
+    overrides are applied only where the active method's schema declares the key).
     """
-    print(f"[Batch Analysis] Extracting population response field boundaries for {len(input_items)} item(s)...")
+    print(
+        f"[Batch Analysis] Extracting '{method}' population response field "
+        f"boundaries for {len(input_items)} item(s)..."
+    )
     if not input_items:
         return
 
@@ -612,24 +620,76 @@ def spatial_extract_boundaries_flow(
             session_configs=input_items,
             neuron_mode=neuron_mode,
             output_dir=output_dir,
+            boundary_method=method,
+            method_params=method_params,
             min_overlap_pct=min_overlap_pct,
             force_processing=force_processing,
             median_filter_size=median_filter_size,
-            inflection_sigma=inflection_sigma,
             heatmap_space=heatmap_space,
             cmap=cmap,
             iff_metric=metric,
             flip_u=flip_u,
             contour_color=contour_color,
             circular_crop_margin=circular_crop_margin,
-            boundary_method=boundary_method,
-            radial_gauss_sigma=radial_gauss_sigma,
-            radial_hess_sigma=radial_hess_sigma,
-            radial_envelope_smooth_sigma=radial_envelope_smooth_sigma,
-            radial_prominence=radial_prominence,
-            radial_plateau_size=radial_plateau_size,
             contour_params_dir=contour_params_dir,
         )
+
+
+@flow(name="spatial_extract_boundaries")
+def spatial_extract_boundaries_flow(
+    input_items: List[Tuple[Path, Path]],
+    enabled_methods: List[str],
+    force_processing: bool = False,
+    iff_metric: str = "mean",
+) -> None:
+    """Fan-in BARRIER for the per-method boundary nodes — performs NO extraction.
+
+    Its sole role is to be the join point downstream consumers depend on: it runs
+    only after every enabled ``spatial_extract_boundary__<method>`` node has
+    completed (the DAG ``depends_on`` gate). As a light integrity check it verifies
+    that each enabled method produced its per-session run sentinel, failing loudly
+    (fail-fast) if a depended-on method left nothing behind. It is method-blind:
+    ``enabled_methods`` is supplied by the wiring (the set of enabled method nodes),
+    and the check only tests for a path built from the method-name string — it never
+    inspects algorithm internals.
+    """
+    if not input_items:
+        return
+    if not enabled_methods:
+        raise ValueError(
+            "spatial_extract_boundaries (barrier): no enabled boundary method nodes "
+            "were supplied — at least one 'spatial_extract_boundary__<method>' node "
+            "must be enabled for downstream consumers to run."
+        )
+    if iff_metric == "both":
+        raise ValueError(
+            "spatial_extract_boundaries (barrier): iff_metric='both' is not "
+            "supported — set it to 'mean' or 'max' (matching the method nodes)."
+        )
+
+    database_path = input_items[0][1]
+    output_dir = database_path / '4_analysed' / SPATIAL_EXTRACT_BOUNDARIES / f"iff_{iff_metric}"
+
+    missing: List[str] = []
+    for csv_path, _db in input_items:
+        session_id = session_id_from_path(Path(csv_path))
+        session_root_dir = boundary_session_output_dir(output_dir, session_id)
+        for method in enabled_methods:
+            method_dir = boundary_method_output_dir(session_root_dir, method)
+            sentinel = boundary_sentinel_path(method_dir, session_id)
+            if not sentinel.exists():
+                missing.append(str(sentinel))
+
+    if missing:
+        raise FileNotFoundError(
+            "spatial_extract_boundaries (barrier): the following enabled boundary "
+            "method(s) produced no output sentinel — the join cannot resolve:\n  "
+            + "\n  ".join(missing)
+        )
+    print(
+        f"[Boundary Barrier] all {len(enabled_methods)} enabled method(s) produced "
+        f"output for {len(input_items)} session(s) — downstream may run."
+    )
 
 
 @flow(name="spatial_tune_rf_contours")
@@ -1793,6 +1853,81 @@ def main():
     logging.info("Batch analysis finished.")
 
 
+def boundary_method_node_name(method_name: str) -> str:
+    """DAG task name of the per-method boundary node for *method_name*."""
+    return f"spatial_extract_boundary__{method_name}"
+
+
+def _make_boundary_method_params(dag_handler: DagConfigHandler, node_name: str, method):
+    """Return a zero-arg lambda producing the kwargs for one method node.
+
+    Reads shared visualization/neuron options + the method's declared schema keys
+    generically from *node_name*'s options — no literal per-method key lists. The
+    method's ``params_schema`` is the single source of truth for which algorithm
+    knobs to pass; unset schema keys fall back to their :class:`ParamSpec` default
+    inside the method's own ``resolve_params``.
+    """
+    def build() -> Dict[str, Any]:
+        opts = dag_handler.get_task_options(node_name)
+        params: Dict[str, Any] = {
+            "method": method.name,
+            "neuron_mode": opts.get("neuron_mode", "iff"),
+            "iff_metric": opts.get("iff_metric", "mean"),
+            "min_overlap_pct": float(opts.get("min_overlap_pct", 25.0)),
+            "heatmap_space": opts.get("heatmap_space", "linear"),
+            "cmap": opts.get("cmap", "inferno"),
+            "flip_u": bool(opts.get("flip_u", False)),
+            "contour_color": opts.get("contour_color", "red"),
+            "circular_crop_margin": float(opts.get("circular_crop_margin", 0.0)),
+            "use_tuned_params": bool(opts.get("use_tuned_params", False)),
+        }
+        if opts.get("median_filter_size") is not None:
+            params["median_filter_size"] = int(opts["median_filter_size"])
+        # Method schema params, read generically by declared key (value as-is;
+        # None is a legitimate value, e.g. radial_prominence = no gate).
+        method_params: Dict[str, Any] = {}
+        for spec in method.params_schema:
+            if spec.key in opts:
+                method_params[spec.key] = opts[spec.key]
+        params["method_params"] = method_params
+        return params
+
+    return build
+
+
+def _build_boundary_stage_descriptors(dag_handler: DagConfigHandler) -> list:
+    """Iterate the boundary registry → one descriptor per method node + the barrier.
+
+    This is the sole dynamic point of the stage list: for every registered method
+    it appends a ``spatial_extract_boundary__<method>`` descriptor pointing at the
+    generic fan-out flow, then appends the fan-in barrier descriptor
+    (``spatial_extract_boundaries``). The barrier is told which method nodes are
+    enabled so it can verify each produced output.
+    """
+    descriptors: list = []
+    enabled_methods: List[str] = []
+    for method in boundary_registry.all_methods():
+        node_name = boundary_method_node_name(method.name)
+        descriptors.append({
+            "name": node_name,
+            "func": spatial_extract_boundary_flow,
+            "params": _make_boundary_method_params(dag_handler, node_name, method),
+        })
+        if node_name in dag_handler.tasks and dag_handler.tasks[node_name].get("enabled", True):
+            enabled_methods.append(method.name)
+
+    barrier_node = "spatial_extract_boundaries"
+    descriptors.append({
+        "name": barrier_node,
+        "func": spatial_extract_boundaries_flow,
+        "params": lambda: {
+            "iff_metric": dag_handler.get_task_options(barrier_node).get("iff_metric", "mean"),
+            "enabled_methods": list(enabled_methods),
+        },
+    })
+    return descriptors
+
+
 def _build_pipeline_stages(dag_handler: DagConfigHandler, items_to_process) -> list:
     """Build the ordered pipeline_stages list for the processing slice."""
 
@@ -1900,40 +2035,11 @@ def _build_pipeline_stages(dag_handler: DagConfigHandler, items_to_process) -> l
                 "use_manual_stroke_axis": bool(dag_handler.get_task_options("spatial_build_response_fields").get("use_manual_stroke_axis", False)),
             },
         },
-        {
-            "name": "spatial_extract_boundaries",
-            "func": spatial_extract_boundaries_flow,
-            "params": lambda: {
-                "neuron_mode": dag_handler.get_task_options("spatial_extract_boundaries").get("neuron_mode", "iff"),
-                "iff_metric": dag_handler.get_task_options("spatial_extract_boundaries").get("iff_metric", "mean"),
-                "min_overlap_pct": float(dag_handler.get_task_options("spatial_extract_boundaries").get("min_overlap_pct", 25.0)),
-                "heatmap_space": dag_handler.get_task_options("spatial_extract_boundaries").get("heatmap_space", "linear"),
-                "cmap": dag_handler.get_task_options("spatial_extract_boundaries").get("cmap", "inferno"),
-                "flip_u": bool(dag_handler.get_task_options("spatial_extract_boundaries").get("flip_u", False)),
-                "contour_color": dag_handler.get_task_options("spatial_extract_boundaries").get("contour_color", "red"),
-                **(
-                    {"median_filter_size": int(dag_handler.get_task_options("spatial_extract_boundaries")["median_filter_size"])}
-                    if dag_handler.get_task_options("spatial_extract_boundaries").get("median_filter_size") is not None
-                    else {}
-                ),
-                **(
-                    {"inflection_sigma": float(dag_handler.get_task_options("spatial_extract_boundaries")["inflection_sigma"])}
-                    if dag_handler.get_task_options("spatial_extract_boundaries").get("inflection_sigma") is not None
-                    else {}
-                ),
-                "boundary_method": dag_handler.get_task_options("spatial_extract_boundaries").get("boundary_method", "gradient"),
-                "radial_gauss_sigma": float(dag_handler.get_task_options("spatial_extract_boundaries").get("radial_gauss_sigma", 8.0)),
-                "radial_hess_sigma": float(dag_handler.get_task_options("spatial_extract_boundaries").get("radial_hess_sigma", 5.0)),
-                "radial_envelope_smooth_sigma": float(dag_handler.get_task_options("spatial_extract_boundaries").get("radial_envelope_smooth_sigma", 1.5)),
-                **(
-                    {"radial_prominence": float(dag_handler.get_task_options("spatial_extract_boundaries")["radial_prominence"])}
-                    if dag_handler.get_task_options("spatial_extract_boundaries").get("radial_prominence") is not None
-                    else {}
-                ),
-                "radial_plateau_size": int(dag_handler.get_task_options("spatial_extract_boundaries").get("radial_plateau_size", 1)),
-                "use_tuned_params": bool(dag_handler.get_task_options("spatial_extract_boundaries").get("use_tuned_params", False)),
-            },
-        },
+        # Boundary extraction fans out to one node per registered method
+        # (spatial_extract_boundary__<method>) plus the fan-in barrier
+        # (spatial_extract_boundaries). This is the single registry-driven point;
+        # everything else in this list stays explicit.
+        *_build_boundary_stage_descriptors(dag_handler),
         {
             "name": "spatial_tune_rf_contours",
             "func": spatial_tune_rf_contours_flow,

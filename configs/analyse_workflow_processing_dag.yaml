@@ -222,11 +222,22 @@ tasks:
     depends_on: [spatial_map_single_touch, spatial_precompute_slim_uv, 
         spatial_configure_stroke_axis]
 
-  # Render per-session 2D population RF heatmap PNGs projected via SLIM UV.
-  # Produces one PNG per gesture subset (all, tap, stroke_proximal, stroke_distal)
-  # with a session-wide consistent colour scale.
-  # Output: 4_analysed/population_response_fields/<session_id>/
-  spatial_extract_boundaries:
+  # Boundary extraction fans out to one node per registered BoundaryMethod
+  # (radial / gradient / inflection). Each method renders per-session 2D RF heatmap
+  # PNGs + writes its own contour NPZ into its own subfolder, so methods never
+  # overwrite each other:
+  #   Output: 4_analysed/spatial_extract_boundaries/iff_<metric>/<session_id>/<method>/
+  # Adding a new method = one BoundaryMethod subclass + one node below + one line in
+  # the spatial_extract_boundaries (barrier) depends_on + one layout coordinate.
+  #
+  # Shared options (neuron/threshold/visualization) are identical across method
+  # nodes; the method-specific block below each is that method's declared
+  # params_schema (radial_* / gradient_* / inflection_sigma).
+
+  # Radial foot-of-mountain (Hessian-λmax) detector. Depends on the RF-contour tuner
+  # because its tuned per-(session, gesture) JSONs (use_tuned_params) override the
+  # radial_* scalars.
+  spatial_extract_boundary__radial:
     category: spatial_sensitivity
     enabled: true
     options:
@@ -235,14 +246,11 @@ tasks:
       iff_metric: mean
       min_overlap_pct: 25
       median_filter_size:        # null = filter disabled; set a positive odd int to enable
-      inflection_sigma: 5.0
       heatmap_space: linear
       cmap: inferno
       flip_u: true
       contour_color: red
       circular_crop_margin: 0.0
-      # one of: gradient | inflection | radial
-      boundary_method: radial
       radial_gauss_sigma: 8.0
       radial_hess_sigma: 5.0
       radial_envelope_smooth_sigma: 1.5   # Gaussian smoothing (vertices) of the 2D-footprint envelope
@@ -250,9 +258,64 @@ tasks:
       radial_plateau_size: 1              # min plateau length for find_peaks (1 = no plateau-length constraint)
       # When true, regenerate each (session, gesture) contour from its tuned JSON
       # written by spatial_tune_rf_contours (raises, naming the combo, if any is
-      # absent). When false (default), the global scalars above are used unchanged.
+      # absent). When false (default), the scalars above are used unchanged.
       use_tuned_params: false
     depends_on: [spatial_build_response_fields, spatial_tune_rf_contours]
+
+  # Gradient-magnitude ridge detector. Traces the boundary on a NaN-aware Gaussian-
+  # smoothed field (its own gradient_gauss_sigma — NOT inflection_sigma).
+  spatial_extract_boundary__gradient:
+    category: spatial_sensitivity
+    enabled: true
+    options:
+      force_processing: false
+      neuron_mode: iff
+      iff_metric: mean
+      min_overlap_pct: 25
+      median_filter_size:        # null = filter disabled; set a positive odd int to enable
+      heatmap_space: linear
+      cmap: inferno
+      flip_u: true
+      contour_color: red
+      circular_crop_margin: 0.0
+      gradient_gauss_sigma: 4.0           # NaN-aware Gaussian smoothing the ridge is traced on
+      gradient_n_angles: 360              # rays cast for the radial-profile ridge search
+      gradient_savgol_window: 31          # Savitzky-Golay window for per-ray smoothing
+      use_tuned_params: false
+    depends_on: [spatial_build_response_fields]
+
+  # Laplacian zero-crossing (inflection) detector.
+  spatial_extract_boundary__inflection:
+    category: spatial_sensitivity
+    enabled: true
+    options:
+      force_processing: false
+      neuron_mode: iff
+      iff_metric: mean
+      min_overlap_pct: 25
+      median_filter_size:        # null = filter disabled; set a positive odd int to enable
+      heatmap_space: linear
+      cmap: inferno
+      flip_u: true
+      contour_color: red
+      circular_crop_margin: 0.0
+      inflection_sigma: 5.0               # NaN-aware Gaussian pre-smoothing sigma
+      use_tuned_params: false
+    depends_on: [spatial_build_response_fields]
+
+  # Fan-in BARRIER: performs NO extraction. Its only role is to be the join point
+  # every downstream consumer depends on, so they run once all enabled method nodes
+  # above have completed. Adding a method = add its node name to depends_on here.
+  spatial_extract_boundaries:
+    category: spatial_sensitivity
+    enabled: true
+    options:
+      force_processing: false
+      # Must match the method nodes' iff_metric (used to locate their run sentinels
+      # for the barrier's integrity check).
+      iff_metric: mean
+    depends_on: [spatial_extract_boundary__radial, spatial_extract_boundary__gradient,
+        spatial_extract_boundary__inflection]
 
   # Per-(session, gesture) RF-contour parameter tuning GUI: opens an interactive
   # PyQt5/PyVista viewer that lets the researcher tune the five radial

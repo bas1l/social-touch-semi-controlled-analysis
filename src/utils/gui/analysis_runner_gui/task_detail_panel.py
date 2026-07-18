@@ -34,7 +34,14 @@ from utils.gui.analysis_runner_gui.radar_group_dialog import RadarGroupDialog
 from utils.gui.analysis_runner_gui.yaml_edit_dialog import YamlEditDialog
 from utils.pipeline.dag_config_model import DagConfigModel
 
+from analysis.receptive_field_mapping.boundary import registry as boundary_registry
+
 _COMPLEX_FG = QColor("#336699")
+
+# Node-name prefix for the per-method boundary-extraction DAG nodes
+# (``spatial_extract_boundary__radial`` etc.). Their method-specific options are
+# rendered from the registry's params schema — never hardcoded by method name.
+_BOUNDARY_METHOD_NODE_PREFIX = "spatial_extract_boundary__"
 
 # Default size used when the median filter is toggled on from a disabled (null) state.
 # Must be a positive odd integer (renderer requirement).
@@ -130,20 +137,9 @@ _OPTION_ENUMS: dict[str, list[tuple[str, object]]] = {
         ("Orange", "orange"),
         ("Magenta", "magenta"),
     ],
-    "boundary_method": [
-        ("Gradient (default)", "gradient"),
-        ("Inflection", "inflection"),
-        ("Radial (2D footprint envelope)", "radial"),
-    ],
 }
 
 _OPTION_VISIBILITY: dict[str, dict[str, set]] = {
-    "boundary_method": {
-        "inflection_sigma": {"inflection"},
-        "radial_gauss_sigma": {"radial"},
-        "radial_hess_sigma": {"radial"},
-        "radial_envelope_smooth_sigma": {"radial"},
-    },
     "neuron_mode":     {"iff_metric": {"iff"}},
 }
 
@@ -154,20 +150,19 @@ _OPTION_GROUPS: list[tuple[str, str]] = [
     ("visual", "Visualization"),
 ]
 
-# Which group each option key belongs to. One group per key.
+# Which group each option key belongs to. One group per (shared, method-agnostic)
+# option key. Per-method boundary-extraction params are NOT listed here: they are
+# classified from their own ``ParamSpec.group`` via :func:`option_group_of`, so
+# adding a boundary method touches no hardcoded map in this module.
 _OPTION_GROUP_OF: dict[str, str] = {
     # neuron firing
     "neuron_mode": "neuron",
     "iff_metric": "neuron",
     "response_metric": "neuron",
-    # preprocessing & methods
+    # preprocessing & methods (shared across boundary methods, method-agnostic)
     "min_overlap_pct": "method",
     "median_filter_size": "method",
-    "inflection_sigma": "method",
-    "boundary_method": "method",
-    "radial_gauss_sigma": "method",
-    "radial_hess_sigma": "method",
-    "radial_envelope_smooth_sigma": "method",
+    "use_tuned_params": "method",
     "projection_method": "method",
     # visualization
     "heatmap_space": "visual",
@@ -179,16 +174,87 @@ _OPTION_GROUP_OF: dict[str, str] = {
 }
 
 # Tasks that opt in to grouped rendering. Every non-force_processing option of a
-# task listed here MUST be classified in _OPTION_GROUP_OF (enforced at render).
+# grouped task MUST resolve a group (via :func:`option_group_of`, enforced at
+# render). The per-method boundary nodes (``spatial_extract_boundary__*``) are
+# grouped generically — see :func:`_is_grouped_task` — rather than being listed
+# individually, so a new boundary method needs no edit here.
 _GROUPED_TASKS: set[str] = {
     "spatial_map_single_touch",
     "spatial_map_baseline",
-    "spatial_extract_boundaries",
     "spatial_compare_boundaries",
     "spatial_compare_proximal_distal",
     "spatial_compare_tap_stroke",
     "spatial_extract_rf_profiles",
 }
+
+
+# NOTE (deferred follow-up — not in Phase 6 scope): the barrier node
+# ``spatial_extract_boundaries`` keeps every per-method node in its ``depends_on``.
+# If a user toggles a ``spatial_extract_boundary__*`` node OFF, that node never
+# runs → is never ``mark_completed`` → the barrier's ``can_run`` (which needs all
+# deps completed) never satisfies → every downstream stage stalls. Keeping the
+# barrier's ``depends_on`` in sync on toggle is NOT a localized change to this
+# module: the enabled toggle lives in ``task_panel.py`` / ``dag_graph_view.py``,
+# and ``DagConfigModel`` exposes no depends_on mutation API. Left as a follow-up
+# (see the plan's "Known Follow-ups"); doing it here would couple barrier/method
+# node identity into generic GUI code.
+def _is_boundary_method_task(task_name: str) -> bool:
+    """Return True for a per-method boundary node (``spatial_extract_boundary__<name>``)."""
+    return task_name.startswith(_BOUNDARY_METHOD_NODE_PREFIX)
+
+
+def boundary_method_of_task(task_name: str) -> str:
+    """Return the registry method name encoded in a boundary-method node name.
+
+    Fail-fast: raises ``ValueError`` if *task_name* is not a boundary-method node,
+    or if the encoded method is not registered (via ``registry.get_method``).
+    """
+    if not _is_boundary_method_task(task_name):
+        raise ValueError(
+            f"'{task_name}' is not a boundary-method node "
+            f"(expected prefix '{_BOUNDARY_METHOD_NODE_PREFIX}')"
+        )
+    method_name = task_name[len(_BOUNDARY_METHOD_NODE_PREFIX):]
+    boundary_registry.get_method(method_name)  # validates / raises on unknown
+    return method_name
+
+
+def boundary_param_specs(task_name: str):
+    """Return the ordered ``{key: ParamSpec}`` schema for a boundary-method node.
+
+    Pure (no Qt); the single source of truth for which options of a boundary
+    node are method-specific and how each renders. Fail-fast via
+    :func:`boundary_method_of_task`.
+    """
+    method_name = boundary_method_of_task(task_name)
+    return {
+        spec.key: spec
+        for spec in boundary_registry.params_schema_of(method_name)
+    }
+
+
+def option_group_of(task_name: str, key: str) -> str:
+    """Resolve the collapsible-group id for option *key* under *task_name*.
+
+    A boundary node's method-specific option is grouped by its ``ParamSpec.group``;
+    every other (shared) option is grouped by :data:`_OPTION_GROUP_OF`. Fail-fast:
+    raises ``ValueError`` for an option that resolves no group.
+    """
+    if _is_boundary_method_task(task_name):
+        specs = boundary_param_specs(task_name)
+        if key in specs:
+            return specs[key].group
+    if key in _OPTION_GROUP_OF:
+        return _OPTION_GROUP_OF[key]
+    raise ValueError(
+        f"Task '{task_name}' option '{key}' has no group "
+        f"(not in _OPTION_GROUP_OF and not a boundary method param)"
+    )
+
+
+def _is_grouped_task(task_name: str) -> bool:
+    """Return True if *task_name* renders its options inside collapsible groups."""
+    return task_name in _GROUPED_TASKS or _is_boundary_method_task(task_name)
 
 
 def _is_profile_dict(val: Any) -> bool:
@@ -398,7 +464,7 @@ class TaskDetailPanel(QWidget):
             self._sections[key] = widget
             sections.append((key, widget))
 
-        if task_name in _GROUPED_TASKS:
+        if _is_grouped_task(task_name):
             self._insert_grouped(task_name, options, sections)
         else:
             for i, (_key, widget) in enumerate(sections):
@@ -414,6 +480,14 @@ class TaskDetailPanel(QWidget):
 
     def _build_option_section(self, key: str, val: Any) -> QWidget:
         """Dispatch *key*/*val* to the matching per-option section builder."""
+        # Boundary-method nodes render their method-specific options from the
+        # registry's ParamSpec (widget from declared type/choices, not the runtime
+        # value type). Shared options (median_filter_size, cmap, ...) fall through
+        # to the generic dispatch below.
+        if self._task_name is not None and _is_boundary_method_task(self._task_name):
+            specs = boundary_param_specs(self._task_name)
+            if key in specs:
+                return self._make_param_spec_section(key, val, specs[key])
         if key == "median_filter_size":
             return self._make_median_filter_section(key, val)
         if key in _OPTION_ENUMS:
@@ -447,21 +521,19 @@ class TaskDetailPanel(QWidget):
     ) -> None:
         """Insert *sections* into collapsible group containers by option group.
 
-        Every option must be classified in :data:`_OPTION_GROUP_OF`; an
-        unclassified option raises (fail-fast). Groups are rendered in
-        :data:`_OPTION_GROUPS` order; empty groups are omitted; option order
-        within a group follows YAML order.
+        Every option must resolve a group via :func:`option_group_of`; an
+        unclassified option raises (fail-fast). Groups are rendered in catalogue
+        order (:data:`_OPTION_GROUPS`, then any boundary ``ParamSpec.group`` in
+        schema order); empty groups are omitted; option order within a group
+        follows YAML order.
         """
-        for key in options:
-            if key not in _OPTION_GROUP_OF:
-                raise ValueError(
-                    f"Task '{task_name}' option '{key}' has no group in _OPTION_GROUP_OF"
-                )
+        group_of = {key: option_group_of(task_name, key) for key in options}
+        catalogue = self._group_catalogue(task_name)
 
         widget_of = dict(sections)
         insert_at = 0
-        for group_key, group_label in _OPTION_GROUPS:
-            members = [k for k in options if _OPTION_GROUP_OF[k] == group_key]
+        for group_key, group_label in catalogue:
+            members = [k for k in options if group_of[k] == group_key]
             if not members:
                 continue
             container = CollapsibleSection(group_label, expanded=True)
@@ -469,6 +541,23 @@ class TaskDetailPanel(QWidget):
                 container.add_widget(widget_of[key])
             self._layout.insertWidget(insert_at, container)
             insert_at += 1
+
+    @staticmethod
+    def _group_catalogue(task_name: str) -> list[tuple[str, str]]:
+        """Ordered ``(group_id, label)`` catalogue for *task_name*.
+
+        The shared :data:`_OPTION_GROUPS` come first; a boundary-method node then
+        appends its own ``ParamSpec.group`` ids (in schema order, de-duplicated),
+        labelled from the group id. Purely registry-derived — no per-method rows.
+        """
+        catalogue = list(_OPTION_GROUPS)
+        if _is_boundary_method_task(task_name):
+            seen = {gid for gid, _ in catalogue}
+            for spec in boundary_param_specs(task_name).values():
+                if spec.group not in seen:
+                    catalogue.append((spec.group, _option_header(spec.group)))
+                    seen.add(spec.group)
+        return catalogue
 
     # ------------------------------------------------------------------
     # Section builders
@@ -496,6 +585,67 @@ class TaskDetailPanel(QWidget):
         row_layout.addWidget(combo)
         row_layout.addStretch()
         layout.addWidget(row)
+        return box
+
+    def _make_param_spec_section(self, key: str, val: Any, spec) -> QWidget:
+        """Render a boundary-method param from its :class:`ParamSpec`.
+
+        Widget type is decided by the declared schema, never by the runtime value:
+        a combobox when ``spec.choices`` is set, a checkbox for ``bool``, a numeric
+        line edit for ``int``/``float`` (empty renders as YAML ``null`` only when
+        the param is nullable, i.e. ``spec.default is None``), else a string edit.
+        """
+        box = QGroupBox(_option_header(key))
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(6, 4, 6, 4)
+
+        if spec.choices is not None:
+            entries = [(str(choice), choice) for choice in spec.choices]
+            combo = QComboBox()
+            current_idx = 0
+            for i, (label, saved) in enumerate(entries):
+                combo.addItem(label)
+                if val == saved:
+                    current_idx = i
+            combo.setCurrentIndex(current_idx)
+            combo.currentIndexChanged.connect(self._make_enum_handler(key, entries, combo))
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.addWidget(combo)
+            row_layout.addStretch()
+            layout.addWidget(row)
+        elif spec.type is bool:
+            cb = QCheckBox("Enabled")
+            cb.setChecked(bool(val))
+            cb.stateChanged.connect(self._make_bool_handler(key, cb))
+            layout.addWidget(cb)
+        elif spec.type in (int, float):
+            row_widget = QWidget()
+            row_layout = QHBoxLayout(row_widget)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            edit = QLineEdit("" if val is None else str(val))
+            edit.setFixedWidth(200)
+            if spec.default is None:
+                edit.setPlaceholderText("null (unset)")
+            edit.editingFinished.connect(
+                self._make_param_numeric_handler(key, spec, edit)
+            )
+            row_layout.addWidget(edit)
+            row_layout.addStretch()
+            layout.addWidget(row_widget)
+        else:
+            row_widget = QWidget()
+            row_layout = QHBoxLayout(row_widget)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            edit = QLineEdit("" if val is None else str(val))
+            edit.setFixedWidth(200)
+            edit.editingFinished.connect(
+                self._make_scalar_edit_handler(key, "" if val is None else val, edit)
+            )
+            row_layout.addWidget(edit)
+            row_layout.addStretch()
+            layout.addWidget(row_widget)
         return box
 
     def _make_median_filter_section(self, key: str, val: Any) -> QWidget:
@@ -1103,6 +1253,38 @@ class TaskDetailPanel(QWidget):
                 new_val = cast(edit.text())
             except (ValueError, TypeError):
                 edit.setText(str(original_val))
+                return
+            self._model.set_task_option(self._task_name, key, new_val)
+            self.task_changed.emit()
+
+        return _handler
+
+    def _make_param_numeric_handler(self, key: str, spec, edit: QLineEdit):
+        """Handler for a numeric boundary-param edit driven by *spec* (not value type).
+
+        Casts via ``spec.type``. An empty field writes YAML ``null`` only when the
+        param is nullable (``spec.default is None``); otherwise, and on a cast
+        failure, the field reverts to the stored value (fail-fast — no silent
+        coercion of an invalid entry).
+        """
+        nullable = spec.default is None
+
+        def _handler() -> None:
+            if self._model is None or self._task_name is None:
+                return
+            text = edit.text().strip()
+            current = self._model.get_task_option(self._task_name, key)
+            if text == "":
+                if nullable:
+                    self._model.set_task_option(self._task_name, key, None)
+                    self.task_changed.emit()
+                else:
+                    edit.setText("" if current is None else str(current))
+                return
+            try:
+                new_val = spec.type(text)
+            except (ValueError, TypeError):
+                edit.setText("" if current is None else str(current))
                 return
             self._model.set_task_option(self._task_name, key, new_val)
             self.task_changed.emit()

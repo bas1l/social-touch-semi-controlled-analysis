@@ -14,22 +14,23 @@ from typing import List
 
 from _vendor.should_process_task import should_process_task
 from analysis.pipeline.shared_constants import IFF_METRICS
-
-_VALID_BOUNDARY_METHODS = ("gradient", "inflection", "radial")
+from analysis.receptive_field_mapping.boundary.registry import get_method
 
 
 def validate_boundary_params(iff_metric: str, boundary_method: str) -> None:
-    """Raise ``ValueError`` if either option is outside its allowed set."""
+    """Raise ``ValueError`` if either option is outside its allowed set.
+
+    ``boundary_method`` is validated through the boundary-method registry: an
+    unregistered name raises ``ValueError`` (listing the registered methods). The
+    registry is the single source of truth for which algorithms exist, so this
+    replaces the former hardcoded ``_VALID_BOUNDARY_METHODS`` tuple.
+    """
     if iff_metric not in IFF_METRICS:
         raise ValueError(
             f"run_population_response_field_extraction: invalid iff_metric "
             f"{iff_metric!r}. Expected one of {IFF_METRICS}."
         )
-    if boundary_method not in _VALID_BOUNDARY_METHODS:
-        raise ValueError(
-            f"run_population_response_field_extraction: invalid boundary_method "
-            f"{boundary_method!r}. Expected 'gradient', 'inflection', or 'radial'."
-        )
+    get_method(boundary_method)  # fail-fast on an unregistered boundary method
 
 
 def boundary_stage_is_up_to_date(

@@ -28,7 +28,18 @@ if TYPE_CHECKING:  # avoid importing heavy loaders at module import time
 
 @dataclass
 class BoundaryParams:
-    """All per-run options for the boundary-extraction stage (from the DAG)."""
+    """Per-run *stage-level* options for the boundary-extraction stage (from the DAG).
+
+    This carries only the options common to the stage regardless of which
+    boundary algorithm runs (thresholding, colour/rendering, the active
+    ``boundary_method`` selector). Algorithm-specific parameters (formerly the
+    radial-only ``radial_*`` scalars) are **no longer** held here — they flow from
+    each :class:`~analysis.receptive_field_mapping.boundary.method_base.BoundaryMethod`'s
+    declared ``params_schema`` and are resolved per method in the extraction layer.
+    ``inflection_sigma`` is retained because the monolithic response-fields NPZ
+    still records it as a stage scalar (its use as the inflection method's param is
+    resolved via that method's schema).
+    """
 
     neuron_mode: str
     min_overlap_pct: float = 25.0
@@ -41,15 +52,6 @@ class BoundaryParams:
     contour_color: str = "red"
     circular_crop_margin: float = 0.0
     boundary_method: str = "gradient"
-    radial_gauss_sigma: float = 8.0
-    radial_hess_sigma: float = 5.0
-    radial_envelope_smooth_sigma: float = 1.5
-    # Plateau-detection gate defaults for the radial foot detector. ``None`` /
-    # ``1`` reproduce the pre-feature hardcoded behaviour (no prominence gate;
-    # ``find_peaks`` plateau_size floor of 1). Seeded into per-gesture
-    # GestureContourParams by ``defaults_from_boundary_params``.
-    radial_prominence: float | None = None
-    radial_plateau_size: int = 1
 
 
 @dataclass(frozen=True)
@@ -557,17 +559,30 @@ class PreparedBoundaryData:
 class BoundaryResults:
     """Boundary detector outputs for one session, carried forward to render + persist.
 
-    ``gesture_boundaries`` holds the *active* boundary (selected by
-    ``boundary_method``). The per-method dicts and derived fields
-    (``per_gesture_smoothed`` etc.) are carried so persistence never has to
-    recompute them.
+    Method-blind: ``boundaries`` maps a method name to that method's per-gesture
+    contours ``{method_name: {gtype: BoundaryContour | None}}``. This replaces the
+    former per-method dicts (``gesture_inflection_boundaries`` etc.) and the
+    method-specific derived-array caches (``per_gesture_smoothed`` etc., which each
+    method now derives internally). ``boundary_method`` records the *active*
+    (selected) method; :attr:`gesture_boundaries` exposes that method's per-gesture
+    contours for the renderer, which stays method-blind.
     """
 
     boundary_method: str
-    gesture_boundaries: dict = field(default_factory=dict)
-    gesture_inflection_boundaries: dict = field(default_factory=dict)
-    gesture_gradient_boundaries: dict = field(default_factory=dict)
-    gesture_radial_boundaries: dict = field(default_factory=dict)
-    per_gesture_smoothed: dict = field(default_factory=dict)      # {gtype: smoothed array}
-    per_gesture_laplacian: dict = field(default_factory=dict)     # {gtype: laplacian array}
-    per_gesture_gradient_mag: dict = field(default_factory=dict)  # {gtype: |grad| array}
+    # {method_name: {gtype: BoundaryContour | None}}
+    boundaries: dict = field(default_factory=dict)
+
+    @property
+    def gesture_boundaries(self) -> dict:
+        """Per-gesture contours of the *active* (selected) method.
+
+        Fail-fast: raises ``KeyError`` if the active ``boundary_method`` produced
+        no entry in :attr:`boundaries` (a caller asked to render before the active
+        method ran) rather than silently returning an empty mapping.
+        """
+        if self.boundary_method not in self.boundaries:
+            raise KeyError(
+                f"BoundaryResults: active method {self.boundary_method!r} is not "
+                f"present in boundaries {sorted(self.boundaries)}"
+            )
+        return self.boundaries[self.boundary_method]

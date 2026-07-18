@@ -5,8 +5,12 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from analysis.pipeline.output_dirs import SPATIAL_EXTRACT_BOUNDARIES
 from analysis.pipeline.shared_constants import IFF_METRICS, session_id_from_path
+from analysis.receptive_field_mapping.data.rf_boundary_io import (
+    boundary_session_extract_dir,
+    discover_boundary_methods,
+    load_boundary_npz_view,
+)
 from analysis.receptive_field_mapping.rendering.neuron_type_colors import (
     SessionColorScheme,
     build_session_color_scheme,
@@ -51,6 +55,13 @@ def run_session_rf_boundary_comparison(
     contour_color: str = "red",
     circular_crop_margin: float = 0.0,
 ) -> None:
+    """Discover every boundary method and emit one comparison sub-output per method.
+
+    Each discovered ``<method>/`` produces its own comparison tree under
+    ``output_dir/<method>/`` via identical per-method logic (:func:`_run_for_method`),
+    so methods never overwrite each other. Boundary geometry is read from the
+    method-blind :class:`BoundaryContour` records, never from method-named NPZ keys.
+    """
     if iff_metric not in IFF_METRICS:
         raise ValueError(
             f"[Session RF Boundary Comparison] Invalid iff_metric {iff_metric!r}. "
@@ -58,6 +69,37 @@ def run_session_rf_boundary_comparison(
         )
     if not session_configs:
         raise ValueError("[Session RF Boundary Comparison] session_configs is empty.")
+
+    records_by_session, methods = discover_boundary_methods(session_configs, iff_metric)
+    for method_name in methods:
+        _run_for_method(
+            session_configs=session_configs,
+            output_dir=output_dir / method_name,
+            method_name=method_name,
+            records_by_session=records_by_session,
+            force_processing=force_processing,
+            iff_metric=iff_metric,
+            neuron_summary_xlsx=neuron_summary_xlsx,
+            heatmap_space=heatmap_space,
+            cmap=cmap,
+            contour_color=contour_color,
+            circular_crop_margin=circular_crop_margin,
+        )
+
+
+def _run_for_method(
+    session_configs: list[tuple[Path, Path]],
+    output_dir: Path,
+    method_name: str,
+    records_by_session: dict[str, dict],
+    force_processing: bool = False,
+    iff_metric: str = "mean",
+    neuron_summary_xlsx: Path | None = None,
+    heatmap_space: str = "linear",
+    cmap: str = "inferno",
+    contour_color: str = "red",
+    circular_crop_margin: float = 0.0,
+) -> None:
     sentinel_path = output_dir / 'session_rf_boundary_comparison_done.json'
 
     if sentinel_path.exists() and not force_processing:
@@ -71,8 +113,13 @@ def run_session_rf_boundary_comparison(
     for d in (output_dir, contour_overlays_dir, metric_panels_dir, heatmap_dir):
         d.mkdir(parents=True, exist_ok=True)
 
-    logger.info("[Session RF Boundary Comparison] building summary DataFrame from %d sessions...", len(session_configs))
-    df, contour_data, centroid_data = _build_summary_dataframe(session_configs, iff_metric=iff_metric)
+    logger.info(
+        "[Session RF Boundary Comparison] method %s: building summary DataFrame from %d sessions...",
+        method_name, len(session_configs),
+    )
+    df, contour_data, centroid_data = _build_summary_dataframe(
+        session_configs, method_name, records_by_session, iff_metric=iff_metric,
+    )
 
     csv_path = output_dir / 'session_rf_boundary_summary.csv'
     df.to_csv(csv_path, index=False)
@@ -145,11 +192,14 @@ def run_session_rf_boundary_comparison(
         sc_csv_path = Path(sc_csv_path)
         sc_db_path = Path(sc_db_path)
         session_id = session_id_from_path(sc_csv_path)
-        npz_path = (
-            sc_db_path / '4_analysed' / SPATIAL_EXTRACT_BOUNDARIES
-            / f"iff_{iff_metric}" / session_id / f'{session_id}_population_response_fields.npz'
+        session_records = records_by_session[session_id]
+        if method_name not in session_records:
+            continue
+        session_dir = boundary_session_extract_dir(sc_db_path, iff_metric, session_id)
+        npz = load_boundary_npz_view(
+            session_dir, method_name, session_id, session_records[method_name],
         )
-        render_data = _load_heatmap_rendering_data_from_npz(npz_path)
+        render_data = _load_heatmap_rendering_data_from_npz(npz)
         render_data_per_session.append((session_id, render_data))
         for gdata in render_data['per_gtype'].values():
             if gdata['centroid_uv'] is None:
@@ -335,10 +385,9 @@ def _global_uv_limits(
 
 
 def _load_boundary_metrics_from_npz(
-    npz_path: Path,
+    npz,
     session_id: str,
 ) -> tuple[list[dict], dict[str, np.ndarray], dict[str, np.ndarray]]:
-    npz = np.load(npz_path, allow_pickle=True)
     gesture_types = list(npz['gesture_types'])
 
     forearm_uv = npz['forearm_uv'].astype(np.float64)
@@ -430,8 +479,11 @@ def _load_boundary_metrics_from_npz(
     return rows, contours_by_gtype, centroids_by_gtype
 
 
-def _load_heatmap_rendering_data_from_npz(npz_path: Path) -> dict:
-    """Load mesh and per-gesture heatmap arrays from a session NPZ for circular crop rendering.
+def _load_heatmap_rendering_data_from_npz(npz) -> dict:
+    """Load mesh and per-gesture heatmap arrays from a session view for circular crop rendering.
+
+    ``npz`` is a :class:`~...data.rf_boundary_io.BoundaryNpzView` exposing the grid
+    NPZ plus the discovered boundary geometry under the legacy ``boundary_*`` keys.
 
     Returns a dict with:
     - ``forearm_uv`` (N, 2) float64
@@ -442,8 +494,6 @@ def _load_heatmap_rendering_data_from_npz(npz_path: Path) -> dict:
         - ``grid_u``, ``grid_v``, ``grid_z`` — interpolated heatmap meshgrids
         - ``centroid_uv`` — (2,) float64 centroid, or None if key absent for that gtype
     """
-    npz = np.load(npz_path, allow_pickle=True)
-
     forearm_uv = npz['forearm_uv'].astype(np.float64)
     forearm_V = npz['forearm_V'].astype(np.float64)
     forearm_faces = npz['forearm_faces'].astype(np.int32)
@@ -563,6 +613,8 @@ def _add_centroid_shift_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 def _build_summary_dataframe(
     session_configs: list[tuple[Path, Path]],
+    method_name: str,
+    records_by_session: dict[str, dict],
     iff_metric: str = "mean",
 ) -> tuple[pd.DataFrame, dict[str, dict[str, np.ndarray]], dict[str, dict[str, np.ndarray]]]:
     all_rows: list[dict] = []
@@ -574,20 +626,21 @@ def _build_summary_dataframe(
         db_path = Path(db_path)
 
         session_id = session_id_from_path(csv_path)
-        npz_path = (
-            db_path / '4_analysed' / SPATIAL_EXTRACT_BOUNDARIES
-            / f"iff_{iff_metric}" / session_id / f'{session_id}_population_response_fields.npz'
+        session_records = records_by_session[session_id]
+        if method_name not in session_records:
+            logger.warning(
+                "[Session RF Boundary Comparison] %s: no %s boundary folder — skipping session.",
+                session_id, method_name,
+            )
+            continue
+        session_dir = boundary_session_extract_dir(db_path, iff_metric, session_id)
+        npz = load_boundary_npz_view(
+            session_dir, method_name, session_id, session_records[method_name],
         )
 
-        if not npz_path.exists():
-            raise FileNotFoundError(
-                f"[Session RF Boundary Comparison] {session_id}: NPZ not found at "
-                f"{npz_path} — run spatial_extract_boundaries first."
-            )
-
-        logger.info("[Session RF Boundary Comparison] loading %s", session_id)
+        logger.info("[Session RF Boundary Comparison] loading %s / %s", session_id, method_name)
         rows, contours_by_gtype, centroids_by_gtype = _load_boundary_metrics_from_npz(
-            npz_path, session_id
+            npz, session_id
         )
         all_rows.extend(rows)
 

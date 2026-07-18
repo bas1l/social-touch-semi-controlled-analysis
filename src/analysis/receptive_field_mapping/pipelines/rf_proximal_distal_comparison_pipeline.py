@@ -7,8 +7,12 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from analysis.pipeline.output_dirs import SPATIAL_EXTRACT_BOUNDARIES
 from analysis.pipeline.shared_constants import IFF_METRICS, session_id_from_path
+from analysis.receptive_field_mapping.data.rf_boundary_io import (
+    boundary_session_extract_dir,
+    discover_boundary_methods,
+    load_boundary_npz_view,
+)
 from analysis.receptive_field_mapping.rendering.neuron_type_colors import (
     SessionColorScheme,
     build_session_color_scheme,
@@ -37,16 +41,6 @@ logger = logging.getLogger(__name__)
 _REQUIRED_GTYPES = ('all', 'stroke_proximal', 'stroke_distal')
 _HOTSPOT_GTYPES = ('stroke', 'stroke_proximal', 'stroke_distal')
 
-_BOUNDARY_SCALAR_KEYS = (
-    'boundary_area_xyz_mm2',
-    'boundary_perimeter_xyz_mm',
-    'boundary_circularity',
-    'boundary_pca_major_uv',
-    'boundary_pca_minor_uv',
-    'boundary_pca_orientation_deg',
-    'boundary_mean_iff_on_contour',
-)
-
 
 def run_proximal_distal_comparison(
     session_configs: list[tuple[Path, Path]],
@@ -59,6 +53,14 @@ def run_proximal_distal_comparison(
     neuron_summary_xlsx: Path | None = None,
     circular_crop_margin: float = 0.0,
 ) -> None:
+    """Discover every boundary method and emit one comparison sub-output per method.
+
+    Each discovered ``<method>/`` produces its own proximal-distal comparison tree
+    under ``output_dir/<method>/`` via identical per-method logic
+    (:func:`_run_for_method`), so methods never overwrite each other. Boundary
+    geometry comes from the method-blind :class:`BoundaryContour` records, never from
+    method-named NPZ keys.
+    """
     if iff_metric not in IFF_METRICS:
         raise ValueError(
             f"[RF Proximal-Distal Comparison] Invalid iff_metric {iff_metric!r}. "
@@ -66,6 +68,37 @@ def run_proximal_distal_comparison(
         )
     if not session_configs:
         raise ValueError("[RF Proximal-Distal Comparison] session_configs is empty.")
+
+    records_by_session, methods = discover_boundary_methods(session_configs, iff_metric)
+    for method_name in methods:
+        _run_for_method(
+            session_configs=session_configs,
+            output_dir=output_dir / method_name,
+            method_name=method_name,
+            records_by_session=records_by_session,
+            force_processing=force_processing,
+            heatmap_space=heatmap_space,
+            cmap=cmap,
+            iff_metric=iff_metric,
+            contour_color=contour_color,
+            neuron_summary_xlsx=neuron_summary_xlsx,
+            circular_crop_margin=circular_crop_margin,
+        )
+
+
+def _run_for_method(
+    session_configs: list[tuple[Path, Path]],
+    output_dir: Path,
+    method_name: str,
+    records_by_session: dict[str, dict],
+    force_processing: bool = False,
+    heatmap_space: str = "linear",
+    cmap: str = "inferno",
+    iff_metric: str = "mean",
+    contour_color: str = "red",
+    neuron_summary_xlsx: Path | None = None,
+    circular_crop_margin: float = 0.0,
+) -> None:
     sentinel_path = output_dir / 'rf_proximal_distal_comparison_done.json'
     # Backward-compat: also recognise the old sentinel name
     _old_sentinel_path = output_dir / 'rf_center_proximal_distal_done.json'
@@ -88,18 +121,17 @@ def run_proximal_distal_comparison(
         db_path_item = Path(db_path_item)
         session_id = session_id_from_path(csv_path)
 
-        npz_path = (
-            db_path_item / '4_analysed' / SPATIAL_EXTRACT_BOUNDARIES
-            / f"iff_{iff_metric}" / session_id / f'{session_id}_population_response_fields.npz'
-        )
-
-        if not npz_path.exists():
-            raise FileNotFoundError(
-                f"[RF Proximal-Distal Comparison] {session_id}: NPZ not found at "
-                f"{npz_path} — run spatial_extract_boundaries first."
+        session_records = records_by_session[session_id]
+        if method_name not in session_records:
+            logger.warning(
+                "[RF Proximal-Distal Comparison] %s: no %s boundary folder — skipping session.",
+                session_id, method_name,
             )
-
-        npz = np.load(npz_path, allow_pickle=True)
+            continue
+        session_dir = boundary_session_extract_dir(db_path_item, iff_metric, session_id)
+        npz = load_boundary_npz_view(
+            session_dir, method_name, session_id, session_records[method_name],
+        )
 
         forearm_uv = npz['forearm_uv'].astype(np.float64)
         forearm_V = npz['forearm_V'].astype(np.float64)

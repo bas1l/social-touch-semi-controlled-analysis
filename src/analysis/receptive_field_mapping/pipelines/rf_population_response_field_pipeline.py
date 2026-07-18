@@ -24,6 +24,7 @@ import numpy as np
 
 from analysis.pipeline.shared_constants import session_id_from_path
 from analysis.receptive_field_mapping.data.rf_boundary_io import (
+    boundary_method_output_dir,
     boundary_sentinel_path,
     boundary_session_output_dir,
     load_boundary_inputs,
@@ -68,33 +69,37 @@ def run_population_response_field_extraction(
     session_configs: list,
     neuron_mode: str,
     output_dir: Path,
+    *,
+    boundary_method: str,
+    method_params: dict,
     min_overlap_pct: float = 25.0,
     force_processing: bool = False,
     median_filter_size: int | None = None,
-    inflection_sigma: float | None = None,
     heatmap_space: str = "linear",
     cmap: str = "inferno",
     iff_metric: str = "mean",
     flip_u: bool = False,
     contour_color: str = "red",
     circular_crop_margin: float = 0.0,
-    boundary_method: str = "gradient",
-    radial_gauss_sigma: float = 8.0,
-    radial_hess_sigma: float = 5.0,
-    radial_envelope_smooth_sigma: float = 1.5,
-    radial_prominence: float | None = None,
-    radial_plateau_size: int = 1,
     contour_params_dir: Path | None = None,
 ) -> None:
     """Render per-session 2D population RF heatmap PNGs projected via SLIM UV.
 
-    For each session config, produces one PNG per gesture subset (all, stroke,
-    tap, stroke_proximal, stroke_distal) plus two composite PNGs (scatter and
-    interpolated) under ``4_analysed/spatial_extract_boundaries/{session_id}/``.
+    Runs exactly ONE boundary method (``boundary_method``) across every session.
+    For each session it produces one PNG per gesture subset (all, stroke, tap,
+    stroke_proximal, stroke_distal) plus two composite PNGs (scatter and
+    interpolated) under
+    ``4_analysed/spatial_extract_boundaries/iff_<metric>/<session_id>/<method>/``.
     ``stroke`` is a virtual subset combining stroke_proximal + stroke_distal.
 
     Composites use a global colour scale and UV axis range across all sessions
     so they are directly comparable.
+
+    The per-method run directory (``<session>/<method>/``) holds this run's
+    figures, monolithic response-fields NPZ and staleness sentinel; the boundary
+    contour NPZ itself is written to the same folder by the IO layer (keyed off the
+    session root), so the discovery reader ``load_boundary_contours(<session>)``
+    finds each method regardless of which method this call computed.
 
     Parameters
     ----------
@@ -105,15 +110,21 @@ def run_population_response_field_extraction(
         ``run_single_touch_rf_mapping``.
     output_dir:
         Root output directory for this task
-        (e.g. ``database_path / '4_analysed' / SPATIAL_EXTRACT_BOUNDARIES``).
+        (e.g. ``database_path / '4_analysed' / SPATIAL_EXTRACT_BOUNDARIES / iff_<metric>``).
+    boundary_method:
+        Registry name of the single method to run (``registry.get_method`` resolves
+        it, fail-fast on an unknown name).
+    method_params:
+        Generic ``{schema_key: value}`` mapping for the active method's declared
+        ``params_schema`` (the fan-out flow reads it from the method node's DAG
+        options). Only the keys the active method declares are forwarded; a plain
+        ``method_params.get('inflection_sigma')`` also seeds the monolithic NPZ
+        scalar (``None`` for methods that do not declare it).
     min_overlap_pct:
         Minimum percentage of touches that must contact a vertex for it to be
         included in the heatmap (default 25 %).
     force_processing:
         If True, reprocess sessions even when the sentinel file exists.
-    inflection_sigma:
-        Gaussian smoothing sigma for Laplacian inflection boundary detection.
-        Pass ``None`` to disable boundary computation entirely.
     iff_metric:
         Which IFF aggregation NPZ to consume — ``"mean"`` (default) or
         ``"max"``.  Must be one of ``IFF_METRICS``.
@@ -132,6 +143,25 @@ def run_population_response_field_extraction(
     """
     validate_boundary_params(iff_metric, boundary_method)
 
+    # Algorithm-specific knobs no longer live on BoundaryParams — they flow into
+    # the selected method via its declared ``params_schema`` as the generic
+    # ``method_params`` mapping. ``extract_session_boundaries`` forwards only the
+    # keys the active method declares (so a radial-only knob is dropped for a
+    # non-radial method). This function is now method-blind: the *caller* (the
+    # per-method fan-out flow) chooses ``boundary_method`` and supplies the matching
+    # ``method_params`` read generically from that method node's DAG options.
+    if method_params is None:
+        raise ValueError(
+            "run_population_response_field_extraction: method_params must be a "
+            "mapping of the active method's schema params (got None)."
+        )
+
+    # ``inflection_sigma`` survives on BoundaryParams only as the monolithic
+    # response-fields NPZ scalar — read it generically from method_params (present
+    # only when the inflection method is active; ``None`` otherwise). No branch on
+    # method identity: this is a plain dict lookup.
+    inflection_sigma = method_params.get("inflection_sigma")
+
     params = BoundaryParams(
         neuron_mode=neuron_mode,
         min_overlap_pct=min_overlap_pct,
@@ -144,11 +174,6 @@ def run_population_response_field_extraction(
         contour_color=contour_color,
         circular_crop_margin=circular_crop_margin,
         boundary_method=boundary_method,
-        radial_gauss_sigma=radial_gauss_sigma,
-        radial_hess_sigma=radial_hess_sigma,
-        radial_envelope_smooth_sigma=radial_envelope_smooth_sigma,
-        radial_prominence=radial_prominence,
-        radial_plateau_size=radial_plateau_size,
     )
 
     # ---- Phase A: per-session verify -> load -> prepare -> process -> persist ----
@@ -159,7 +184,13 @@ def run_population_response_field_extraction(
         database_path = Path(database_path)
 
         session_id = session_id_from_path(csv_path)
-        session_output_dir = boundary_session_output_dir(output_dir, session_id)
+        # Session root owns the per-method contour folders (<session>/<method>/),
+        # discovered downstream via load_boundary_contours(<session>). Everything
+        # this run writes (figures, monolithic NPZ, sentinel) lives under the
+        # per-method run dir so concurrent methods never overwrite each other and
+        # each method's staleness gate is independent.
+        session_root_dir = boundary_session_output_dir(output_dir, session_id)
+        session_output_dir = boundary_method_output_dir(session_root_dir, boundary_method)
         sentinel = boundary_sentinel_path(session_output_dir, session_id)
 
         input_paths = resolve_boundary_input_paths(
@@ -230,8 +261,10 @@ def run_population_response_field_extraction(
         inspection_dir = session_output_dir / "inspection"
         inspection_dir.mkdir(parents=True, exist_ok=True)
 
-        results = extract_session_boundaries(prepared, params, inspection_dir)
-        vertex_data_npz = save_boundary_outputs_npz(prepared, results, params)
+        results = extract_session_boundaries(prepared, params, method_params=method_params)
+        vertex_data_npz = save_boundary_outputs_npz(
+            prepared, results, params, session_output_dir=session_root_dir,
+        )
         produced = render_session_figures(prepared, results, params)
         print(
             f"[Population Response Fields] {session_id}: done — {len(produced)} PNG(s) written."
@@ -251,6 +284,5 @@ def run_population_response_field_extraction(
     for prepared, results, produced, vertex_data_npz in bundles:
         write_boundary_sentinel(
             prepared.sentinel, prepared.session_id, produced=produced,
-            inflection_boundaries=results.gesture_boundaries,
             vertex_data_npz=vertex_data_npz,
         )

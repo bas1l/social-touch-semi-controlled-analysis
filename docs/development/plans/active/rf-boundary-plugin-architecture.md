@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-18
 **Author:** Basil Duvernoy
-**Status:** Draft
+**Status:** In Progress
 **Base Branch:** `dev`
 **Branch:** `feature/rf-boundary-plugin-architecture`
 
@@ -84,8 +84,8 @@ into one shared NPZ file under one prefix.
       concrete method).
 - [ ] The radial (default) method produces geometric fields byte-for-byte identical to `main` for a fixed
       fixture session (parity test).
-- [ ] The GUI shows one box per enabled method node, each rendering that method's declared params; no
-      boundary option is hardcoded by method name in `task_detail_panel.py`.
+- [x] The GUI shows one box per enabled method node, each rendering that method's declared params; no
+      boundary option is hardcoded by method name in `task_detail_panel.py`. _(Phase 6)_
 - [ ] `_VALID_BOUNDARY_METHODS`, the `if/elif` selector in `extract_session_boundaries`, and the
       per-method dicts/blocks in `BoundaryResults` / the NPZ writer are removed.
 
@@ -196,14 +196,16 @@ type-by-value-inference fragility and the missing-group `ValueError` gap.
 ### Phase 1: Contract + Registry Foundation
 **Goal:** The formal contract, ABC, and registry exist and are unit-tested, with no wiring changes yet.
 
-- [ ] 1.1 — Add `boundary/contract.py`: frozen `BoundaryContour` base (11 fields + `method_name` +
+_Phase 1 completed 2026-07-18_
+
+- [x] 1.1 — Add `boundary/contract.py`: frozen `BoundaryContour` base (11 fields + `method_name` +
       `diagnostic_fields: Mapping[str, np.ndarray]`), plus a `validate_contour()` that raises on any
       missing/malformed field (fail-fast).
-- [ ] 1.2 — Add `boundary/method_base.py`: `BoundaryMethod` ABC (`name`, `params_schema`, `compute`) and
+- [x] 1.2 — Add `boundary/method_base.py`: `BoundaryMethod` ABC (`name`, `params_schema`, `compute`) and
       the `ParamSpec` params-schema type.
-- [ ] 1.3 — Add `boundary/registry.py`: registry dict, `get_method(name)` factory (raises on unknown —
+- [x] 1.3 — Add `boundary/registry.py`: registry dict, `get_method(name)` factory (raises on unknown —
       replaces `_VALID_BOUNDARY_METHODS`), `all_methods()`, `params_schema_of(name)`.
-- [ ] 1.4 — Write the shared **contract conformance test-suite** (parametrized over registered methods)
+- [x] 1.4 — Write the shared **contract conformance test-suite** (parametrized over registered methods)
       and a `BoundaryContour` validator unit test.
 
 **Files Modified:**
@@ -218,15 +220,17 @@ type-by-value-inference fragility and the missing-group `ValueError` gap.
 **Goal:** Existing detectors become `BoundaryMethod` subclasses emitting `BoundaryContour`; `lmax` /
 `gradient_magnitude` move to `diagnostic_fields`.
 
-- [ ] 2.1 — `methods/radial.py`: wrap `compute_radial_foot_boundary` / `compute_radial_foot_stages` as
+_Phase 2 completed 2026-07-18_
+
+- [x] 2.1 — `methods/radial.py`: wrap `compute_radial_foot_boundary` / `compute_radial_foot_stages` as
       `RadialFootMethod`; emit `RadialBoundaryContour` with `lmax` in `diagnostic_fields`; declare its
       5-param schema (with `tunable=True` flags matching current `ContourParamToggles`).
-- [ ] 2.2 — `methods/gradient.py`: wrap `compute_gradient_ridge` as `GradientMethod`; `gradient_magnitude`
+- [x] 2.2 — `methods/gradient.py`: wrap `compute_gradient_ridge` as `GradientMethod`; `gradient_magnitude`
       → `diagnostic_fields`; declare schema.
-- [ ] 2.3 — `methods/inflection.py`: wrap `compute_inflection_boundary` as `InflectionMethod`; declare
+- [x] 2.3 — `methods/inflection.py`: wrap `compute_inflection_boundary` as `InflectionMethod`; declare
       schema. Keep the shared polygon/sampling helpers (currently hosted here) importable by all methods.
-- [ ] 2.4 — Register all three in `registry.py`.
-- [ ] 2.5 — Parity test: radial geometric fields byte-for-byte vs `main` on a fixture session.
+- [x] 2.4 — Register all three in `registry.py`.
+- [x] 2.5 — Parity test: radial geometric fields byte-for-byte vs `main` on a fixture session.
 
 **Files Modified:**
 - `boundary/methods/{radial,gradient,inflection}.py` — new (migrated logic)
@@ -240,13 +244,60 @@ type-by-value-inference fragility and the missing-group `ValueError` gap.
 **Goal:** One generic writer/reader over `BoundaryContour`; per-method output folders; per-method NPZ
 blocks and duplicated `*_to_dict` removed.
 
-- [ ] 3.1 — Rewrite `rf_boundary_io.py` writer to serialize any `BoundaryContour` (11 fields + XYZ
+_Phase 3 completed 2026-07-18_
+
+- [x] 3.1 — Rewrite `rf_boundary_io.py` writer to serialize any `BoundaryContour` (11 fields + XYZ
       projections + `diagnostic_fields`) to `<session>/<method>/<session>_boundary.npz`; delete the
       per-method `inflection_`/`gradient_`/`radial_` blocks.
-- [ ] 3.2 — Add a discovery reader: enumerate `<method>/` dirs → `dict[method, BoundaryContour]`.
-- [ ] 3.3 — De-methodize `rf_boundary_types.py`: remove per-method dicts in `BoundaryResults` and the
+- [x] 3.2 — Add a discovery reader: enumerate `<method>/` dirs → `dict[method, BoundaryContour]`.
+- [x] 3.3 — De-methodize `rf_boundary_types.py`: remove per-method dicts in `BoundaryResults` and the
       radial-only scalar fields in `BoundaryParams`; params now flow from the schema.
-- [ ] 3.4 — Update `rf_boundary_verification.py`: drop `_VALID_BOUNDARY_METHODS`; validate via registry.
+- [x] 3.4 — Update `rf_boundary_verification.py`: drop `_VALID_BOUNDARY_METHODS`; validate via registry.
+
+**Phase 3 implementation notes (for Phase 4/5):**
+- New generic IO API in `data/rf_boundary_io.py`: `save_boundary_contours_npz(contours_by_gesture, *,
+  method_name, session_output_dir, session_id, forearm_uv, forearm_faces, forearm_V, config_snapshot)`
+  writes `<method>/<session>_boundary.npz` (OVERWRITE, never append) + a `run_metadata.json` provenance
+  sidecar; `load_boundary_contours(session_output_dir) -> dict[method, dict[gtype, BoundaryContour]]`
+  discovers `<method>/` folders (a subdir is a method folder iff it holds a `*_boundary.npz`; a boundary
+  NPZ without its metadata sidecar fails fast). The reader **generalizes** the plan's stated
+  `dict[method, BoundaryContour]` to carry the gesture axis (real sessions have multiple gestures);
+  layout helpers `boundary_method_output_dir` / `boundary_contour_npz_path` / `boundary_run_metadata_path`.
+  One generic `_serialize_contour` / `_deserialize_contour` pair replaces `_save_boundary_fields` and the
+  three per-method blocks; diagnostics round-trip via `diagnostic_{name}_{gtype}` + a `diagnostic_names_{gtype}` index.
+- `BoundaryResults` is now `boundary_method: str` + `boundaries: {method_name: {gtype: BoundaryContour|None}}`
+  with a `gesture_boundaries` **property** returning the active method's dict (renderer unchanged). Removed
+  the 4 per-method dicts and `per_gesture_smoothed`/`laplacian`/`gradient_mag`. `BoundaryParams` lost the 5
+  `radial_*` scalars.
+- `extract_session_boundaries(prepared, params, *, method_params=None)` now runs **only the active method**
+  via `registry.get_method(params.boundary_method).compute(...)` (no `if/elif`, no derived-array caching).
+  **Phase 4 must fan out to all enabled methods as separate nodes.** Gradient reconciliation still pending
+  (Phase-2 note): gradient uses its own `gradient_gauss_sigma` schema default, not the DAG `inflection_sigma`.
+- **Bridging changes (immediate callers, for consistency — Phase 4/5 will supersede):**
+  - `pipelines/rf_population_response_field_pipeline.py`: builds a generic `method_params` dict from its
+    `radial_*`/`inflection_sigma` kwargs and passes it to `extract_session_boundaries`; dropped the dead
+    `inflection_boundaries=` sentinel arg; `BoundaryParams(...)` no longer sets `radial_*`.
+  - `data/rf_contour_params_io.py::defaults_from_boundary_params`: radial defaults now sourced from
+    `registry.params_schema_of("radial")` (was `BoundaryParams.radial_*`). Behaviour change: the tuner
+    bootstrap now uses the radial schema defaults (identical to the old `BoundaryParams` defaults) rather
+    than DAG radial overrides — acceptable this pass (tuner is Phase 6).
+  - `data/rf_boundary_io.py::write_boundary_sentinel`: dropped the write-only (never read)
+    `inflection_boundaries` JSON payload and the last `inflection_boundary_to_dict` production coupling.
+- **Known runtime breakage handed to Phase 5 (imports stay healthy; these are separate DAG stages):** the
+  monolithic `<session>_population_response_fields.npz` no longer carries any boundary contour data
+  (`boundary_contour_uv_`, `inflection_`/`gradient_`/`radial_` blocks, `radial_lmax_`) nor the derived
+  `smoothed_`/`laplacian_`/`gradient_mag_` arrays — those moved to per-method folders / the diagnostic
+  channel. Downstream consumers still reading those keys from the monolithic NPZ will break until Phase 5
+  repoints them to `load_boundary_contours`: `rf_profile_extraction_pipeline.py`,
+  `rf_proximal_distal_comparison_pipeline.py`, `rf_tap_stroke_comparison_pipeline.py`,
+  `rf_session_boundary_comparison_pipeline.py`.
+- The three metric-module `*_to_dict` serializers (`inflection_boundary_to_dict` etc.) were left in place
+  (still imported by their own metric tests); they no longer have any production caller.
+- Verified: `test_boundary_contract.py` + `test_rf_response_fields_parity.py` (52) stay green; new
+  `tests/test_boundary_io.py` (6) covers the round-trip incl. diagnostics, two-method folder isolation,
+  re-run idempotency, and partial-folder fail-fast. Full import health confirmed. The 31 pre-existing
+  failures in `test_rf_tap_stroke_comparison.py` / `test_rf_grid_cell_metrics.py` reproduce identically
+  with all Phase-3 changes stashed (renderer returning `None`) — unrelated to this phase.
 
 **Files Modified:**
 - `data/rf_boundary_io.py`, `data/rf_boundary_types.py`,
@@ -257,18 +308,64 @@ blocks and duplicated `*_to_dict` removed.
 ### Phase 4: Fan-Out Flow + Barrier + Registry-Driven Prefect Wiring
 **Goal:** One generic extraction flow per method node; barrier join; downstream unchanged.
 
-- [ ] 4.1 — Add generic `spatial_extract_boundary_flow(method=..., **params)` that runs one method and
+_Phase 4 completed 2026-07-18_
+
+- [x] 4.1 — Add generic `spatial_extract_boundary_flow(method=..., **params)` that runs one method and
       writes/renders its folder (figures per method).
-- [ ] 4.2 — Add the barrier flow for `spatial_extract_boundaries` (no extraction; join only).
-- [ ] 4.3 — Make `_build_pipeline_stages` iterate `registry.all_methods()` to append one descriptor per
+- [x] 4.2 — Add the barrier flow for `spatial_extract_boundaries` (no extraction; join only).
+- [x] 4.3 — Make `_build_pipeline_stages` iterate `registry.all_methods()` to append one descriptor per
       method node, params pulled generically from the node's options (no literal per-`radial_*` keys).
-- [ ] 4.4 — DAG YAML: add one node per method (`spatial_extract_boundary__<name>`) with that method's
+- [x] 4.4 — DAG YAML: add one node per method (`spatial_extract_boundary__<name>`) with that method's
       option values; repoint `spatial_extract_boundaries` to `depends_on` the method nodes; add layout
       coordinates. Downstream consumers unchanged.
 
+**Phase 4 implementation notes (for Phase 5):**
+- **New flows** (`scripts/analysis_workflow_processing.py`): generic fan-out
+  `spatial_extract_boundary_flow(input_items, method, method_params, *, force_processing, neuron_mode,
+  iff_metric, min_overlap_pct, median_filter_size, heatmap_space, cmap, flip_u, contour_color,
+  circular_crop_margin, use_tuned_params)` — `@flow(name="spatial_extract_boundary")`, dispatches through
+  the registry inside `run_population_response_field_extraction`, never branches on `method`. Barrier
+  `spatial_extract_boundaries_flow(input_items, enabled_methods, *, force_processing, iff_metric)` —
+  `@flow(name="spatial_extract_boundaries")`, does NO extraction; verifies each enabled method wrote its
+  per-session run sentinel and fails fast otherwise.
+- **`_build_pipeline_stages`** now splices `*_build_boundary_stage_descriptors(dag_handler)` where the
+  single boundary descriptor was. That helper iterates `boundary_registry.all_methods()` → one descriptor
+  per `spatial_extract_boundary__<method>` node (params via `_make_boundary_method_params`, which reads the
+  shared options + the method's `params_schema` keys generically — no per-`radial_*` literals), then the
+  barrier descriptor (passes `enabled_methods` = method nodes whose DAG node is enabled). This registry
+  loop is the sole dynamic point.
+- **Signature change** `run_population_response_field_extraction(session_configs, neuron_mode, output_dir,
+  *, boundary_method, method_params, ...)`: dropped the explicit `radial_*` + `inflection_sigma` args in
+  favour of the generic `method_params` dict; `inflection_sigma` (monolithic-NPZ scalar only) is now
+  `method_params.get("inflection_sigma")`. `save_boundary_outputs_npz(..., *, session_output_dir)` gained a
+  keyword-only session-root arg.
+- **PER-METHOD OUTPUT LAYOUT (Phase 5 MUST read this):** each run now writes under
+  `4_analysed/spatial_extract_boundaries/iff_<metric>/<session_id>/<method>/` — this per-method dir holds
+  the figures, the monolithic `<session>_population_response_fields.npz`, the run sentinel
+  (`<session>_population_response_fields_done.json`), **and** the boundary contour NPZ
+  (`<session>_boundary.npz` + `run_metadata.json`). The contour NPZ is still written by the IO layer keyed
+  off the SESSION root, so `load_boundary_contours(<session_id_dir>)` (where `<session_id_dir> =
+  output_dir/iff_<metric>/<session_id>`) discovers every `<method>/` folder → `{method: {gtype:
+  BoundaryContour}}`. Downstream consumers must switch from the old shared monolithic NPZ to
+  `load_boundary_contours(session_dir)` and loop over the returned methods. The monolithic NPZ is now
+  per-method and no longer authoritative for boundary geometry.
+- DAG YAML: three nodes `spatial_extract_boundary__{radial,gradient,inflection}` (radial `depends_on`
+  includes `spatial_tune_rf_contours`; all include `spatial_build_response_fields`); gradient carries its
+  own `gradient_gauss_sigma`/`gradient_n_angles`/`gradient_savgol_window`. `spatial_extract_boundaries` is
+  now the barrier: `options` = `{force_processing, iff_metric}`, `depends_on` = the three method nodes.
+  Every downstream consumer's `depends_on: [spatial_extract_boundaries]` is UNCHANGED. layout.json gained
+  the three method-node coordinates (barrier nudged right to x≈3320).
+- **Verified:** `test_boundary_contract.py` + `test_rf_response_fields_parity.py` + `test_boundary_io.py` +
+  new `test_rf_boundary_dag_wiring.py` = 75 passed. Full suite collects (449 tests, no import errors).
+  Script imports; `_build_pipeline_stages` integration check confirms barrier ordered after all method
+  nodes with correct generic params. No `if method ==` in the script/flow.
+
 **Files Modified:**
-- `scripts/analysis_workflow_processing.py`, `src/analysis/pipeline/stage_runner.py` (if needed),
-  `configs/analyse_workflow_processing_dag.yaml`, `configs/analyse_workflow_processing_dag.layout.json`
+- `scripts/analysis_workflow_processing.py`, `configs/analyse_workflow_processing_dag.yaml`,
+  `configs/analyse_workflow_processing_dag.layout.json`,
+  `src/analysis/receptive_field_mapping/pipelines/rf_population_response_field_pipeline.py`,
+  `src/analysis/receptive_field_mapping/data/rf_boundary_io.py`,
+  `tests/test_rf_boundary_dag_wiring.py` (new). `stage_runner.py` needed no change (gates by `depends_on`).
 
 **Dependencies:** Phase 3
 
@@ -276,14 +373,69 @@ blocks and duplicated `*_to_dict` removed.
 **Goal:** Consumers loop over discovered methods; no method-name literals; profile stage stops reading
 diagnostic fields by name.
 
-- [ ] 5.1 — Update comparison pipelines (`rf_session_boundary_comparison`, `rf_proximal_distal_comparison`,
+_Phase 5 completed 2026-07-18_
+
+- [x] 5.1 — Update comparison pipelines (`rf_session_boundary_comparison`, `rf_proximal_distal_comparison`,
       `rf_tap_stroke_comparison`) to iterate discovered `<method>/` dirs, emitting per-method sub-outputs.
-- [ ] 5.2 — Update `rf_profile_extraction_pipeline`: read the generic contract; obtain any overlay field
+- [x] 5.2 — Update `rf_profile_extraction_pipeline`: read the generic contract; obtain any overlay field
       via the `diagnostic_fields` capability check (drop `radial_lmax_` / `gradient_contour_uv_` literals).
+
+**Phase 5 implementation notes (for Phase 6):**
+- **New IO surface in `data/rf_boundary_io.py`** (all method-blind, reused by every consumer):
+  `boundary_session_extract_dir(db, iff_metric, session_id)` (the one place the
+  `iff_<metric>/<session_id>` path is spelled out), `boundary_response_fields_npz_path(session_dir,
+  method, session_id)` (per-method monolithic grid NPZ), `LoadedBoundary` (frozen: the contract
+  `BoundaryContour` + its on-disk XYZ projections `contour_xyz`/`centroid_xyz`/`peak_xyz`/
+  `perimeter_xyz_mm`/`area_xyz_mm2`), `load_boundary_records(session_dir) -> {method: {gtype:
+  LoadedBoundary}}` (the discovery reader consumers loop over; `load_boundary_contours` is now a thin
+  projection of it), `discover_boundary_methods(session_configs, iff_metric) -> (records_by_session,
+  sorted_methods)` (shared cross-session discovery), and `BoundaryNpzView` / `load_boundary_npz_view(...)`
+  — a read-only `np.load`-like adapter that re-exposes a method's `LoadedBoundary` geometry under the
+  **legacy `boundary_*` key names** the comparison logic already reads, backed by the per-method grid NPZ
+  for everything else. The same view wraps every method (no method-identity branch); a `boundary_*_<gtype>`
+  key exists iff that gesture produced a contour, preserving the old `... in npz` capability semantics.
+- **Comparison pipelines** each gained a thin registry-blind orchestrator (`run_*` → `discover_boundary_methods`
+  → loop → `_run_for_method(output_dir/<method>, method, records_by_session, ...)`). Per-method sub-outputs
+  land under `<compare_dir>/iff_<metric>/<method>/` (CSV summary + figures + sentinel), so methods never
+  overwrite. Each `_run_for_method` builds a `BoundaryNpzView` per session and is otherwise the original
+  body unchanged — geometry now flows from the discovered contracts, grids from the per-method grid NPZ.
+  Sessions missing a given method's folder are skipped with a warning (consistent with the existing
+  missing-centroid skip).
+- **Profile stage** now iterates `load_boundary_records(session_dir)`; per method it writes
+  `output_dir/iff_<metric>/<session_id>/<method>/` (CSVs + `profile_raw/`, `gradient_1d/`, `combined/`,
+  `raycast/`, `*_rf_profiles_done.json`, one `rf_profile_extraction_methodology_<method>.md`). Overlay
+  figure groups are gated purely by capability on each gesture's `BoundaryContour`: `gradient_1d` on
+  `has_diagnostic("gradient_magnitude")`, `combined`/`raycast` on `has_diagnostic("lmax")` (+ a smoothed
+  overlay), laplacian groups on `has_diagnostic("smoothed"/"laplacian")`. The old cross-method
+  `gradient_contour_uv` overlay was dropped (a cross-method composite, out of scope); `radial_lmax_` /
+  `gradient_contour_uv_` literals are gone and the method-name-keyed `_BOUNDARY_METHOD_DESCRIPTIONS` dict
+  was replaced with method-blind methodology prose (interpolating the name as free-form provenance only).
+  Consequence today: only radial emits `lmax` and only gradient emits `gradient_magnitude`; no method emits
+  `smoothed`/`laplacian`, so laplacian/combined/raycast groups stay dormant until a method provides those
+  diagnostics — forward-compatible, no silent fallback.
+- **Grep proof:** `radial_lmax_`/`gradient_contour_uv_` return nothing under `pipelines/`; the four consumer
+  files contain no `"radial"`/`"gradient"`/`"inflection"` literal and no `if … method … ==` branch (methods
+  appear only as `.items()` loop keys). Import health OK on all four + `rf_boundary_io`.
+- **Verification:** required suite `test_boundary_contract` + `test_rf_response_fields_parity` +
+  `test_boundary_io` + `test_rf_boundary_dag_wiring` = **75 passed**; full suite still collects (449, no
+  import errors). A dedicated end-to-end smoke (two methods, real per-method layout via
+  `save_boundary_contours_npz`) confirms all four consumers discover both methods and write non-overlapping
+  `<method>/` sub-outputs, with `gradient_1d` produced only for the gradient method.
+- **Fixed a latent pre-existing bug** in `_methodology_md`: the output-layout line contained unescaped
+  `{metric}`/`{session_id}` in an f-string (`NameError` the moment the profile stage actually ran) — now
+  literal `<metric>`/`<session_id>`.
+- **Known non-blocker for Phase 6:** `tests/test_rf_tap_stroke_comparison.py` builds the pre-Phase-3
+  monolithic fixture (boundary keys inside the response-fields NPZ, no `<method>/` folder), so
+  `discover_boundary_methods` now fails fast on it: 19→21 failing (baseline had 19 pre-existing, mostly the
+  shift-decomposition mock returning `None`). Migrating that fixture to the per-method layout is a
+  test-suite task (the XYZ area/perimeter are now computed by the serializer from the contour, so the
+  fixture's injected `*_area_mm2` values must be derived from the contours) — out of the four-consumer file
+  scope for this phase.
 
 **Files Modified:**
 - `pipelines/rf_session_boundary_comparison_pipeline.py`, `rf_proximal_distal_comparison_pipeline.py`,
-  `rf_tap_stroke_comparison_pipeline.py`, `rf_profile_extraction_pipeline.py`
+  `rf_tap_stroke_comparison_pipeline.py`, `rf_profile_extraction_pipeline.py`,
+  `data/rf_boundary_io.py` (new discovery/view/path helpers)
 
 **Dependencies:** Phase 4
 
@@ -291,16 +443,55 @@ diagnostic fields by name.
 **Goal:** One box per method node, options rendered from the method's params schema; radial tuner
 unchanged.
 
-- [ ] 6.1 — In `task_detail_panel.py`, for boundary-method nodes render options from
+_Phase 6 completed 2026-07-18_
+
+- [x] 6.1 — In `task_detail_panel.py`, for boundary-method nodes render options from
       `registry.params_schema_of(method)` (widget type from `ParamSpec.type`/`choices`, grouping from
       `ParamSpec.group`); remove the boundary entries from `_OPTION_ENUMS`, `_OPTION_VISIBILITY`,
       `_OPTION_GROUP_OF`; add each method node to `_GROUPED_TASKS` generically.
-- [ ] 6.2 — Keep `spatial_tune_rf_contours` (radial live tuner) wired to the radial method unchanged.
+- [x] 6.2 — Keep `spatial_tune_rf_contours` (radial live tuner) wired to the radial method unchanged.
+
+**Phase 6 implementation notes:**
+- Registry-driven rendering keys off the node-name prefix `spatial_extract_boundary__`. New pure
+  (Qt-free) module helpers in `task_detail_panel.py` are the single seam: `boundary_method_of_task`
+  (prefix → registry method, fail-fast on unknown), `boundary_param_specs` (node → ordered
+  `{key: ParamSpec}` from `registry.params_schema_of`), `option_group_of` (method param → its
+  `ParamSpec.group`; every other option → `_OPTION_GROUP_OF`, fail-fast if neither), and
+  `_is_grouped_task` (`_GROUPED_TASKS` ∪ any `spatial_extract_boundary__*`). `_build_option_section`
+  now renders a method-specific key via `_make_param_spec_section` (widget from `spec.choices`/
+  `spec.type`: combobox / bool checkbox / numeric line-edit with schema-driven nullability — empty ⇒
+  YAML null only when `spec.default is None`, else revert), and `_insert_grouped` builds its group
+  catalogue from `_OPTION_GROUPS` + the node's `ParamSpec.group`s in schema order.
+- **Removed from the hardcoded dicts:** the whole `boundary_method` enum from `_OPTION_ENUMS`; the
+  `boundary_method` controller block from `_OPTION_VISIBILITY` (kept the `neuron_mode`→`iff_metric`
+  block); the `inflection_sigma`/`boundary_method`/`radial_gauss_sigma`/`radial_hess_sigma`/
+  `radial_envelope_smooth_sigma` rows from `_OPTION_GROUP_OF` (added the shared, method-agnostic
+  `use_tuned_params: "method"`); dropped the single `spatial_extract_boundaries` entry from
+  `_GROUPED_TASKS` (barrier now renders flat — only `iff_metric`). No boundary option is hardcoded by
+  method name anymore.
+- Legacy disabled node `spatial_tuning_rf_metrics` still carries its own `boundary_method`/
+  `inflection_sigma` options; with the enum removed these now render as plain scalar line-edits (it is
+  not in `_GROUPED_TASKS`, so no group-resolution `ValueError`). Cosmetic only, disabled task.
+- **Deferred (see Known Follow-ups):** syncing the barrier's `depends_on` when a method node is toggled
+  off. Out of Phase 6's file scope (toggle lives in `task_panel.py`/`dag_graph_view.py`; no
+  `DagConfigModel` depends_on-mutation API). Documented with a code comment at the boundary helpers.
 
 **Files Modified:**
 - `src/utils/gui/analysis_runner_gui/task_detail_panel.py`
+- `tests/test_task_detail_panel_boundary_schema.py` (new)
 
 **Dependencies:** Phase 4 (nodes exist), Phase 1 (schema API)
+
+### Known Follow-ups
+
+- **Barrier `depends_on` toggle sync (GUI).** `spatial_extract_boundaries` lists all three
+  `spatial_extract_boundary__*` nodes in `depends_on`. Because `can_run` requires every dependency to be
+  `mark_completed`, and a disabled node is never run/completed, toggling any method node OFF in the GUI
+  makes the barrier unsatisfiable and stalls all downstream stages. Not introduced by Phase 6 (it is a
+  consequence of the Phase 4 barrier wiring), and fixing it cleanly needs (a) a `DagConfigModel` API to
+  add/remove a `depends_on` entry and (b) hooking the enabled-toggle handlers in `task_panel.py` /
+  `dag_graph_view.py` — without hardcoding barrier/method-node identity into generic GUI code. Deferred.
+  Workaround today: leave all method nodes enabled, or hand-edit the barrier's `depends_on` in the YAML.
 
 ---
 
@@ -311,7 +502,8 @@ unchanged.
 - [ ] Registry `get_method` raises on unknown name; `all_methods()` returns the three.
 - [ ] Contract conformance suite parametrized over every registered method (same assertions each).
 - [ ] Generic NPZ writer round-trips a contour incl. `diagnostic_fields` and XYZ projections.
-- [ ] Params-schema → widget-type mapping (enum/float/bool) resolves from `ParamSpec`, not value type.
+- [x] Params-schema → widget-type mapping (enum/float/bool) resolves from `ParamSpec`, not value type.
+      _(Phase 6: `tests/test_task_detail_panel_boundary_schema.py`)_
 
 ### Integration Tests
 - [ ] Two methods enabled → two non-overlapping `<method>/` trees; re-running one overwrites only its own.
@@ -402,3 +594,36 @@ unchanged.
   `configs/analyse_workflow_processing_dag.yaml`
 
 ---
+
+## Modified Files
+
+<!-- auto-generated by /plan-implement — do not edit manually -->
+- configs/analyse_workflow_processing_dag.layout.json
+- configs/analyse_workflow_processing_dag.yaml
+- docs/development/plans/active/rf-boundary-plugin-architecture.md
+- scripts/analysis_workflow_processing.py
+- src/analysis/receptive_field_mapping/boundary/__init__.py
+- src/analysis/receptive_field_mapping/boundary/contract.py
+- src/analysis/receptive_field_mapping/boundary/method_base.py
+- src/analysis/receptive_field_mapping/boundary/methods/__init__.py
+- src/analysis/receptive_field_mapping/boundary/methods/_common.py
+- src/analysis/receptive_field_mapping/boundary/methods/gradient.py
+- src/analysis/receptive_field_mapping/boundary/methods/inflection.py
+- src/analysis/receptive_field_mapping/boundary/methods/radial.py
+- src/analysis/receptive_field_mapping/boundary/registry.py
+- src/analysis/receptive_field_mapping/data/rf_boundary_io.py
+- src/analysis/receptive_field_mapping/data/rf_boundary_types.py
+- src/analysis/receptive_field_mapping/data/rf_contour_params_io.py
+- src/analysis/receptive_field_mapping/metrics/rf_boundary_extraction.py
+- src/analysis/receptive_field_mapping/pipelines/rf_boundary_verification.py
+- src/analysis/receptive_field_mapping/pipelines/rf_population_response_field_pipeline.py
+- src/analysis/receptive_field_mapping/pipelines/rf_profile_extraction_pipeline.py
+- src/analysis/receptive_field_mapping/pipelines/rf_proximal_distal_comparison_pipeline.py
+- src/analysis/receptive_field_mapping/pipelines/rf_session_boundary_comparison_pipeline.py
+- src/analysis/receptive_field_mapping/pipelines/rf_tap_stroke_comparison_pipeline.py
+- src/utils/gui/analysis_runner_gui/task_detail_panel.py
+- tests/test_boundary_contract.py
+- tests/test_boundary_io.py
+- tests/test_rf_boundary_dag_wiring.py
+- tests/test_rf_response_fields_parity.py
+- tests/test_task_detail_panel_boundary_schema.py

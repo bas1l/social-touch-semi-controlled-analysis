@@ -41,6 +41,12 @@ from analysis.receptive_field_mapping.data.rf_boundary_types import (  # noqa: E
 from analysis.receptive_field_mapping.pipelines.rf_response_fields_pipeline import (  # noqa: E402
     build_session_response_fields,
 )
+from analysis.receptive_field_mapping.boundary.methods.radial import (  # noqa: E402
+    RadialFootMethod,
+)
+from analysis.receptive_field_mapping.metrics.rf_radial_foot_boundary import (  # noqa: E402
+    compute_radial_foot_boundary,
+)
 
 
 def _make_inputs(tmp_path: Path) -> BoundaryInputs:
@@ -169,3 +175,94 @@ def test_gesture_results_identical_recompute_vs_npz(tmp_path: Path) -> None:
         assert int(thr_r) == int(thr_n)
         np.testing.assert_array_equal(raw_recompute[gtype], raw_npz[gtype])
         np.testing.assert_array_equal(cnt_recompute[gtype], cnt_npz[gtype])
+
+
+# ---------------------------------------------------------------------------
+# Radial method wrap parity (Phase 2 of the boundary plug-in architecture)
+# ---------------------------------------------------------------------------
+#
+# Guards the wrap-not-rewrite invariant: ``RadialFootMethod.compute`` must forward
+# to the untouched ``compute_radial_foot_boundary`` core and merely re-shape its
+# output into a ``BoundaryContour``. So the geometric fields produced through the
+# method must be byte-for-byte identical (exact array equality, not approximate)
+# to the fields produced by calling the core directly on the same input.
+
+
+def _make_radial_parity_grid(
+    size: int = 120,
+    sigma_px: float = 12.0,
+    footprint_px: float = 45.0,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """A circular Gaussian bump on a finite disk footprint (NaN outside).
+
+    Mirrors ``tests/test_rf_radial_foot_boundary._make_gaussian_grid`` for the
+    default circular case — a configuration known to yield a non-``None`` radial
+    foot boundary, so the parity comparison exercises the real success path.
+    """
+    lin = np.linspace(0.0, 1.0, size)
+    grid_u, grid_v = np.meshgrid(lin, lin, indexing="ij")
+    center = 0.5
+    pixel_scale = 1.0 / (size - 1)
+    sigma_uv = sigma_px * pixel_scale
+    grid_z = 100.0 * np.exp(
+        -0.5 * ((grid_u - center) ** 2 + (grid_v - center) ** 2) / sigma_uv ** 2
+    )
+    rows = np.arange(size)[:, None]
+    cols = np.arange(size)[None, :]
+    center_idx = (size - 1) * center
+    norm = ((rows - center_idx) / footprint_px) ** 2 + (
+        (cols - center_idx) / footprint_px
+    ) ** 2
+    grid_z[norm > 1.0] = np.nan
+    return grid_u, grid_v, grid_z
+
+
+def _assert_exactly_equal(name: str, a, b) -> None:
+    """Exact equality: byte-for-byte for arrays, ``==`` for scalars/pairs."""
+    if isinstance(a, np.ndarray) or isinstance(b, np.ndarray):
+        # equal_nan=True: NaN in the same cell counts as identical (the core's
+        # lmax field is NaN outside the footprint); everything else must match
+        # exactly (no approximate tolerance).
+        assert np.array_equal(a, b, equal_nan=True), (
+            f"{name} differs (array not byte-identical)"
+        )
+    elif isinstance(a, (tuple, list)):
+        assert tuple(a) == tuple(b), f"{name} differs: {a!r} != {b!r}"
+    else:
+        assert a == b, f"{name} differs: {a!r} != {b!r}"
+
+
+def test_radial_method_wrap_is_byte_identical_to_core() -> None:
+    """``RadialFootMethod.compute`` fields == direct core fields (exact equality)."""
+    grid_u, grid_v, grid_z = _make_radial_parity_grid()
+
+    direct = compute_radial_foot_boundary(grid_u, grid_v, grid_z)
+    assert direct is not None, "fixture grid must yield a radial boundary"
+
+    contour = RadialFootMethod().compute(grid_u, grid_v, grid_z)
+    assert contour is not None, "wrapped method must yield the same boundary"
+
+    assert contour.method_name == "radial"
+
+    # The 11 geometric fields must be byte-for-byte identical to the core output.
+    for field_name in (
+        "contour_uv",
+        "area_uv",
+        "perimeter_uv",
+        "circularity",
+        "centroid_uv",
+        "peak_uv",
+        "pca_major_uv",
+        "pca_minor_uv",
+        "pca_orientation_deg",
+        "mean_iff_on_contour",
+        "iff_at_centroid",
+    ):
+        _assert_exactly_equal(
+            field_name, getattr(contour, field_name), getattr(direct, field_name)
+        )
+
+    # The method-specific ``lmax`` array is demoted to the diagnostic channel,
+    # byte-identical to the core's ``lmax``.
+    assert contour.has_diagnostic("lmax")
+    _assert_exactly_equal("lmax", contour.diagnostic_fields["lmax"], direct.lmax)

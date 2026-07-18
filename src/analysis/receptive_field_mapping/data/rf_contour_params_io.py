@@ -45,6 +45,7 @@ from typing import Iterable
 import numpy as np
 
 from analysis.pipeline.output_dirs import SPATIAL_TUNE_RF_CONTOURS
+from analysis.receptive_field_mapping.boundary.registry import params_schema_of
 from analysis.receptive_field_mapping.data.rf_boundary_types import (
     BoundaryParams,
     ContourParamToggles,
@@ -318,15 +319,17 @@ def load_contour_params(path: Path) -> GestureContourParams:
 
 
 def defaults_from_boundary_params(params: BoundaryParams) -> GestureContourParams:
-    """Seed a :class:`GestureContourParams` from the global boundary defaults.
+    """Seed a :class:`GestureContourParams` from the boundary-stage defaults.
 
-    Used to bootstrap the GUI (and the ``strict=False`` consume path) from the
-    DAG-level scalars. Raises if the global ``median_filter_size`` is ``None``
-    (the tuner needs a concrete positive odd window to seed from) — a loud
-    prerequisite, not a silent fallback. The plateau-detection gate is seeded
-    from the global ``radial_prominence`` / ``radial_plateau_size`` scalars.
-    Toggles are seeded to the default :class:`ContourParamToggles` state (median
-    and prominence OFF, the rest ON).
+    Used to bootstrap the GUI (and the ``strict=False`` consume path). The
+    stage-level scalars (``min_overlap_pct`` / ``median_filter_size``) come from
+    *params*; the radial-detector scalars now come from the ``radial`` method's
+    declared ``params_schema`` (their former home on ``BoundaryParams`` was removed
+    when algorithm params moved onto each method's schema). Raises if
+    ``median_filter_size`` is ``None`` (the tuner needs a concrete positive odd
+    window to seed from) — a loud prerequisite, not a silent fallback. Toggles are
+    seeded to the default :class:`ContourParamToggles` state (median and prominence
+    OFF, the rest ON).
     """
     if params.median_filter_size is None:
         raise ValueError(
@@ -334,18 +337,18 @@ def defaults_from_boundary_params(params: BoundaryParams) -> GestureContourParam
             "is None; set a positive odd median_filter_size in the DAG config before "
             "bootstrapping per-gesture contour params."
         )
+    radial_defaults = {spec.key: spec.default for spec in params_schema_of("radial")}
+    prominence_default = radial_defaults["radial_prominence"]
     return GestureContourParams(
         min_overlap_pct=float(params.min_overlap_pct),
         median_filter_size=int(params.median_filter_size),
-        radial_gauss_sigma=float(params.radial_gauss_sigma),
-        radial_hess_sigma=float(params.radial_hess_sigma),
-        radial_envelope_smooth_sigma=float(params.radial_envelope_smooth_sigma),
+        radial_gauss_sigma=float(radial_defaults["radial_gauss_sigma"]),
+        radial_hess_sigma=float(radial_defaults["radial_hess_sigma"]),
+        radial_envelope_smooth_sigma=float(radial_defaults["radial_envelope_smooth_sigma"]),
         prominence=(
-            float(params.radial_prominence)
-            if params.radial_prominence is not None
-            else None
+            float(prominence_default) if prominence_default is not None else None
         ),
-        plateau_size=int(params.radial_plateau_size),
+        plateau_size=int(radial_defaults["radial_plateau_size"]),
         toggles=ContourParamToggles(),
     )
 

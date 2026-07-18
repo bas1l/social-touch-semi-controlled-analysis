@@ -39,8 +39,20 @@
     2741.461130352176,
     931.6545361817942
   ],
+  "spatial_extract_boundary__radial": [
+    3120.0,
+    720.0
+  ],
+  "spatial_extract_boundary__gradient": [
+    3120.0,
+    940.0
+  ],
+  "spatial_extract_boundary__inflection": [
+    3120.0,
+    1160.0
+  ],
   "spatial_extract_boundaries": [
-    3235.091581287308,
+    3320.091581287308,
     934.2498938041674
   ],
   "spatial_tune_rf_contours": [
