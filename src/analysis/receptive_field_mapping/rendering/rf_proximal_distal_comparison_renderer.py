@@ -186,8 +186,8 @@ def render_proximal_distal_aggregate(
         ax.plot(prox[0], prox[1], 'o', ms=6, color=color, label=session_id, zorder=3)
         ax.plot(dist[0], dist[1], 'D', ms=6, color=color, zorder=3)
 
-    ax.set_xlabel('ΔU from all-gesture center (mm)')
-    ax.set_ylabel('ΔV from all-gesture center (mm)')
+    ax.set_xlabel('ΔU from stroke center (mm)')
+    ax.set_ylabel('ΔV from stroke center (mm)')
     ax.set_title('Proximal vs Distal RF Center Offsets')
     ax.set_aspect('equal')
     marker_handles = [
@@ -226,8 +226,8 @@ def render_proximal_distal_aggregate(
             ax_bt.text(prox[0], prox[1], f' {session_id}', fontsize=6, color=color,
                        ha='left', va='bottom', zorder=4)
 
-        ax_bt.set_xlabel('ΔU from all-gesture center (mm)')
-        ax_bt.set_ylabel('ΔV from all-gesture center (mm)')
+        ax_bt.set_xlabel('ΔU from stroke center (mm)')
+        ax_bt.set_ylabel('ΔV from stroke center (mm)')
         ax_bt.set_title('Proximal vs Distal RF Center Offsets (by type)')
         ax_bt.set_aspect('equal')
 

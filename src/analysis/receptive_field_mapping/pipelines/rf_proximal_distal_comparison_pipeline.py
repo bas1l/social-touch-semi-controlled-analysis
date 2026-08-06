@@ -38,7 +38,7 @@ from analysis.receptive_field_mapping.rendering.rf_population_map_renderer impor
 
 logger = logging.getLogger(__name__)
 
-_REQUIRED_GTYPES = ('all', 'stroke_proximal', 'stroke_distal')
+_REQUIRED_GTYPES = ('stroke', 'stroke_proximal', 'stroke_distal')
 _HOTSPOT_GTYPES = ('stroke', 'stroke_proximal', 'stroke_distal')
 
 
@@ -152,12 +152,12 @@ def _run_for_method(
                 )
             continue
 
-        centroid_all = npz['boundary_centroid_uv_all'].astype(np.float64)
+        centroid_stroke = npz['boundary_centroid_uv_stroke'].astype(np.float64)
         centroid_proximal = npz['boundary_centroid_uv_stroke_proximal'].astype(np.float64)
         centroid_distal = npz['boundary_centroid_uv_stroke_distal'].astype(np.float64)
 
-        offset_proximal = (centroid_proximal - centroid_all) * uv_to_mm
-        offset_distal = (centroid_distal - centroid_all) * uv_to_mm
+        offset_proximal = (centroid_proximal - centroid_stroke) * uv_to_mm
+        offset_distal = (centroid_distal - centroid_stroke) * uv_to_mm
         dist_mm = float(np.linalg.norm(centroid_proximal - centroid_distal)) * uv_to_mm
 
         # Task 4.1 — attempt hotspot loading; degrade gracefully if keys missing
@@ -180,7 +180,7 @@ def _run_for_method(
             hotspot_offset_proximal = (hotspot_proximal - hotspot_stroke) * uv_to_mm
             hotspot_offset_distal = (hotspot_distal - hotspot_stroke) * uv_to_mm
             hotspot_dist_mm = float(np.linalg.norm(hotspot_proximal - hotspot_distal)) * uv_to_mm
-            centroid_hotspot_distance_mm_stroke = float(np.linalg.norm(centroid_all - hotspot_stroke)) * uv_to_mm
+            centroid_hotspot_distance_mm_stroke = float(np.linalg.norm(centroid_stroke - hotspot_stroke)) * uv_to_mm
         else:
             hotspot_stroke = None
             hotspot_proximal = None
@@ -445,7 +445,7 @@ def _run_for_method(
             'forearm_V': forearm_V,
             'forearm_faces': forearm_faces,
             'slim_vertex_colors': slim_vertex_colors,
-            'centroid_all': centroid_all,
+            'centroid_stroke': centroid_stroke,
             'centroid_proximal': centroid_proximal,
             'centroid_distal': centroid_distal,
             'offset_proximal': offset_proximal,
@@ -527,8 +527,8 @@ def _run_for_method(
         summary_rows.append({
             'session_id': session_id,
             'uv_to_mm_scale': uv_to_mm,
-            'centroid_u_all': float(centroid_all[0]),
-            'centroid_v_all': float(centroid_all[1]),
+            'centroid_u_stroke': float(centroid_stroke[0]),
+            'centroid_v_stroke': float(centroid_stroke[1]),
             'centroid_u_proximal': float(centroid_proximal[0]),
             'centroid_v_proximal': float(centroid_proximal[1]),
             'centroid_u_distal': float(centroid_distal[0]),
@@ -835,8 +835,8 @@ def _run_for_method(
     df = pd.DataFrame(summary_rows).astype({
         'session_id': str,
         'uv_to_mm_scale': np.float64,
-        'centroid_u_all': np.float64,
-        'centroid_v_all': np.float64,
+        'centroid_u_stroke': np.float64,
+        'centroid_v_stroke': np.float64,
         'centroid_u_proximal': np.float64,
         'centroid_v_proximal': np.float64,
         'centroid_u_distal': np.float64,
