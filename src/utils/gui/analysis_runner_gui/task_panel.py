@@ -1,4 +1,4 @@
-"""Centre panel — compact 3-column task list with per-task detail panel."""
+"""Centre panel — the DAG as a graph or a compact task table."""
 
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QPushButton,
-    QSplitter,
     QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -22,7 +21,6 @@ from PyQt5.QtWidgets import (
 from analysis.pipeline.execution_events import TaskStatus
 from utils.gui.analysis_runner_gui.dag_graph_items import BYPASS_TOOLTIP
 from utils.gui.analysis_runner_gui.dag_graph_view import DagGraphView
-from utils.gui.analysis_runner_gui.task_detail_panel import TaskDetailPanel
 from utils.pipeline.dag_config_model import DagConfigModel
 
 #: Roles of the per-task checkboxes in the ``Enabled`` cell.  The table keeps a
@@ -45,7 +43,19 @@ def _status_text(status: TaskStatus) -> str:
 
 
 class TaskPanel(QWidget):
-    """Panel that renders DAG tasks as a compact 3-column list with a detail panel."""
+    """Panel that renders the DAG tasks as a graph or as a compact table.
+
+    The panel reports *which* task the user selected and knows nothing about
+    where that task's options are rendered — the owning window decides that.
+    Emitting a name rather than calling a detail panel is what keeps the centre
+    column free of any dependency on the right-hand column's composition.
+    """
+
+    #: Emitted with the task name whenever the user's selection changes, from
+    #: either view.  The model is deliberately not carried: the receiver
+    #: already owns it, and passing it would make the signal a second, weaker
+    #: source of truth for which config is loaded.
+    task_selected = pyqtSignal(str)
 
     task_changed = pyqtSignal()
 
@@ -81,8 +91,6 @@ class TaskPanel(QWidget):
         toggle_bar.addStretch()
         group_layout.addLayout(toggle_bar)
 
-        self._splitter = QSplitter(Qt.Vertical)
-
         self._table = QTableWidget()
         self._table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self._table.setAlternatingRowColors(True)
@@ -104,19 +112,11 @@ class TaskPanel(QWidget):
         self._stack.addWidget(self._table)
         self._stack.setCurrentIndex(0)
 
-        self._detail = TaskDetailPanel()
-        self._detail.task_changed.connect(self.task_changed)
-
-        self._splitter.addWidget(self._stack)
-        self._splitter.addWidget(self._detail)
-        self._splitter.setStretchFactor(0, 2)
-        self._splitter.setStretchFactor(1, 5)
-
         self._btn_graph.clicked.connect(self._show_graph_view)
         self._btn_table.clicked.connect(self._show_table_view)
         self._btn_fit.clicked.connect(self._graph_view.fit_all)
 
-        group_layout.addWidget(self._splitter)
+        group_layout.addWidget(self._stack)
         outer_layout.addWidget(group)
 
     # ------------------------------------------------------------------
@@ -136,6 +136,11 @@ class TaskPanel(QWidget):
 
         self._table.blockSignals(True)
         self._table.clear()
+        # Invalidate the current cell explicitly.  Without this, a workflow
+        # switch whose new DAG happens to leave the current row index valid
+        # makes the selectRow(0) below a no-op, currentCellChanged never fires,
+        # and the options editor keeps showing the previous DAG's task.
+        self._table.setCurrentCell(-1, -1)
         self._table.setRowCount(len(task_names))
         self._table.setColumnCount(4)
         self._table.setHorizontalHeaderLabels(
@@ -202,8 +207,11 @@ class TaskPanel(QWidget):
         self._table.blockSignals(False)
 
         if task_names:
+            # selectRow drives _on_current_cell_changed, which re-emits
+            # task_selected — so a workflow switch re-points the options
+            # editor at the new DAG instead of leaving the previous DAG's
+            # task on screen.
             self._table.selectRow(0)
-            # _on_current_cell_changed fires from selectRow and calls show_task
 
     # ------------------------------------------------------------------
     # Run status
@@ -298,8 +306,8 @@ class TaskPanel(QWidget):
     def _on_graph_node_clicked(self, task_name: str) -> None:
         if self._model is None:
             return
-        self._detail.show_task(self._model, task_name)
         self._selected_task = task_name
+        self.task_selected.emit(task_name)
 
     def _on_graph_enabled_changed(self, task_name: str, enabled: bool) -> None:
         if self._model is None:
@@ -357,7 +365,7 @@ class TaskPanel(QWidget):
         if self._model is None or current_row < 0 or current_row >= len(self._row_task):
             return
         self._selected_task = self._row_task[current_row]
-        self._detail.show_task(self._model, self._selected_task)
+        self.task_selected.emit(self._selected_task)
 
     def _on_cell_clicked(self, row: int, col: int) -> None:
         """Handle depends-on click to scroll to the first dependency."""

@@ -22,6 +22,7 @@ from PyQt5.QtWidgets import (
     QPushButton,
     QSplitter,
     QStatusBar,
+    QTabWidget,
     QToolBar,
     QVBoxLayout,
     QWidget,
@@ -45,16 +46,28 @@ from utils.gui.analysis_runner_gui.process_tree import (
 )
 from utils.gui.analysis_runner_gui.run_log_file import RunLogFile
 from utils.gui.analysis_runner_gui.status_channel import parse_status_line
+from utils.gui.analysis_runner_gui.task_detail_panel import TaskDetailPanel
 from utils.gui.analysis_runner_gui.task_panel import TaskPanel
 from utils.gui.analysis_runner_gui.workflow_selector import WorkflowSelector
 from utils.pipeline.dag_config_model import DagConfigModel
 
 
 class AnalysisRunnerGUI(QMainWindow):
-    """Three-column GUI: workflow selector (left), tasks (center), kinect dirs (right)."""
+    """Three-column GUI: workflow selector (left), DAG (centre), tabs (right).
+
+    The right-hand column is a tab stack holding the session-config tree and
+    the per-task options editor, so the DAG owns the whole height of the centre
+    column.
+    """
 
     _WORKFLOW_PANEL_WIDTH = 200
-    _SESSION_PANEL_WIDTH = 200
+    #: Initial width of the tabbed right-hand column.  Wider than the session
+    #: tree alone needed, because the options editor now shares it.
+    _RIGHT_PANEL_WIDTH = 320
+
+    #: Tab order in the right-hand column.
+    _TAB_SESSIONS = 0
+    _TAB_TASK_OPTIONS = 1
 
     def __init__(
         self,
@@ -75,6 +88,7 @@ class AnalysisRunnerGUI(QMainWindow):
         self._aborting: bool = False
         self._run_finished: RunFinished | None = None
         self._status_channel_broken: bool = False
+        self._suppress_options_tab_raise: bool = False
 
         self.setWindowTitle("AnalysisRunnerGUI")
         self.resize(1100, 700)
@@ -121,13 +135,19 @@ class AnalysisRunnerGUI(QMainWindow):
         self._task_panel = TaskPanel()
         self._splitter.addWidget(self._task_panel)
 
-        # --- Right column: session config selector (25%) ---
+        # --- Right column: tabbed sessions + per-task options ---
+        # The options editor lives here rather than under the DAG so the graph
+        # keeps the full height of the centre column.
         self._kinect_selector = SessionConfigSelector(self._configs_dir)
-        self._splitter.addWidget(self._kinect_selector)
+        self._detail_panel = TaskDetailPanel()
+        self._right_tabs = QTabWidget()
+        self._right_tabs.addTab(self._kinect_selector, "Sessions")
+        self._right_tabs.addTab(self._detail_panel, "Task Options")
+        self._splitter.addWidget(self._right_tabs)
 
-        self._splitter.setStretchFactor(0, 0)  # workflow selector — no extra stretch, stays at content width
-        self._splitter.setStretchFactor(1, 2)  # task panel        (1/2)
-        self._splitter.setStretchFactor(2, 1)  # kinect selector   (1/4)
+        self._splitter.setStretchFactor(0, 0)   # workflow selector — stays at content width
+        self._splitter.setStretchFactor(1, 12)  # DAG panel
+        self._splitter.setStretchFactor(2, 5)   # tabbed right column
 
         # --- Console panel ---
         self._console = ConsoleWidget()
@@ -152,6 +172,12 @@ class AnalysisRunnerGUI(QMainWindow):
         self._workflow_selector.workflow_changed.connect(self._load_workflow)
         self._kinect_selector.selection_changed.connect(self._on_kinect_changed)
         self._task_panel.task_changed.connect(self._mark_dirty)
+        # The centre column reports *which* task is selected; this window owns
+        # the model and decides where the options are rendered.
+        self._task_panel.task_selected.connect(self._on_task_selected)
+        # The options editor is a sibling of the task panel now, so its edits
+        # reach the dirty flag directly instead of bubbling through TaskPanel.
+        self._detail_panel.task_changed.connect(self._mark_dirty)
 
     def _build_run_bar(self) -> QWidget:
         bar = QWidget()
@@ -207,10 +233,18 @@ class AnalysisRunnerGUI(QMainWindow):
             QMessageBox.critical(self, "Load Error", str(exc))
             return
         has_sessions = self._model.has_session_configs()
-        self._kinect_selector.setVisible(has_sessions)
+        self._right_tabs.setTabVisible(self._TAB_SESSIONS, has_sessions)
         if has_sessions:
             self._kinect_selector.populate(self._model)
-        self._task_panel.populate(self._model)
+        # populate() re-selects the first task, which re-points the options
+        # editor at the new DAG.  The tab must not follow: loading a workflow
+        # is not the user asking for options, and on launch it would bury the
+        # session tree before the user has seen it.
+        self._suppress_options_tab_raise = True
+        try:
+            self._task_panel.populate(self._model)
+        finally:
+            self._suppress_options_tab_raise = False
         self._save_action.setEnabled(True)
         self._save_as_action.setEnabled(True)
         self._update_title()
@@ -228,6 +262,25 @@ class AnalysisRunnerGUI(QMainWindow):
             return
         self._workflow_selector.select_entry(default)
         self._load_workflow(default)
+
+    # ------------------------------------------------------------------
+    # Task selection
+    # ------------------------------------------------------------------
+
+    def _on_task_selected(self, task_name: str) -> None:
+        """Render *task_name*'s options and bring them into view.
+
+        Raising the tab is deliberate: a click on a graph node that silently
+        updated a hidden tab would look like the click did nothing.  It is
+        suppressed only while a workflow is being loaded, where the selection
+        is the panel's own doing rather than the user's.
+        """
+        assert self._model is not None, (
+            f"task {task_name!r} selected with no DAG config loaded"
+        )
+        self._detail_panel.show_task(self._model, task_name)
+        if not self._suppress_options_tab_raise:
+            self._right_tabs.setCurrentIndex(self._TAB_TASK_OPTIONS)
 
     # ------------------------------------------------------------------
     # Dirty-state management
@@ -299,8 +352,10 @@ class AnalysisRunnerGUI(QMainWindow):
             w = self._splitter.width()
             h = self._vsplitter.height()
             if w > 0 and h > 0:
-                center = max(w - self._WORKFLOW_PANEL_WIDTH - self._SESSION_PANEL_WIDTH, 0)
-                self._splitter.setSizes([self._WORKFLOW_PANEL_WIDTH, center, self._SESSION_PANEL_WIDTH])
+                center = max(w - self._WORKFLOW_PANEL_WIDTH - self._RIGHT_PANEL_WIDTH, 0)
+                self._splitter.setSizes(
+                    [self._WORKFLOW_PANEL_WIDTH, center, self._RIGHT_PANEL_WIDTH]
+                )
                 self._vsplitter.setSizes([int(h * 0.7), int(h * 0.3)])
                 self._initial_sizes_applied = True
 

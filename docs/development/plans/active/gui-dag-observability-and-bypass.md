@@ -564,21 +564,21 @@ gap. Today `TaskPanel` holds a vertical splitter with the graph/table stack on t
 the graph it belongs to (`task_panel.py:84-113`). The reference GUI instead puts options in
 a `QTabWidget` in the right column and lets the graph own the centre.
 
-- [ ] 6.1 — `TaskPanel`: remove the inner vertical splitter. The centre column becomes the
+- [x] 6.1 — `TaskPanel`: remove the inner vertical splitter. The centre column becomes the
       view-toggle bar plus the `QStackedWidget` (graph / table) only, and `TaskPanel` no
       longer constructs or owns a `TaskDetailPanel`.
-- [ ] 6.2 — `runner_window`: replace the bare `SessionConfigSelector` third column with a
+- [x] 6.2 — `runner_window`: replace the bare `SessionConfigSelector` third column with a
       `QTabWidget` carrying a *Sessions* tab (the existing selector, unchanged) and a *Task
       Options* tab (the `TaskDetailPanel`, now owned here). Re-tune the three-column stretch
       factors so the graph gains the width the reference gives it.
-- [ ] 6.3 — Replace `TaskPanel`'s direct `self._detail.show_task(model, name)` calls with a
+- [x] 6.3 — Replace `TaskPanel`'s direct `self._detail.show_task(model, name)` calls with a
       `task_selected(str)` signal that `runner_window` connects to the detail panel. This is
       the contract that keeps the centre column ignorant of where options are rendered.
-- [ ] 6.4 — Rewire `TaskDetailPanel.task_changed` to `runner_window._mark_dirty` from its new
+- [x] 6.4 — Rewire `TaskDetailPanel.task_changed` to `runner_window._mark_dirty` from its new
       parent; `TaskPanel.task_changed` keeps bubbling only its own graph/table edits.
-- [ ] 6.5 — Raise the *Task Options* tab automatically when a node or table row is selected,
+- [x] 6.5 — Raise the *Task Options* tab automatically when a node or table row is selected,
       so a graph click never leaves the user looking at the Sessions tree.
-- [ ] 6.6 — Confirm the Status column, the Bypass checkbox and the live status painting from
+- [x] 6.6 — Confirm the Status column, the Bypass checkbox and the live status painting from
       Phases 2 and 4 all still work across the new column boundary.
 
 **Files Modified:**
@@ -671,10 +671,12 @@ guarded by `pytest.importorskip("PyQt5")`.
 - [x] A registry entry with an empty `description` raises at load.
 
 `tests/test_task_panel_contract.py` (Phase 6)
-- [ ] `task_panel` does not import `task_detail_panel` — the import-graph assertion that
+- [x] `task_panel` does not import `task_detail_panel` — the import-graph assertion that
       enforces the Phase 6 contract, since widget placement itself cannot be asserted
       headlessly.
-- [ ] `TaskPanel` declares a `task_selected` signal.
+- [x] `TaskPanel` declares a `task_selected` signal.
+- [x] `task_selected` is emitted with exactly one argument — the model must not cross the
+      column boundary on the signal.
 
 ### Integration Tests
 
