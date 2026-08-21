@@ -20,6 +20,12 @@ from .contact_depth_field_io import (
     forearm_ply_path_for_sidecar,
     validate_depth_field_schema,
 )
+from .vertex_accumulator import (
+    AccumResult,
+    empty_accumulator,
+    accumulate_vertex_values,
+    accumulate_vertex_values_into,
+)
 from .rf_extraction_io import (
     RF_CAMERA_SETTINGS_FILENAME,
     load_neuron_contacts,
@@ -102,6 +108,11 @@ __all__ = [
     "depth_field_path_for_csv",
     "forearm_ply_path_for_sidecar",
     "validate_depth_field_schema",
+    # vertex_accumulator
+    "AccumResult",
+    "empty_accumulator",
+    "accumulate_vertex_values",
+    "accumulate_vertex_values_into",
     # rf_extraction_io
     "RF_CAMERA_SETTINGS_FILENAME",
     "load_neuron_contacts",

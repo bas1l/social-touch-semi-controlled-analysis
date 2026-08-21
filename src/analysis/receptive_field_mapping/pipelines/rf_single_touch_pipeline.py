@@ -18,6 +18,10 @@ from typing import List, Optional, Tuple
 import numpy as np
 
 from analysis.receptive_field_mapping.data.rf_data_loader import resolve_forearm_ply
+from analysis.receptive_field_mapping.data.vertex_accumulator import (
+    accumulate_vertex_values_into,
+    empty_accumulator,
+)
 from analysis.receptive_field_mapping.data.touch_playback_data import (
     PlaybackData,
     TouchEvent,
@@ -42,9 +46,15 @@ def _compute_touch_rf(
 ) -> Tuple[List[Tuple[int, float]], List[Tuple[int, float]]]:
     """Compute mean and max RF maps for a single touch event.
 
-    Accumulates per-vertex neuron values using ``np.add.at`` (mean) and
-    ``np.maximum.at`` (max), and returns only vertices that were contacted at
-    least once as ``(vertex_idx, value)`` pairs.
+    Accumulates per-vertex neuron values through the shared reduction in
+    ``data.vertex_accumulator`` (sum for the mean, running max for the max),
+    and returns only vertices that were contacted at least once as
+    ``(vertex_idx, value)`` pairs.
+
+    Every contact point currently carries weight ``1.0``: a frame's neuron
+    value is credited in full to every vertex it touched, however deeply. The
+    weights are passed explicitly rather than assumed so that the reduction has
+    no notion of an "unweighted" default.
 
     Parameters
     ----------
@@ -61,9 +71,7 @@ def _compute_touch_rf(
     ``(vertex_idx, value)`` pairs for all contacted vertices with valid data.
     Vertices where all frames are NaN are excluded from both lists.
     """
-    val_sum = np.zeros(n_vertices, dtype=np.float64)
-    val_max = np.full(n_vertices, -np.inf, dtype=np.float64)
-    contact_count = np.zeros(n_vertices, dtype=np.float64)
+    accum = empty_accumulator(n_vertices)
 
     n_frames = len(touch.frame_vertex_indices)
     if neuron_mode == "iff":
@@ -80,9 +88,16 @@ def _compute_touch_rf(
         verts = touch.frame_vertex_indices[fi]
         if len(verts) == 0:
             continue
-        np.add.at(val_sum, verts, neuron_values[fi])
-        np.maximum.at(val_max, verts, neuron_values[fi])
-        np.add.at(contact_count, verts, 1.0)
+        accumulate_vertex_values_into(
+            accum,
+            verts,
+            neuron_values[fi],
+            np.ones(len(verts), dtype=np.float64),
+        )
+
+    val_sum = accum.value_sum
+    val_max = accum.value_max
+    contact_count = accum.weight_sum
 
     contacted_mask = contact_count > 0
     if not contacted_mask.any():

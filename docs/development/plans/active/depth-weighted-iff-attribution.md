@@ -88,7 +88,7 @@ the viewer windows draw a different map from the one written to disk.
       their unweighted values.
 - [ ] Exactly **one** function in the codebase computes a per-vertex weighted mean; the other eight
       call sites delegate to it.
-- [ ] A characterization test pins each of the nine former call sites' output across the merge.
+- [x] A characterization test pins each of the nine former call sites' output across the merge.
 - [ ] `d_max == 0`, `sum(w) == 0`, and NaN depth each raise a typed error with file/frame/vertex
       context. No NaN reaches an output array.
 - [ ] `weight_sum` and `n_eff` are emitted per vertex and present in the saved artifacts.
@@ -254,29 +254,68 @@ weighting (saturating, thresholded) an addition rather than an edit.
 **Dependencies:** None.
 
 ### Phase 2: Merge the nine accumulators — no behaviour change
+**Started:** 2026-08-21
+**Completed:** 2026-08-21
+
 **Goal:** Exactly one function computes a per-vertex mean, pinned by tests, before any weighting
 exists.
 
-- [ ] 2.1 — Write characterization tests pinning current output for all nine sites on synthetic
+- [x] 2.1 — Write characterization tests pinning current output for all nine sites on synthetic
       fixtures. **This pinned output is the `alpha=0` baseline; the two tasks are the same task.**
-- [ ] 2.2 — Create `data/vertex_accumulator.py` with
+      Fixtures live in `tests/rf_accumulator_fixtures.py` (a plain module, not a conftest fixture)
+      so Phase 6's parity test imports the *same* arrays. `worked_example_touch()` is the plan's
+      7-vertex / 3-frame example and reproduces its table exactly: unweighted peak on v2 at 75.0 Hz,
+      v3 at 190/3. `WORKED_EXAMPLE_DEPTHS_MM` carries depths whose alpha=1 weights are the plan's
+      (v3 `0.42, 1.00, 0.50`; v6 `0.13, 0.13, 0.10`; v7 `0.92, 0.93, 0.95`), with a different
+      maximum depth per frame so a missing max-normalisation cannot hide.
+- [x] 2.2 — Create `data/vertex_accumulator.py` with
       `accumulate_vertex_values(vertex_idx, values, weights, n_vertices) -> AccumResult`
       (`value_sum`, `value_max`, `weight_sum`, `weight_sq_sum`). `weights` is **required**; callers
       pass explicit ones at this stage.
-- [ ] 2.3 — Redirect all nine call sites to it. Note four are in `touch_playback_explorer.py`
+      **Addition:** two further entry points onto the *same* reduction —
+      `empty_accumulator(n_vertices)` and `accumulate_vertex_values_into(result, ...)`. Sites 8 and
+      9 grow a running accumulator one frame at a time; reducing into a fresh array and adding the
+      result would stop being bit-identical the moment a frame repeats a vertex index
+      (`state + x + x` vs `state + (x + x)`), so in-place `np.add.at` is what preserves them.
+      `accumulate_vertex_values` is `empty_accumulator` + `accumulate_vertex_values_into`.
+- [x] 2.3 — Redirect all nine call sites to it. Note four are in `touch_playback_explorer.py`
       (`:308` replay-to-slider, `:549` replay-inclusive, `:602` incremental single-frame, `:959`
       export loop) and two are bincount-based rather than `np.add.at` — the helper must cover both
       shapes or the bincount sites keep a thin adapter.
-- [ ] 2.4 — Confirm every characterization test still passes, `np.array_equal`.
+      **Resolution:** no adapter was needed. `np.bincount(weights=...)` and `np.add.at` are both
+      sequential unbuffered float64 additions in array order; `TestReductionEquivalence` asserts
+      they agree with `np.array_equal` over a 200 000-point chain spanning eight orders of
+      magnitude, so all three bincount sites moved onto `np.add.at` with no tolerance introduced.
+      **Deviation:** three of the nine sites were Qt methods that drew while they computed and could
+      not be tested without a QApplication. Their numeric cores were lifted to module-level
+      functions *in the same module* — `compute_contact_point_heatmap`
+      (`touch_population_explorer`), `vertex_value_mean` (`rf_feature_space_explorer`, shared by
+      both of its sites), and `accumulate_touch_frame` / `replay_touch_frames` /
+      `mean_heatmap_scalars` (`touch_playback_explorer`, shared by all four of its sites). The Qt
+      methods are now delegations with no arithmetic left in them. The numerics were kept in their
+      own modules rather than moved to `data/` to hold the diff to the file set this phase declared.
+- [x] 2.4 — Confirm every characterization test still passes, `np.array_equal`.
 
 **Files Modified:**
 - `src/analysis/receptive_field_mapping/data/vertex_accumulator.py` — new
+- `src/analysis/receptive_field_mapping/data/__init__.py` — re-exports
 - `src/analysis/receptive_field_mapping/pipelines/rf_single_touch_pipeline.py` — `:83-85`
 - `src/analysis/receptive_field_mapping/data/rf_population_heatmap.py` — `:23-27`
 - `src/analysis/receptive_field_mapping/gui/touch_population_explorer.py` — `:635`
 - `src/analysis/receptive_field_mapping/gui/rf_feature_space_explorer.py` — `:545`, `:628`
 - `src/analysis/receptive_field_mapping/gui/touch_playback_explorer.py` — `:308`, `:549`, `:602`, `:959`
 - `tests/test_vertex_accumulator.py` — new
+- `tests/rf_accumulator_fixtures.py` — new
+
+**Known consequences of the merge (behaviour-neutral on outputs, but visible):**
+- `value_max` is now accumulated at all nine sites, not just the pipeline. Where values contain NaN
+  this emits numpy's `invalid value encountered in maximum` RuntimeWarning from call sites that were
+  previously silent. No output array changes; the warning was already emitted by
+  `_compute_touch_rf`.
+- `empty_accumulator` raises on `n_vertices <= 0`, where the previous code silently allocated
+  zero-length arrays. Consistent with the fail-fast rule; only reachable on a mesh with no vertices.
+- `TouchPopulationExplorer`'s unknown-heatmap-mode message is now raised by
+  `compute_contact_point_heatmap` and names that function instead of the class.
 
 **Dependencies:** None (can run parallel to Phase 1).
 

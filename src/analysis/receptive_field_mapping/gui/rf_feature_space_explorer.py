@@ -35,10 +35,42 @@ from PyQt5.QtWidgets import (
 from pyvistaqt import QtInteractor
 
 from analysis.receptive_field_mapping.data.rf_explorer_data import ExplorerData
+from analysis.receptive_field_mapping.data.vertex_accumulator import accumulate_vertex_values
 
 from analysis.pipeline.shared_constants import GESTURE_TYPES
 
+
 logger = logging.getLogger(__name__)
+
+
+def vertex_value_mean(
+    vertex_idx: np.ndarray,
+    values: np.ndarray,
+    n_verts: int,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Per-vertex mean of ``values`` over the given contact points.
+
+    Returns ``(mean, n_contacts)``. Vertices with no contact point get ``0.0``
+    in ``mean`` — the caller decides how to display them, and both call sites
+    overwrite them with NaN in a display copy.
+
+    Module-level and free of Qt so the numbers this window draws can be pinned
+    by a test without a running event loop. Every contact point carries weight
+    ``1.0``.
+    """
+    accum = accumulate_vertex_values(
+        vertex_idx,
+        values,
+        np.ones(len(vertex_idx), dtype=np.float64),
+        n_verts,
+    )
+    n_contacts = accum.weight_sum
+    mean = np.divide(
+        accum.value_sum, n_contacts,
+        out=np.zeros(n_verts), where=n_contacts > 0,
+    )
+    return mean, n_contacts
+
 
 _GESTURE_TYPES_WITH_UNKNOWN_WITH_UNKNOWN = (*GESTURE_TYPES, 'stroke_unknown')
 
@@ -541,19 +573,9 @@ class RFFeatureSpaceExplorer(QMainWindow):
 
         cp_spikes = self._data.spikes[self._data.cp_frame_idx]
         cp_iff = self._data.iff[self._data.cp_frame_idx]
-        weights = cp_iff if self._heatmap_mode == "iff" else cp_spikes.astype(float)
-        vertex_val_sum = np.bincount(
-            self._data.cp_vertex_idx,
-            weights=weights,
-            minlength=n_verts,
-        )
-        vertex_n_contacts = np.bincount(
-            self._data.cp_vertex_idx,
-            minlength=n_verts,
-        ).astype(float)
-        vertex_density = np.divide(
-            vertex_val_sum, vertex_n_contacts,
-            out=np.zeros(n_verts), where=vertex_n_contacts > 0,
+        values = cp_iff if self._heatmap_mode == "iff" else cp_spikes.astype(float)
+        vertex_density, vertex_n_contacts = vertex_value_mean(
+            self._data.cp_vertex_idx, values, n_verts
         )
 
         vertex_density_display = vertex_density.astype(float)
@@ -624,19 +646,9 @@ class RFFeatureSpaceExplorer(QMainWindow):
         cp_spikes = self._data.spikes[self._data.cp_frame_idx]
         cp_iff = self._data.iff[self._data.cp_frame_idx]
         active_cp_vertices = self._data.cp_vertex_idx[cp_mask]
-        weights = cp_iff[cp_mask] if self._heatmap_mode == "iff" else cp_spikes[cp_mask].astype(float)
-        vertex_val_sum = np.bincount(
-            active_cp_vertices,
-            weights=weights,
-            minlength=n_verts,
-        )
-        vertex_n_contacts = np.bincount(
-            active_cp_vertices,
-            minlength=n_verts,
-        ).astype(float)
-        vertex_ratio = np.divide(
-            vertex_val_sum, vertex_n_contacts,
-            out=np.zeros(n_verts), where=vertex_n_contacts > 0,
+        values = cp_iff[cp_mask] if self._heatmap_mode == "iff" else cp_spikes[cp_mask].astype(float)
+        vertex_ratio, vertex_n_contacts = vertex_value_mean(
+            active_cp_vertices, values, n_verts
         )
 
         vertex_ratio_display = vertex_ratio.copy()

@@ -4,6 +4,10 @@ import numpy as np
 from scipy.ndimage import label
 
 from analysis.pipeline.shared_constants import GESTURE_TYPES  # noqa: F401  re-exported for consumers
+from analysis.receptive_field_mapping.data.vertex_accumulator import (
+    accumulate_vertex_values_into,
+    empty_accumulator,
+)
 
 
 def compute_rf_heatmap(
@@ -12,16 +16,24 @@ def compute_rf_heatmap(
     rf_values: list[np.ndarray],
     n_verts: int,
 ) -> np.ndarray:
-    """Mean RF value per vertex across selected touches. NaN for uncontacted."""
-    result = np.zeros(n_verts, dtype=np.float64)
-    count = np.zeros(n_verts, dtype=np.int64)
+    """Mean RF value per vertex across selected touches. NaN for uncontacted.
+
+    Every touch contributes with weight ``1.0``. Cross-touch weighting (a
+    deeper touch outranking a shallower one) is deliberately not applied here:
+    the depth weighting is a *within-frame* redistribution of credit, and each
+    touch's RF value has already been reduced over its own frames.
+    """
+    accum = empty_accumulator(n_verts)
     for idx in touch_indices:
         verts = rf_vertex_indices[idx]
         vals = rf_values[idx]
         if len(verts) == 0:
             continue
-        np.add.at(result, verts, vals)
-        np.add.at(count, verts, 1)
+        accumulate_vertex_values_into(
+            accum, verts, vals, np.ones(len(verts), dtype=np.float64)
+        )
+    result = accum.value_sum
+    count = accum.weight_sum
     nonzero = count > 0
     result[nonzero] /= count[nonzero]
     result[~nonzero] = np.nan

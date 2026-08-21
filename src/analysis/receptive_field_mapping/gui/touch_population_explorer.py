@@ -41,8 +41,52 @@ from analysis.receptive_field_mapping.data.rf_population_heatmap import (
     compute_unique_touch_count,
 )
 from analysis.receptive_field_mapping.data.touch_population_data import PopulationData, PopulationRFData
+from analysis.receptive_field_mapping.data.vertex_accumulator import accumulate_vertex_values
 
 logger = logging.getLogger(__name__)
+
+
+def compute_contact_point_heatmap(
+    cp_vertex_idx: np.ndarray,
+    cp_iff: np.ndarray,
+    cp_spike: np.ndarray,
+    cp_mask: np.ndarray,
+    n_verts: int,
+    mode: str,
+) -> np.ndarray:
+    """Per-vertex heatmap over the masked contact points. NaN for uncontacted.
+
+    Module-level and free of Qt so the numbers this window draws can be pinned
+    by a test without a running event loop.
+
+    ``mode`` selects what is accumulated: ``"mean_iff"`` and ``"spike_density"``
+    divide by the per-vertex contact count, ``"cumulative_iff"`` does not.
+    Every contact point carries weight ``1.0``.
+    """
+    active_verts = cp_vertex_idx[cp_mask]
+    if mode == "mean_iff" or mode == "cumulative_iff":
+        values = cp_iff[cp_mask]
+    elif mode == "spike_density":
+        values = cp_spike[cp_mask].astype(float)
+    else:
+        raise ValueError(f"compute_contact_point_heatmap: unknown heatmap mode '{mode}'")
+
+    accum = accumulate_vertex_values(
+        active_verts,
+        values,
+        np.ones(len(active_verts), dtype=np.float64),
+        n_verts,
+    )
+    contact_count = accum.weight_sum
+
+    if mode == "cumulative_iff":
+        val = accum.value_sum
+    else:
+        val = accum.value_sum / np.maximum(contact_count, 1)
+
+    result = val.astype(float)
+    result[contact_count == 0] = np.nan
+    return result
 
 _GESTURE_COLORS = [
     "tab:blue",
@@ -633,28 +677,14 @@ class TouchPopulationExplorer(QMainWindow):
             self._update_threshold_range(n_total)
 
     def _compute_heatmap(self, cp_mask: np.ndarray, n_verts: int) -> np.ndarray:
-        active_verts = self._data.cp_vertex_idx[cp_mask]
-        contact_count = np.bincount(active_verts, minlength=n_verts).astype(float)
-
-        mode = self._heatmap_mode
-        if mode == "mean_iff":
-            val = (
-                np.bincount(active_verts, weights=self._data.cp_iff[cp_mask], minlength=n_verts)
-                / np.maximum(contact_count, 1)
-            )
-        elif mode == "cumulative_iff":
-            val = np.bincount(active_verts, weights=self._data.cp_iff[cp_mask], minlength=n_verts)
-        elif mode == "spike_density":
-            val = (
-                np.bincount(active_verts, weights=self._data.cp_spike[cp_mask].astype(float), minlength=n_verts)
-                / np.maximum(contact_count, 1)
-            )
-        else:
-            raise ValueError(f"TouchPopulationExplorer: unknown heatmap mode '{mode}'")
-
-        result = val.astype(float)
-        result[contact_count == 0] = np.nan
-        return result
+        return compute_contact_point_heatmap(
+            self._data.cp_vertex_idx,
+            self._data.cp_iff,
+            self._data.cp_spike,
+            cp_mask,
+            n_verts,
+            self._heatmap_mode,
+        )
 
     def _compute_rf_heatmap(self, touch_indices: list, n_verts: int) -> np.ndarray:
         """Compute mean RF heatmap across *touch_indices* using pre-loaded RF maps."""

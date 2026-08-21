@@ -40,8 +40,69 @@ from PyQt5.QtWidgets import (
 from pyvistaqt import QtInteractor
 
 from analysis.receptive_field_mapping.data.touch_playback_data import PlaybackData, TouchEvent
+from analysis.receptive_field_mapping.data.vertex_accumulator import (
+    AccumResult,
+    accumulate_vertex_values_into,
+    empty_accumulator,
+)
 
 logger = logging.getLogger(__name__)
+
+
+# ----------------------------------------------------------------------
+# Heatmap accumulation — module-level and free of Qt, so the numbers this
+# window draws can be pinned by a test without a running event loop.
+#
+# The window keeps one accumulator per displayed channel (IFF and spike).
+# Both are fed the same contact points with the same weights, so their
+# ``weight_sum`` arrays are identical and either one is *the* per-vertex
+# contact count; ``iff_accum.weight_sum`` is used throughout.
+# ----------------------------------------------------------------------
+
+def accumulate_touch_frame(
+    iff_accum: AccumResult,
+    spike_accum: AccumResult,
+    touch: TouchEvent,
+    frame_idx: int,
+) -> None:
+    """Credit frame ``frame_idx``'s IFF and spike value to every vertex it touched.
+
+    The frame's neuron value is a single scalar broadcast across the frame's
+    contact points, and every point carries weight ``1.0`` — the frame is
+    credited in full to each contacted vertex regardless of how deeply the
+    skin was indented there.
+    """
+    verts = touch.frame_vertex_indices[frame_idx]
+    weights = np.ones(len(verts), dtype=np.float64)
+    accumulate_vertex_values_into(
+        iff_accum, verts, float(touch.frame_iff[frame_idx]), weights
+    )
+    accumulate_vertex_values_into(
+        spike_accum, verts, float(touch.frame_spikes[frame_idx]), weights
+    )
+
+
+def replay_touch_frames(
+    touch: TouchEvent, n_frames: int, n_verts: int
+) -> Tuple[AccumResult, AccumResult]:
+    """Fresh ``(iff_accum, spike_accum)`` holding frames ``[0, n_frames)`` of *touch*."""
+    iff_accum = empty_accumulator(n_verts)
+    spike_accum = empty_accumulator(n_verts)
+    for fi in range(n_frames):
+        accumulate_touch_frame(iff_accum, spike_accum, touch, fi)
+    return iff_accum, spike_accum
+
+
+def mean_heatmap_scalars(
+    value_sum: np.ndarray, contact_count: np.ndarray
+) -> np.ndarray:
+    """Per-vertex mean; NaN where the vertex has not been contacted yet."""
+    has_contact = contact_count > 0
+    return np.where(
+        has_contact,
+        value_sum / np.where(has_contact, contact_count, 1.0),
+        np.nan,
+    )
 
 
 class TouchPlaybackExplorer(QMainWindow):
@@ -86,9 +147,8 @@ class TouchPlaybackExplorer(QMainWindow):
 
         # Running spike + IFF accumulators — reset in _load_touch().
         n_verts = len(self._data.session_data.forearm_vertices)
-        self._spike_sum = np.zeros(n_verts, dtype=np.float64)
-        self._iff_sum = np.zeros(n_verts, dtype=np.float64)
-        self._contact_count = np.zeros(n_verts, dtype=np.float64)
+        self._iff_accum = empty_accumulator(n_verts)
+        self._spike_accum = empty_accumulator(n_verts)
 
         # Heatmap mode: "spike" or "iff" (default).
         self._heatmap_mode: str = "iff"
@@ -296,18 +356,12 @@ class TouchPlaybackExplorer(QMainWindow):
             return
         self._stop()
         n_verts = len(self._data.session_data.forearm_vertices)
-        self._spike_sum = np.zeros(n_verts, dtype=np.float64)
-        self._iff_sum = np.zeros(n_verts, dtype=np.float64)
-        self._contact_count = np.zeros(n_verts, dtype=np.float64)
         self._reset_heatmap()
         # Replay accumulation for preceding frames so the heatmap
         # is persistent, matching Play-mode behaviour.
-        touch = self._current_touch
-        for fi in range(value):
-            verts = touch.frame_vertex_indices[fi]
-            np.add.at(self._spike_sum, verts, float(touch.frame_spikes[fi]))
-            np.add.at(self._iff_sum, verts, float(touch.frame_iff[fi]))
-            np.add.at(self._contact_count, verts, 1.0)
+        self._iff_accum, self._spike_accum = replay_touch_frames(
+            self._current_touch, value, n_verts
+        )
         self._render_frame(value)
 
     def _on_session_changed(self, index: int) -> None:
@@ -399,9 +453,8 @@ class TouchPlaybackExplorer(QMainWindow):
 
         # Reset running spike + IFF accumulators.
         n_verts = len(self._data.session_data.forearm_vertices)
-        self._spike_sum = np.zeros(n_verts, dtype=np.float64)
-        self._iff_sum = np.zeros(n_verts, dtype=np.float64)
-        self._contact_count = np.zeros(n_verts, dtype=np.float64)
+        self._iff_accum = empty_accumulator(n_verts)
+        self._spike_accum = empty_accumulator(n_verts)
 
     def _render_forearm(self) -> None:
         """Render the forearm point cloud on both plotters.
@@ -496,19 +549,10 @@ class TouchPlaybackExplorer(QMainWindow):
         """Write the active heatmap mode's mean values into the right-panel mesh."""
         if self._forearm_cloud_right is None:
             return
-        has_contact = self._contact_count > 0
-        if self._heatmap_mode == "iff":
-            scalars = np.where(
-                has_contact,
-                self._iff_sum / np.where(has_contact, self._contact_count, 1.0),
-                np.nan,
-            )
-        else:
-            scalars = np.where(
-                has_contact,
-                self._spike_sum / np.where(has_contact, self._contact_count, 1.0),
-                np.nan,
-            )
+        channel = (
+            self._iff_accum if self._heatmap_mode == "iff" else self._spike_accum
+        )
+        scalars = mean_heatmap_scalars(channel.value_sum, self._iff_accum.weight_sum)
         self._forearm_cloud_right["heatmap"] = scalars
         self._forearm_cloud_right.Modified()
 
@@ -538,17 +582,11 @@ class TouchPlaybackExplorer(QMainWindow):
         if self._current_touch is None:
             return
         n_verts = len(self._data.session_data.forearm_vertices)
-        self._spike_sum = np.zeros(n_verts, dtype=np.float64)
-        self._iff_sum = np.zeros(n_verts, dtype=np.float64)
-        self._contact_count = np.zeros(n_verts, dtype=np.float64)
 
-        # Vectorised replay: accumulate all frames from 0 to current_frame (inclusive).
-        touch = self._current_touch
-        for fi in range(self._current_frame + 1):
-            verts = touch.frame_vertex_indices[fi]
-            np.add.at(self._spike_sum, verts, float(touch.frame_spikes[fi]))
-            np.add.at(self._iff_sum, verts, float(touch.frame_iff[fi]))
-            np.add.at(self._contact_count, verts, 1.0)
+        # Replay: accumulate all frames from 0 to current_frame (inclusive).
+        self._iff_accum, self._spike_accum = replay_touch_frames(
+            self._current_touch, self._current_frame + 1, n_verts
+        )
 
         self._update_heatmap_scalars()
         self._plotter_right.render()
@@ -595,13 +633,10 @@ class TouchPlaybackExplorer(QMainWindow):
                 name="contacts",
             )
 
-        # ---- Right view: accumulate spike + IFF heatmap ----
-        verts_this_frame = self._current_touch.frame_vertex_indices[frame_idx]
-        spike_this_frame = float(self._current_touch.frame_spikes[frame_idx])
-        iff_this_frame = float(self._current_touch.frame_iff[frame_idx])
-        np.add.at(self._spike_sum, verts_this_frame, spike_this_frame)
-        np.add.at(self._iff_sum, verts_this_frame, iff_this_frame)
-        np.add.at(self._contact_count, verts_this_frame, 1.0)
+        # ---- Right view: accumulate spike + IFF heatmap (incremental, O(K)) ----
+        accumulate_touch_frame(
+            self._iff_accum, self._spike_accum, self._current_touch, frame_idx
+        )
 
         self._update_heatmap_scalars()
 
@@ -923,17 +958,13 @@ class TouchPlaybackExplorer(QMainWindow):
             copy_mesh=False,
         )
 
-        spike_sum = np.zeros(n_verts, dtype=np.float64)
-        iff_sum = np.zeros(n_verts, dtype=np.float64)
-        contact_count = np.zeros(n_verts, dtype=np.float64)
         frame_counter = 0
         cancelled = False
 
         try:
             for touch in touches:
-                spike_sum[:] = 0.0
-                iff_sum[:] = 0.0
-                contact_count[:] = 0.0
+                iff_accum = empty_accumulator(n_verts)
+                spike_accum = empty_accumulator(n_verts)
                 cloud_right["heatmap"] = np.full(n_verts, np.nan, dtype=np.float64)
 
                 n_frames = len(touch.frame_spikes)
@@ -955,24 +986,12 @@ class TouchPlaybackExplorer(QMainWindow):
                         pl_left.add_mesh(empty, color="red", point_size=1, name="contacts")
 
                     # Right: accumulate heatmap.
-                    verts_fi = touch.frame_vertex_indices[fi]
-                    np.add.at(spike_sum, verts_fi, float(touch.frame_spikes[fi]))
-                    np.add.at(iff_sum, verts_fi, float(touch.frame_iff[fi]))
-                    np.add.at(contact_count, verts_fi, 1.0)
+                    accumulate_touch_frame(iff_accum, spike_accum, touch, fi)
 
-                    has_contact = contact_count > 0
-                    if self._heatmap_mode == "iff":
-                        scalars = np.where(
-                            has_contact,
-                            iff_sum / np.where(has_contact, contact_count, 1.0),
-                            np.nan,
-                        )
-                    else:
-                        scalars = np.where(
-                            has_contact,
-                            spike_sum / np.where(has_contact, contact_count, 1.0),
-                            np.nan,
-                        )
+                    channel = iff_accum if self._heatmap_mode == "iff" else spike_accum
+                    scalars = mean_heatmap_scalars(
+                        channel.value_sum, iff_accum.weight_sum
+                    )
                     cloud_right["heatmap"] = scalars
                     cloud_right.Modified()
 
