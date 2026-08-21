@@ -198,23 +198,48 @@ class _BlockVertexSource:
         A frame absent from the sidecar has zero rows, which means *no contact in
         that frame* — legal, and it must then have zero parsed points too.
 
-        Three further things are asserted here, at the loader boundary, because this
+        Two further things are asserted here, at the loader boundary, because this
         is the last place where the file, the frame and the vertex are all still in
         hand:
 
         * every ``vertex_id`` lies inside the reference forearm;
-        * ``(frame_index, vertex_id)`` is **unique** within the frame. The producer's
-          contract permits duplicates and this consumer does not: duplicates are
-          harmless today only because they double numerator and denominator equally,
-          a cancellation that holds while every weight is 1 and stops holding the
-          moment depth weighting is switched on. **Assert, do not reduce** — quietly
-          collapsing rows would pick a survivor (deepest? first?) that nothing here
-          is entitled to choose on the producer's behalf;
         * no depth is ``NaN``. Zero is *not* absent — a grazing contact is a real
           measurement of 0.0 mm — and a *missing row* is already impossible by
           construction because the per-frame count assertion above has run, so NaN is
           the only remaining form of absence and it raises rather than turning into a
           zero weight indistinguishable from a grazing touch.
+
+        **A repeated ``vertex_id`` within one frame is legal and is passed through
+        unchanged.** The producer's contract permits it and the mechanism is benign:
+        the XY dedup runs in ``blocks_deduped`` *before* ``vertex_id`` is assigned in
+        ``blocks_projected``, so it guarantees distinct positions, not distinct
+        vertices — two points further apart than ``dedup_epsilon`` can still snap to
+        the same vertex where the mesh is coarser than epsilon. Both rows are returned
+        and the accumulator's ``np.add.at`` sums them::
+
+            numerator   += IFF_f * w1 + IFF_f * w2  ==  IFF_f * (w1 + w2)
+            denominator += w1 + w2
+
+        A frame's IFF is one **scalar**, shared by every contact point of that frame,
+        so it factors out for *any* weights: the vertex is credited with ``IFF_f`` at
+        weight ``w1 + w2``, and its weighted mean is exactly what a single row of
+        weight ``w1 + w2`` would have produced. An earlier version of this loader
+        raised here, on the stated premise that the cancellation held "only while
+        every depth weight is 1"; that premise was false — the algebra above never
+        depended on the weights — and the check was removed rather than softened.
+
+        The consequence, which is intended: such a vertex carries **more than unit
+        weight** for that frame. The weighting deliberately does not normalise per
+        frame, so a frame's total weight already scales with how much of the patch it
+        covers, and a vertex that caught two contact points genuinely had more finger
+        on it. Note this is a statement about the *mean* only — the Kish ``n_eff``
+        computed downstream does distinguish the two forms, because two rows are two
+        contributions.
+
+        Nothing is deduplicated, averaged, or collapsed deepest-wins here: each
+        sidecar row is one contact point that landed on that vertex, and picking a
+        survivor is a decision this loader is not entitled to make on the producer's
+        behalf.
         """
         positions = self._rows_by_frame.get(int(frame_index))
         n_rows = 0 if positions is None else int(len(positions))
@@ -247,21 +272,6 @@ class _BlockVertexSource:
                 f"vertices."
             )
 
-        unique_ids, counts = np.unique(vertex_ids, return_counts=True)
-        if len(unique_ids) != len(vertex_ids):
-            repeated = unique_ids[counts > 1]
-            raise ValueError(
-                f"_BlockVertexSource: duplicate ({_FRAME_INDEX_COL}, "
-                f"{VERTEX_ID_COLUMN}) pair(s) in frame_index={int(frame_index)}: "
-                f"{VERTEX_ID_COLUMN}(s) {repeated.tolist()} occur "
-                f"{counts[counts > 1].tolist()} times among {len(vertex_ids)} row(s). "
-                f"Sidecar: {self.sidecar_path}. Block CSV: {self.source_block_file}. "
-                f"This is asserted, never reduced: duplicates cancel between "
-                f"numerator and denominator only while every depth weight is 1, and "
-                f"choosing a survivor (deepest? first?) is a decision this loader is "
-                f"not entitled to make on the producer's behalf."
-            )
-
         nan_mask = np.isnan(depths)
         if nan_mask.any():
             bad_positions = np.flatnonzero(nan_mask)
@@ -277,6 +287,12 @@ class _BlockVertexSource:
                 f"zero weight downstream. There is no fallback value."
             )
 
+        # Returned in file order, one element per contact point, duplicates included.
+        # A ``vertex_id`` appearing twice here means two contact points of this frame
+        # landed on the same vertex; downstream that vertex is credited with this
+        # frame's IFF at the *summed* weight ``w1 + w2`` (which may exceed 1), because
+        # the frame's IFF is a scalar and factors out of both numerator and
+        # denominator. See this method's docstring: transport, never reduction.
         return _FrameRows(vertex_ids=vertex_ids, signed_depth_mm=depths)
 
 

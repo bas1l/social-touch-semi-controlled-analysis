@@ -169,9 +169,9 @@ NAN_AND_DUPLICATE_N_VERTICES = 8
 # Signed depths (negative = penetrating) aligned element-for-element with each
 # frame's vertex list above, including the empty frame and the duplicated
 # vertex. The duplicate is kept: the reduction must go on handling it
-# bit-identically. The *loader* refuses to produce one (a duplicate
-# ``(frame_index, vertex_id)`` raises there), which is a statement about what
-# may enter the pipeline, not about what this reduction must survive.
+# bit-identically. The loader produces duplicates too — two contact points of one
+# frame can land on the same vertex, and both rows are carried through — so this
+# is a shape the pipeline really sees, not only one the reduction must survive.
 NAN_AND_DUPLICATE_SIGNED_DEPTHS_MM = [
     np.array([], dtype=np.float64),
     np.array([-1.5, -2.25, -0.75, -3.0], dtype=np.float64),

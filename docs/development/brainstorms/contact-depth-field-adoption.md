@@ -246,13 +246,37 @@ Know this before interpreting any change in the result.
      `vertex_id` is assigned in `blocks_projected/`. Dedup guarantees distinct positions, not distinct
      vertices — two points further apart than `dedup_epsilon` can still snap to the same vertex when
      the mesh is coarser than epsilon. More likely on low-vertex sessions (ST18-01: 1,094).
-   - **Resolution: assert, don't reduce.** Check uniqueness per frame where weights are built and
-     raise on violation. Costs nothing if the design guarantee holds; loud failure if it doesn't.
+   - **Resolution as taken (2026-08-21): assert, don't reduce.** Check uniqueness per frame where
+     weights are built and raise on violation. Costs nothing if the design guarantee holds; loud
+     failure if it doesn't.
    - Settleable empirically: count `(frame_index, vertex_id)` pairs vs unique ones over one session's
      sidecars. Reads parquet only.
-   - **Note this is currently invisible:** duplicates cancel today because they double both numerator
-     and denominator. That cancellation only works while the weight is 1. Depth weighting makes a
-     currently-harmless case load-bearing.
+   - **The premise for that resolution, as written at the time:** duplicates cancel today because
+     they double both numerator and denominator. That cancellation only works while the weight is 1.
+     Depth weighting makes a currently-harmless case load-bearing.
+   - **Correction — the premise above is false, and the assertion has been removed.** It fired on
+     real data (2022-06-15_ST14-02, block-order-01, `frame_index` 163, `vertex_id` 6254 twice among
+     156 rows), and the algebra does not support it. IFF is a per-frame **scalar**, shared by every
+     contact point of that frame, so for a vertex hit twice at weights `w1`, `w2`:
+
+     ```
+     numerator   += IFF_f * w1 + IFF_f * w2  ==  IFF_f * (w1 + w2)
+     denominator += w1 + w2
+     ```
+
+     `IFF_f` factors out for **any** weights. The cancellation never depended on the weights being 1,
+     so depth weighting never made the case load-bearing. The empirical question (does it happen?)
+     was answered yes; the mechanism is the benign one named above.
+   - **What replaced it:** nothing. The duplicate rows flow through and the accumulator sums them,
+     which is what `np.add.at` already does. This is not a reduction — no survivor is chosen, no
+     measurement discarded — so no dedup, no "take the deeper", no averaging was added either; those
+     would decide on the producer's behalf. Consequence, and intended: such a vertex carries weight
+     `w1 + w2`, which can exceed 1, for that frame. That is consistent with the design — the
+     weighting deliberately does not normalise per frame, so a frame's total weight already scales
+     with how much of the patch it covers, and a vertex that caught two contact points genuinely had
+     more finger on it. The per-vertex weighted **mean** is identical to that of a single row of
+     weight `w1 + w2`; the Kish `n_eff` is not, and is entitled to differ — two rows are two
+     contributions.
 4. **Grazing contacts** — `penetration_mm` returns small negatives for them (legal data, not errors,
    per the contract). They would subtract from `contact_count` and can flip its sign. Clamp at the
    seam. Wrinkle: at `alpha = 0` grazing vertices must keep weight 1, or `alpha = 0` no longer
@@ -396,6 +420,11 @@ no tuning knob deciding the peak, and the numbers stay honest Hz.
   policy, never a NaN flowing into the map.
 - **NaN depth** rejected at the loader boundary, where "zero" and "absent" are still separable.
   At alpha > 0 both collapse to w = 0.
+- **Not a guard: duplicate `(frame_index, vertex_id)`.** Section 7 item 3 put "assert, don't reduce"
+  on this list. It was implemented, it fired on real data, and it was then **removed** — see the
+  correction in section 7 item 3. The premise (that the numerator/denominator cancellation held only
+  while every weight was 1) did not survive contact with the algebra: IFF is a per-frame scalar and
+  factors out at any weights. The duplicate rows are summed; the three guards above are untouched.
 
 ### Scope decision
 The averaging maths exists in **9 places** (pipeline, `rf_population_heatmap.py`, and 7 copies

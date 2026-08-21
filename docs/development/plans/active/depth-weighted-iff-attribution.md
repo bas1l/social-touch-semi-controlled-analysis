@@ -268,10 +268,21 @@ away without removing the coupling.
    the nerve rate (`:481-483`) while IFF is never averaged down, so each Kinect frame is credited
    about 33 times, weighted by how long it was held. Depth weights multiply on top of this. Not
    introduced here, but it must be known before interpreting any change in the result.
-4. **Duplicate `(frame_index, vertex_id)` pairs.** The contract says possible; the design says not.
-   Duplicates are currently harmless because they double numerator and denominator equally — a
-   cancellation that only holds while the weight is 1. **Assert, do not reduce**: check uniqueness
-   per frame where weights are built and raise on violation.
+4. **Duplicate `(frame_index, vertex_id)` pairs — struck; this was never a hazard.** As originally
+   written: "The contract says possible; the design says not. Duplicates are currently harmless
+   because they double numerator and denominator equally — a cancellation that only holds while the
+   weight is 1. **Assert, do not reduce**: check uniqueness per frame where weights are built and
+   raise on violation." That was implemented (task 3.3), it fired on real data
+   (2022-06-15_ST14-02, block-order-01, `frame_index` 163, `vertex_id` 6254 twice among 156 rows),
+   and its premise is **false**. IFF is a per-frame *scalar* shared by every contact point of the
+   frame, so a vertex hit at weights `w1`, `w2` gains `IFF_f*w1 + IFF_f*w2 == IFF_f*(w1+w2)` in the
+   numerator and `w1+w2` in the denominator: `IFF_f` factors out at **any** weights. The check was
+   removed, and nothing replaced it — the rows are summed by `np.add.at`, which is transport rather
+   than reduction. The duplicates arise benignly: XY dedup runs in `blocks_deduped`, before
+   `vertex_id` is assigned in `blocks_projected`, so it guarantees distinct positions, not distinct
+   vertices. Consequence, and intended: such a vertex carries weight `w1 + w2 > 1` for that frame,
+   consistent with the deliberate absence of per-frame normalisation. The weighted **mean** equals
+   that of one row of weight `w1 + w2`; `n_eff` does not, and is entitled to differ.
 5. **`_CACHE_SCHEMA_VERSION` mismatch currently returns `None` and silently recomputes**
    (`:235`). Do not extend that pattern to the depth path. Bump the version **and** extend
    `required_keys` in the same change, or a stale cache passes the version check while lacking
@@ -545,9 +556,17 @@ storage and validation.
       same loop.
 - [x] 3.2 — Read `signed_depth_mm` off the rows already located in 2.5.5. There is no second join
       and no `.get(vertex_id, ...)` anywhere.
-- [x] 3.3 — Assert `(frame_index, vertex_id)` uniqueness per frame and raise on violation
+- [~] 3.3 — ~~Assert `(frame_index, vertex_id)` uniqueness per frame and raise on violation
       (hazard 4). **Assert, do not reduce** — the cancellation that makes duplicates harmless today
-      only holds while every weight is 1.
+      only holds while every weight is 1.~~ **Implemented, then reverted.** The assertion blocked
+      real runs, and its premise was wrong: IFF is a per-frame scalar, so it factors out of both
+      numerator and denominator at *any* weights, not only at 1 (hazard 4, struck). The check was
+      deleted; the duplicate rows are summed by the accumulator, and nothing lenient replaced it.
+      The other loader guards — per-frame count agreement, `vertex_id` bounds, NaN depth — are
+      untouched. The arithmetic claim that replaced the raise is pinned with hand-computed numbers
+      in `tests/test_vertex_weights.py::TestADuplicatedVertexIsCreditedAtTheSummedWeight`, and the
+      transport claim in
+      `tests/test_touch_playback_depth.py::TestDuplicateFrameVertexPairsAreCarried`.
 - [x] 3.4 — Store depth **per contact-frame**, not per dedup group. Hazard 1 is unchanged by the
       corrected join and is still the most dangerous item in this plan: two frames with identical
       `contact_points` text can carry different depths, and `_save_playback_cache` dedups groups by
@@ -607,7 +626,8 @@ storage and validation.
 
 **Files Modified:**
 - `src/analysis/receptive_field_mapping/data/touch_playback_data.py` — `_FrameRows`,
-  `_BlockVertexSource.rows_for_frame` (uniqueness + NaN assertions), `TouchEvent.frame_depths`,
+  `_BlockVertexSource.rows_for_frame` (bounds + NaN assertions; the uniqueness assertion was
+  later removed — hazard 4, struck), `TouchEvent.frame_depths`,
   cache v4 to v5 with per-contact-frame depth storage and its shape checks
 - `src/analysis/receptive_field_mapping/data/contact_depth_field_io.py` — `SIGNED_DEPTH_COLUMN`
 - `src/analysis/receptive_field_mapping/data/__init__.py` — re-export
@@ -1041,6 +1061,12 @@ storage and validation.
 - [x] Accumulator: hand-computed weighted mean, not a self-comparison — a wrong weighting still
       returns a plausible Hz value.
 - [x] Accumulator: `sum(w) == 0` for a vertex raises.
+- [x] A vertex hit **twice in one frame** is credited with that frame's IFF at the summed weight
+      `w1 + w2` (above 1, and that is intended), and its weighted mean is *identical* to that of a
+      single row of weight `w1 + w2` — hand-computed at `alpha = 1`, with the collapsed reference
+      built by handing the accumulator explicit weights rather than by re-running the estimator.
+      The Kish `n_eff` deliberately does **not** match the collapsed form; the equivalence is a
+      statement about the mean only.
 - [x] `n_eff`: flat weights give `n_eff` approximately `N`; one dominant frame gives `n_eff`
       approximately 1.
 
@@ -1085,7 +1111,12 @@ storage and validation.
 - [x] A vertex contacted in exactly one frame gives a value identical to today, any alpha (the
       weight cancels).
 - [x] All-identical depths across a patch gives weights all 1.0 and output identical to today.
-- [x] Duplicate `(frame_index, vertex_id)` in a frame raises (assert, do not reduce).
+- [x] Duplicate `(frame_index, vertex_id)` in a frame is **carried through, not rejected and not
+      reduced**: both rows keep their own depth, the vertex is credited with the frame's IFF at the
+      summed weight `w1 + w2` (which may exceed 1), and its weighted mean is identical to that of a
+      single row of weight `w1 + w2` — hand-computed, at `alpha = 1`, in
+      `TestADuplicatedVertexIsCreditedAtTheSummedWeight`. Supersedes the original item, "raises
+      (assert, do not reduce)", whose premise was false (hazard 4, struck).
 - [ ] A frame whose parsed contact-point count differs from its sidecar row count raises with the
       parquet path, the `frame_index`, and both counts (2.5.6).
 - [ ] A malformed contact-point triplet raises in `parse_contact_points` rather than being dropped
