@@ -345,7 +345,9 @@ class TestSites6And7PlaybackReplay:
     def test_all_bounds_match_pre_merge(self, name, make_touch, n_verts):
         touch = make_touch()
         for n_frames in range(len(touch.frame_iff) + 1):
-            iff_accum, spike_accum = replay_touch_frames(touch, n_frames, n_verts)
+            iff_accum, spike_accum = replay_touch_frames(
+                touch, n_frames, n_verts, 0.0
+            )
             want_spike, want_iff, want_count = _legacy_replay(touch, n_frames, n_verts)
             _assert_exactly_equal(f"{name}[{n_frames}] iff_sum", iff_accum.value_sum, want_iff)
             _assert_exactly_equal(f"{name}[{n_frames}] spike_sum", spike_accum.value_sum, want_spike)
@@ -375,7 +377,7 @@ class TestSite8PlaybackIncrementalFrame:
         contact_count = np.zeros(n_verts, dtype=np.float64)
 
         for fi in range(len(touch.frame_iff)):
-            accumulate_touch_frame(iff_accum, spike_accum, touch, fi)
+            accumulate_touch_frame(iff_accum, spike_accum, touch, fi, 0.0)
             _legacy_accumulate_frame(spike_sum, iff_sum, contact_count, touch, fi)
             _assert_exactly_equal(f"{name} after frame {fi} iff", iff_accum.value_sum, iff_sum)
             _assert_exactly_equal(f"{name} after frame {fi} spike", spike_accum.value_sum, spike_sum)
@@ -394,8 +396,8 @@ class TestSite8PlaybackIncrementalFrame:
         iff_accum = empty_accumulator(n_verts)
         spike_accum = empty_accumulator(n_verts)
         for fi in range(n_frames):
-            accumulate_touch_frame(iff_accum, spike_accum, touch, fi)
-        replay_iff, replay_spike = replay_touch_frames(touch, n_frames, n_verts)
+            accumulate_touch_frame(iff_accum, spike_accum, touch, fi, 0.0)
+        replay_iff, replay_spike = replay_touch_frames(touch, n_frames, n_verts, 0.0)
         _assert_exactly_equal(f"{name} iff", iff_accum.value_sum, replay_iff.value_sum)
         _assert_exactly_equal(f"{name} spike", spike_accum.value_sum, replay_spike.value_sum)
 
@@ -417,7 +419,7 @@ class TestSite9PlaybackExportLoop:
         contact_count = np.zeros(n_verts, dtype=np.float64)
 
         for fi in range(len(touch.frame_iff)):
-            accumulate_touch_frame(iff_accum, spike_accum, touch, fi)
+            accumulate_touch_frame(iff_accum, spike_accum, touch, fi, 0.0)
             _legacy_accumulate_frame(spike_sum, iff_sum, contact_count, touch, fi)
             _assert_exactly_equal(
                 f"{name} frame {fi} iff scalars",

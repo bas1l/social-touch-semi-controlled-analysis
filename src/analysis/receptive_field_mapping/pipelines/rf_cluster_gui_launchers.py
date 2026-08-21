@@ -128,6 +128,8 @@ def launch_feature_space_explorer(
 def launch_touch_playback_explorer(
     input_items: List[Tuple[Path, Path]],
     contact_depth_field: Optional[dict] = None,
+    *,
+    depth_weight_alpha: float,
 ) -> None:
     """Launch the Touch Playback Explorer GUI for all sessions in input_items.
 
@@ -147,6 +149,13 @@ def launch_touch_playback_explorer(
         contact-depth-field parquet sidecars and the stem suffix that stage uses.
         Required: each contact point's vertex identity is read off those sidecars,
         so the viewer draws the same assignment the pipeline writes to disk.
+    depth_weight_alpha:
+        Depth-weighting exponent for the window's heatmap, **keyword-only and
+        required**.  The viewer applies the same per-contact-point weighting the
+        ``spatial_map_single_touch`` stage applies, so that the map on screen and
+        the map in ``single_touch_rf_maps_mean.npz`` are the same quantity.  There
+        is no default at any level: an un-threaded alpha is a ``TypeError`` here,
+        not a window quietly drawing the unweighted map.
     """
     from analysis.receptive_field_mapping.data.touch_playback_data import load_playback_data
     from analysis.receptive_field_mapping.pipelines.rf_single_touch_pipeline import (
@@ -192,6 +201,7 @@ def launch_touch_playback_explorer(
     viewer = TouchPlaybackExplorer(
         playback_data=first_data,
         sessions=sessions,
+        depth_weight_alpha=depth_weight_alpha,
     )
     viewer.show()
     app.exec_()

@@ -31,6 +31,31 @@ from analysis.pipeline import (
 )
 
 
+def _required_option(dag_handler: DagConfigHandler, task_name: str, key: str):
+    """Return ``tasks.<task_name>.options.<key>`` or raise naming both.
+
+    ``DagConfigHandler.get_task_options`` returns ``{}`` for an unknown task, so
+    ``.get(key)`` would turn a deleted config key into ``None`` — and a parameter
+    with no default anywhere in its call chain must never become ``None``: the run
+    would die much later with a ``TypeError`` that does not name the config key.
+
+    This is a deliberate second copy of the closure of the same name in
+    ``scripts/analysis_workflow_processing.py``. The two entry points share no
+    module by design ("no dependency on analysis_workflow_processing.py", line 3),
+    and ``DagConfigHandler`` is vendored, so the alternatives were importing one
+    script into the other or editing vendored code. Six lines duplicated is the
+    cheaper of the three.
+    """
+    options = dag_handler.get_task_options(task_name)
+    if key not in options:
+        raise ValueError(
+            f"Config is missing required option 'tasks.{task_name}.options.{key}'. "
+            f"Present options: {sorted(options)}. There is no default for this "
+            f"value at any level of the call chain."
+        )
+    return options[key]
+
+
 @flow(name="explore_precompute_caches")
 def explore_precompute_caches_flow(
     input_items: List[Tuple[Path, Path]],
@@ -76,6 +101,8 @@ def explore_touch_playback_flow(
     input_items: List[Tuple[Path, Path]],
     force_processing: bool = False,
     contact_depth_field: Optional[dict] = None,
+    *,
+    depth_weight_alpha: float,
 ) -> None:
     """
     Launch the Touch Playback Explorer GUI for the given sessions.
@@ -83,12 +110,23 @@ def explore_touch_playback_flow(
     dependency on RF clustering or visualization.
     ``force_processing`` is accepted for interface consistency but is a no-op:
     the GUI is stateless and always launches fresh.
+
+    ``depth_weight_alpha`` is **keyword-only and required**, exactly as in
+    ``spatial_map_single_touch_flow``: the viewer applies the same depth weighting
+    the pipeline applies, so the heatmap on screen and the saved
+    ``single_touch_rf_maps_mean.npz`` are the same quantity. Keep the viewers DAG
+    value in step with the processing DAG value — they are two configs describing
+    one number, and neither has a default.
     """
     print(f"[Batch Analysis] Launching Touch Playback Explorer for {len(input_items)} item(s)...")
     if not input_items:
         return
 
-    launch_touch_playback_explorer(input_items, contact_depth_field=contact_depth_field)
+    launch_touch_playback_explorer(
+        input_items,
+        contact_depth_field=contact_depth_field,
+        depth_weight_alpha=depth_weight_alpha,
+    )
 
 
 @flow(name="explore_touch_population")
@@ -347,6 +385,11 @@ def main():
                 "contact_depth_field": dag_handler.get_task_options(
                     "explore_touch_playback"
                 ).get("contact_depth_field"),
+                "depth_weight_alpha": float(
+                    _required_option(
+                        dag_handler, "explore_touch_playback", "depth_weight_alpha"
+                    )
+                ),
             },
         },
         {

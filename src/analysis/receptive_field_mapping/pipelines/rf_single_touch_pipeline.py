@@ -27,14 +27,14 @@ from typing import List, NamedTuple, Optional, Tuple
 import numpy as np
 
 from analysis.receptive_field_mapping.data.rf_data_loader import resolve_forearm_ply
-from analysis.receptive_field_mapping.data.contact_depth_field_io import (
-    penetration_from_signed_mm,
-)
 from analysis.receptive_field_mapping.data.vertex_accumulator import (
     accumulate_vertex_values_into,
     empty_accumulator,
 )
-from analysis.receptive_field_mapping.data.vertex_weights import vertex_weights
+from analysis.receptive_field_mapping.data.touch_frame_weights import (
+    touch_frame_weights,
+    touch_label as _touch_label,
+)
 from analysis.receptive_field_mapping.data.touch_playback_data import (
     PLAYBACK_CACHE_SCHEMA_VERSION,
     PlaybackData,
@@ -127,9 +127,10 @@ def _compute_touch_rf(
     Raises
     ------
     ValueError
-        A frame's depth array does not align with its vertex array; a frame is
-        entirely grazing (``d_max == 0``, raised by ``vertex_weights``); or a
-        contacted vertex ends with ``sum(w) == 0``.
+        A frame's depth array does not align with its vertex array, or a frame is
+        entirely grazing (``d_max == 0``) — both raised by ``touch_frame_weights``,
+        the conversion this shares with the playback viewer; or a contacted vertex
+        ends with ``sum(w) == 0``.
     """
     accum = empty_accumulator(n_vertices)
 
@@ -149,23 +150,10 @@ def _compute_touch_rf(
         verts = touch.frame_vertex_indices[fi]
         if len(verts) == 0:
             continue
-        signed_depths = touch.frame_depths[fi]
-        if len(signed_depths) != len(verts):
-            raise ValueError(
-                f"_compute_touch_rf: touch {_touch_label(touch)} frame {fi} has "
-                f"{len(verts)} contact points but {len(signed_depths)} depths. "
-                f"Both are read off the same sidecar rows in the same loop, so a "
-                f"mismatch means the two channels have desynchronised upstream."
-            )
-        try:
-            weights = vertex_weights(
-                penetration_from_signed_mm(signed_depths), depth_weight_alpha
-            )
-        except ValueError as exc:
-            raise ValueError(
-                f"_compute_touch_rf: touch {_touch_label(touch)} frame {fi} "
-                f"(vertices {np.asarray(verts).tolist()}): {exc}"
-            ) from exc
+        # Shared with ``gui.touch_playback_explorer``: the screen and the saved
+        # ``.npz`` must be produced by the same depth -> weight conversion, not by
+        # two spellings of it that can drift apart.
+        weights = touch_frame_weights(touch, fi, depth_weight_alpha)
         # ``neuron_values[fi]`` is a scalar — a frame has exactly one
         # instantaneous firing frequency however many vertices it touched. The
         # accumulator broadcasts it across the frame and multiplies by the
@@ -232,14 +220,6 @@ def _compute_touch_rf(
             (int(i), float(v)) for i, v in zip(contacted_indices, weight_sum_values)
         ],
         n_eff_pairs=[(int(i), float(v)) for i, v in zip(contacted_indices, n_eff_values)],
-    )
-
-
-def _touch_label(touch: TouchEvent) -> str:
-    """Identify a touch in an error message: block / trial / single-touch id."""
-    return (
-        f"block={touch.block_order_id!r} trial={touch.trial_id!r} "
-        f"single_touch={touch.single_touch_id!r}"
     )
 
 

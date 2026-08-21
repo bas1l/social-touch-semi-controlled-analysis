@@ -19,6 +19,12 @@ plan makes about it:
 
 The GUI half of the phase is exercised headlessly: only the pure grouping
 resolver is called, so no ``QApplication`` is constructed.
+
+Extended in Phase 6 with ``TestViewersDagCarriesTheSameAlpha``. The playback
+viewer now applies the same depth weighting the pipeline applies, so it needs the
+same exponent — and it reads it from a *different* config file, because the two
+entry-point scripts share no module by design. Two configs describing one number
+drift silently; that class pins them together.
 """
 
 from __future__ import annotations
@@ -216,6 +222,84 @@ class TestStageRegistryParams:
 
         with pytest.raises(ValueError, match="depth_weight_alpha"):
             self._stage_params(stripped)
+
+
+# ----------------------------------------------------------------------
+# 2b. The viewers DAG carries the same number (Phase 6)
+# ----------------------------------------------------------------------
+
+VIEWER_STAGE = "explore_touch_playback"
+
+
+def _viewers_module():
+    """Import ``scripts/analysis_workflow_viewers.py`` (not on ``pythonpath``)."""
+    scripts_dir = str(REPO_ROOT / "scripts")
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    import analysis_workflow_viewers  # noqa: PLC0415 — deliberate late import
+
+    return analysis_workflow_viewers
+
+
+class TestViewersDagCarriesTheSameAlpha:
+    """The playback viewer draws the weighted map, so it needs the same exponent.
+
+    Two configs describe one number. They are separate files because the two entry
+    points share no module by design, so the only thing holding them together is
+    this test — and the comment each config carries pointing at the other.
+    """
+
+    def test_the_viewer_stage_declares_alpha(self):
+        data = _load_round_trip(VIEWERS_DAG)
+        options = data["tasks"][VIEWER_STAGE]["options"]
+        assert "depth_weight_alpha" in options
+        value = options["depth_weight_alpha"]
+        assert isinstance(value, float) and not isinstance(value, bool)
+
+    def test_the_two_configs_agree(self):
+        """A viewer at a different alpha from the pipeline draws a different map.
+
+        That is the exact failure the nine-site accumulator merge existed to
+        prevent, reintroduced one layer up as a config drift instead of a code
+        duplication — so it is pinned here rather than left to a comment.
+        """
+        processing = _load_round_trip(PROCESSING_DAG)["tasks"][STAGE]["options"]
+        viewers = _load_round_trip(VIEWERS_DAG)["tasks"][VIEWER_STAGE]["options"]
+        assert float(viewers["depth_weight_alpha"]) == float(
+            processing["depth_weight_alpha"]
+        )
+
+    def test_the_viewer_flow_has_no_default_for_alpha(self):
+        module = _viewers_module()
+        params = inspect.signature(
+            module.explore_touch_playback_flow.fn
+        ).parameters
+        alpha = params["depth_weight_alpha"]
+        assert alpha.default is inspect.Parameter.empty
+        assert alpha.kind is inspect.Parameter.KEYWORD_ONLY
+
+    def test_a_viewers_config_without_the_key_raises_naming_it(self, tmp_path):
+        module = _viewers_module()
+        yaml = YAML()
+        yaml.preserve_quotes = True
+        with VIEWERS_DAG.open("r", encoding="utf-8") as fh:
+            data = yaml.load(fh)
+        del data["tasks"][VIEWER_STAGE]["options"]["depth_weight_alpha"]
+        stripped = tmp_path / "no_alpha_viewers.yaml"
+        with stripped.open("w", encoding="utf-8") as fh:
+            yaml.dump(data, fh)
+
+        handler = DagConfigHandler(stripped)
+        with pytest.raises(ValueError, match="depth_weight_alpha"):
+            module._required_option(handler, VIEWER_STAGE, "depth_weight_alpha")
+
+    def test_the_key_is_read_from_config_not_invented(self):
+        module = _viewers_module()
+        handler = DagConfigHandler(VIEWERS_DAG)
+        assert (
+            float(module._required_option(handler, VIEWER_STAGE, "depth_weight_alpha"))
+            == 1.0
+        )
 
 
 # ----------------------------------------------------------------------

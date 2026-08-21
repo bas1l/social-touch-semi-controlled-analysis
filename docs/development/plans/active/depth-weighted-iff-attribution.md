@@ -91,7 +91,7 @@ the viewer windows draw a different map from the one written to disk.
 
 ## Success Criteria
 
-- [ ] With `depth_weight_alpha = 0.0`, `single_touch_rf_maps_mean.npz` is **byte-identical** to the
+- [x] With `depth_weight_alpha = 0.0`, `single_touch_rf_maps_mean.npz` is **byte-identical** to the
       baseline **re-pinned in Phase 2.5** on the same inputs. This proves one thing and only one
       thing: the weighting machinery is a genuine no-op at `alpha = 0`, because the same code path
       runs with `weights = ones`. It **no longer claims** the maps match what the pipeline produced
@@ -112,7 +112,10 @@ the viewer windows draw a different map from the one written to disk.
       `coordinate_space` that file declared.
 - [x] Calling the estimator without `alpha` raises `TypeError`. There is no default value anywhere.
 - [ ] The diagnostic reports per-vertex weight variation for one session and states whether the
-      feature can have any effect at all on that data.
+      feature can have any effect at all on that data. **Still open on purpose:** the diagnostic
+      exists (`scripts/diagnose_depth_weight_variation.py`) and is validated on synthetic fixtures,
+      but it has never been run on a session, because this work was forbidden to read the
+      experimental database. A human must run it.
 
 ## Definitions
 
@@ -862,28 +865,164 @@ storage and validation.
 **Dependencies:** Phase 4.
 
 ### Phase 6: Prove it, then try to break it
+**Started:** 2026-08-21
+**Completed:** 2026-08-21
+
 **Goal:** The baseline is proven and the premise is tested against real data.
 
-- [ ] 6.1 — Parity test: `depth_weight_alpha = 0.0` produces output **byte-identical** to the
+- [x] 6.1 — Parity test: `depth_weight_alpha = 0.0` produces output **byte-identical** to the
       baseline **re-pinned in Phase 2.5** — not to the pre-branch output. Model on
       `tests/test_rf_response_fields_parity.py` (`_assert_exactly_equal`, `:220`), with a docstring
       stating both halves of the claim: it **proves** the weighting machinery is an exact no-op at
       `alpha = 0`, because the same code path runs with `weights = ones`; it says **nothing** about
       agreement with maps produced before the Phase 2.5 vertex fix, which changed them on purpose.
-- [ ] 6.2 — Explicitly cover clamped grazing vertices at `alpha=0`: `max(d,0)` is `0.0`, and
+- [x] 6.2 — Explicitly cover clamped grazing vertices at `alpha=0`: `max(d,0)` is `0.0`, and
       `0.0 ** 0 == 1.0`, so they must still receive weight 1.
-- [ ] 6.3 — Diagnostic script: for one session, report the distribution of **per-vertex weight
+- [x] 6.3 — Diagnostic script: for one session, report the distribution of **per-vertex weight
       variation** (max/min of each vertex's weights across its frames). Near-1 everywhere means the
       feature cannot change anything at any alpha.
-- [ ] 6.4 — Run `alpha=0` vs `alpha=1` on one session; plot per-vertex `|delta|` against distance
+- [x] 6.4 — Run `alpha=0` vs `alpha=1` on one session; plot per-vertex `|delta|` against distance
       from the RF hotspot. **Expected:** near-zero at the centre, largest at the periphery. **If
       instead the whole map shifts uniformly**, the weights are picking up the ~33x frame
       re-emission (hazard 3), not spatial structure — stop and investigate before trusting any
-      output.
+      output. **Delivered as a script, not as a run** — see the note below.
+
+**Implementation notes (2026-08-21)**
+
+- **The parity is genuinely byte-identical. Nothing was downgraded.** The risk table gave
+  "`alpha=0` is not byte-identical due to float summation order" a **High** likelihood with a
+  documented escape hatch (state a tolerance and amend the plan). The escape hatch was not needed
+  and was not used: every comparison in `tests/test_rf_depth_weighting_parity.py` is
+  `np.array_equal(..., equal_nan=True)`, and all 25 tests pass. Nothing in this branch is asserted
+  with `assert_allclose` or `approx`. The claim is made at two levels, because the success
+  criterion is about the *file*:
+  - **function level** — `_compute_touch_rf(touch, n, mode, 0.0)` against the frozen
+    `test_vertex_accumulator._legacy_compute_touch_rf`, over both fixtures and both neuron modes.
+    The frozen function is **imported, not copied**: a second frozen copy is a second thing that
+    can be "fixed" later, and the value of a characterization baseline is that exactly one of it
+    exists.
+  - **artifact level** — `run_single_touch_rf_mapping` is run twice over a synthetic session
+    (loader and PLY resolver monkeypatched, so no experimental data is read), once normally at
+    `alpha = 0` and once with the frozen estimator substituted, and the `rf_data` and
+    `touch_id_map` arrays are compared out of the two `single_touch_rf_maps_*.npz` files.
+
+  The artifact-level test carries an explicit **non-vacuity assertion**: the frozen estimator
+  predates the confidence channel and emits none, so an empty `rf_weight_sum` in the baseline run
+  is the fingerprint that the substitution actually took effect. Without it, a monkeypatch that
+  silently failed to apply would compare the weighted run against itself and pass. There is also a
+  **negative control** (`test_alpha_one_actually_moves_the_map`): every other assertion in that
+  class would hold equally for an implementation that ignored `alpha` entirely.
+- **6.1 also pins the weight vector, not only the output.** Equality of the *results* can survive
+  a wrong weight vector, because any constant weight cancels between numerator and denominator.
+  `test_every_weight_is_exactly_one` asserts the vector itself, so `alpha = 0` is pinned as "all
+  weights are exactly 1" rather than "the answer came out the same".
+- **6.2 is tested for the contrast, not just the case.** `alpha = 0` is the *only* exponent at
+  which a permanently-grazing vertex is harmless: at `alpha > 0` it accumulates zero weight and
+  `_compute_touch_rf` raises. The fixture (`_grazing_touch`) asserts both halves — the grazing
+  vertex reports its unweighted 20 Hz at `alpha = 0`, and the same touch raises at `alpha = 1`.
+  Asserting only the first would leave `0.0 ** 0.0 == 1.0` looking like an accident.
+- **6.3 and 6.4 are shipped as scripts and are UNRUN on real data.** This work was forbidden to
+  read the experimental database, so both were validated on synthetic fixtures only — including a
+  deliberately flat-depth fixture that drives `diagnose_depth_weight_variation` to its FALSIFIED
+  verdict, so the failure path is exercised rather than assumed. **Neither has ever seen a real
+  session.** They must be run, in that order, before any depth-weighted output from this branch is
+  trusted, alongside `scripts/diagnose_vertex_reassignment.py` from Phase 2.5.
+- **6.4 became a second script rather than sharing the first.** The plan listed one new script;
+  6.4 as written ("run ... and plot") cannot be a test and cannot be executed here, so it is
+  `scripts/diagnose_depth_weight_delta_vs_distance.py`. Its `--out-png` is **optional**: the three
+  printed statistics are the verdict and the picture is illustration. That is not a fallback — it
+  is an explicit caller choice — and it exists because `matplotlib.savefig` crashes natively
+  (`0xC06D007F`) in this repo's conda environment, a pre-existing fault that also aborts several
+  unrelated test modules. The plotting branch is the one piece of Phase 6 that could not be
+  executed at all.
+- **The plan's 6.3 wording is loose and the script does not repeat it.** "Near-1 everywhere means
+  the feature cannot change anything at any alpha" is true only for a ratio of *exactly* 1: since
+  `ratio(alpha) = ratio(1) ** alpha`, a ratio of 1.05 reaches 2 at `alpha ~= 14`. The script
+  separates the two — it counts exactly-frozen vertices apart from effectively-flat ones and
+  prints the alpha that would be needed — and says in its own docstring that raising alpha until
+  something moves is choosing the exponent to manufacture an effect rather than to express a
+  mechanism.
+- **Two vertex classes are excluded from 6.3's headline distribution, and counted instead.**
+  Single-frame vertices (ratio 1 by construction — they would pad the "flat" share with vertices
+  that were never eligible to vary) and vertices with a zero weight (ratio infinite — counted,
+  never divided by). A coefficient of variation is reported beside the ratio because max/min is a
+  two-sample statistic that one outlying frame can dominate.
+- **6.4 reads the hotspot off the *baseline* map.** Taking it from the weighted map would make the
+  plot self-fulfilling: the weighting would be measured against the peak it had just moved. Its
+  three reported statistics are the centre/periphery contrast, the uniform fraction
+  (`|median signed delta| / mean |delta|`, the decisive one — 1 is a pure common offset, which is
+  the hazard-3 failure signature) and a rank correlation, explicitly labelled the weakest.
+
+**Additional work folded into this phase — the viewer gap**
+
+- **`touch_playback_explorer` was still accumulating with `weights = np.ones(...)`**, so the
+  playback window drew the **unweighted** map while the `.npz` held the weighted one. The plan's
+  manual-verification item ("open a viewer window and the saved map for the same touch; confirm
+  they now agree") would have failed. Closing it is in scope precisely because the nine-site merge
+  was accepted on the grounds that the screen and the pipeline could not diverge; leaving it open
+  would have spent that cost and kept the failure.
+- **`data/touch_frame_weights.py` (new) is now the single depth -> weight conversion.** The
+  conversion (align check, `penetration_from_signed_mm`, `vertex_weights`, error context) was
+  inline in `_compute_touch_rf`. Re-spelling it in the viewer would have reintroduced the
+  divergence one layer up — shared *reduction*, drifting *weights*. Both callers now use this
+  module. It is a new file the plan did not list, and it is the honest home for the one piece of
+  knowledge that spans both sides: `vertex_weights` must not learn about `TouchEvent`, and
+  `touch_playback_data` (a loader) must not learn about alpha.
+- **`alpha` is threaded viewers-DAG -> registry -> flow -> launcher -> window**, required and
+  keyword-only at every hop, exactly as on the processing side. `TouchPlaybackExplorer` now takes
+  `depth_weight_alpha` as a required keyword-only argument, pinned by a signature test.
+- **`mean_heatmap_scalars`'s second parameter was renamed `contact_count` -> `weight_sum`**, for
+  the same reason `_compute_touch_rf`'s was in Phase 4: above `alpha = 0` it is no longer a count,
+  and keeping the name would make an old screenshot and a new one silently incomparable.
+- **Empty frames are now skipped in `accumulate_touch_frame`.** `vertex_weights` raises on an
+  empty array by design (a frame with no contact points has no maximum depth), where the old
+  `np.ones(0)` was silently fine. Behaviour on the fixtures is unchanged — the accumulation was
+  already a no-op — and the Phase 2 characterization tests still pass by `np.array_equal`.
+- **Four Phase 2 characterization call sites were updated to pass `alpha = 0.0` explicitly**
+  (`tests/test_vertex_accumulator.py`, sites 6–9), following the precedent Phase 4 set: those
+  tests pin the *reduction*, which may not move under weighting.
+- **A `_required_option` helper was duplicated into `scripts/analysis_workflow_viewers.py`.** That
+  script declares "no dependency on analysis_workflow_processing.py" in its own header and
+  `DagConfigHandler` is vendored, so the alternatives were cross-importing two entry-point scripts
+  or editing vendored code. Six duplicated lines is the cheapest of the three, and the duplication
+  is documented in the docstring rather than left to be discovered.
+- **The two configs are pinned to agree.** `TestViewersDagCarriesTheSameAlpha` asserts the viewers
+  DAG's `explore_touch_playback.options.depth_weight_alpha` equals the processing DAG's value for
+  `spatial_map_single_touch`. A viewer at a different alpha from the pipeline is the same failure
+  the nine-site merge existed to prevent, reintroduced one layer up as config drift instead of
+  code duplication.
+- **The other three ones-passing sites were deliberately left alone**: `rf_population_heatmap.py`,
+  `touch_population_explorer.py` and `rf_feature_space_explorer.py`. They aggregate
+  *already-reduced per-touch values*, so weighting them would be **cross-touch weighting** — a
+  deeper touch outranking a shallower one — which this plan lists explicitly as out of scope.
+  Their `np.ones` is correct rather than stale, and `compute_rf_heatmap`'s docstring already says
+  so.
+- **The manual-verification item is now automated.** `TestPlaybackViewerAgreesWithTheSavedMap`
+  replays the viewer's accumulation and compares it against `_compute_touch_rf` at four alphas,
+  with no `QApplication`. One documented difference remains, and it is a presentation choice
+  rather than a numeric one: the estimator *drops* vertices whose mean is NaN (so a "no neural
+  data" touch reports zero vertices instead of an invisible heatmap), while the viewer keeps them
+  NaN and paints them grey. The comparison is over the vertices the saved map contains, and the
+  NaN fixture is included so the difference is exercised rather than avoided.
 
 **Files Modified:**
-- `tests/test_rf_depth_weighting_parity.py` — new
-- `scripts/diagnose_depth_weight_variation.py` — new
+- `tests/test_rf_depth_weighting_parity.py` — new, 25 tests
+- `scripts/diagnose_depth_weight_variation.py` — new (6.3), **unrun on real data**
+- `scripts/diagnose_depth_weight_delta_vs_distance.py` — new (6.4), **unrun on real data**
+- `src/analysis/receptive_field_mapping/data/touch_frame_weights.py` — new; the single
+  depth -> weight conversion, shared by the pipeline and the viewer
+- `src/analysis/receptive_field_mapping/data/__init__.py` — re-exports
+- `src/analysis/receptive_field_mapping/pipelines/rf_single_touch_pipeline.py` — delegates to
+  `touch_frame_weights`; `_touch_label` moved there
+- `src/analysis/receptive_field_mapping/gui/touch_playback_explorer.py` — weighted accumulation,
+  required `depth_weight_alpha`, `contact_count` -> `weight_sum`
+- `src/analysis/receptive_field_mapping/pipelines/rf_cluster_gui_launchers.py` — alpha through the
+  playback launcher
+- `scripts/analysis_workflow_viewers.py` — `_required_option`, registry param, flow signature
+- `configs/analyse_workflow_viewers_dag.yaml` — `depth_weight_alpha: 1.0` + comment (clean 10-line
+  insertion, no reflow; round-trip verified with ruamel)
+- `tests/test_vertex_accumulator.py` — explicit `alpha=0.0` at sites 6–9
+- `tests/test_depth_weight_alpha_config.py` — `TestViewersDagCarriesTheSameAlpha`
 
 **Dependencies:** Phase 5.
 
@@ -913,7 +1052,9 @@ storage and validation.
       (factors of 5 and 80) plus every value pinned to its hand-computed closed form at
       `rtol=1e-12`. Success Criterion 2's "approximately their unweighted values" is the
       accurate wording.
-- [ ] `alpha=0` byte-identical to the **Phase 2.5 re-pinned** baseline through the whole pipeline.
+- [x] `alpha=0` byte-identical to the **Phase 2.5 re-pinned** baseline through the whole pipeline.
+      Asserted with `np.array_equal` at the estimator *and* at the saved `.npz`, over a synthetic
+      session. No tolerance was introduced anywhere.
 - [ ] Vertex identity comes from the sidecar: a synthetic frame whose sidecar `vertex_id` differs
       from the nearest-vertex answer resolves to the **sidecar's** value.
 - [ ] `frame_index` and `contact_points` are filled by one `ffill` statement and cannot drift: a
@@ -931,7 +1072,11 @@ storage and validation.
       for the stage, headlessly — the same call `_insert_grouped` makes, with no `QApplication`
       constructed. That is the half that used to raise. Opening a real window and typing a value
       into the field is still manual.
-- [ ] Open a viewer window and the saved map for the same touch; confirm they now agree.
+- [x] Open a viewer window and the saved map for the same touch; confirm they now agree.
+      **Automated in Phase 6** (`TestPlaybackViewerAgreesWithTheSavedMap`). The viewer accumulated
+      with `weights = ones` until then, so this item would have *failed*; it now runs the same
+      shared conversion and the same shared reduction at the same alpha, checked headlessly at four
+      alphas. Opening a real window once, by eye, is still worth doing.
 - [ ] Confirm `single_touch_rf_summary.json` carries alpha, and that changing alpha re-runs the
       stage.
 
@@ -1047,3 +1192,59 @@ any weighting exists.
 - Prior art (synthetic parquet fixtures): `tests/test_contact_depth_field_io.py`
 - Rejected sweep precedent: `docs/development/brainstorms/rf-contour-param-sweep.md` — a sweep
   without a computable ranker does not get built here
+
+---
+
+## Modified Files
+
+<!-- AUTO-GENERATED at the end of Phase 6. Every file this branch
+     (`feature/depth-weighted-iff-attribution`) changed relative to its base
+     (`feature/port-stroke-centroid-baseline`), across Phases 1-6, sorted
+     alphabetically. Per-phase attribution stays in each phase's own
+     **Files Modified** list; this is the flat union, for review and for the
+     rollback procedure. Regenerate with:
+
+       git log --name-only --pretty=format: feature/port-stroke-centroid-baseline..HEAD
+
+     unioned with any still-uncommitted paths from `git status --porcelain`. -->
+
+- `configs/analyse_workflow_processing_dag.yaml`
+- `configs/analyse_workflow_viewers_dag.yaml`
+- `docs/data-contracts/contact-depth-field.md`
+- `docs/development/brainstorms/contact-depth-field-adoption.md`
+- `docs/development/plans/active/depth-weighted-iff-attribution.md`
+- `docs/receptive_field_workflow/README.md`
+- `environment.yml`
+- `pyproject.toml`
+- `scripts/analysis_workflow_processing.py`
+- `scripts/analysis_workflow_viewers.py`
+- `scripts/diagnose_depth_weight_delta_vs_distance.py`
+- `scripts/diagnose_depth_weight_variation.py`
+- `scripts/diagnose_vertex_reassignment.py`
+- `scripts/generate_rf_single_touch_detail.py`
+- `scripts/generate_rf_workflow_pptx.py`
+- `src/analysis/receptive_field_mapping/data/__init__.py`
+- `src/analysis/receptive_field_mapping/data/contact_depth_field_io.py`
+- `src/analysis/receptive_field_mapping/data/rf_data_loader.py`
+- `src/analysis/receptive_field_mapping/data/rf_population_heatmap.py`
+- `src/analysis/receptive_field_mapping/data/touch_frame_weights.py`
+- `src/analysis/receptive_field_mapping/data/touch_playback_data.py`
+- `src/analysis/receptive_field_mapping/data/vertex_accumulator.py`
+- `src/analysis/receptive_field_mapping/data/vertex_weights.py`
+- `src/analysis/receptive_field_mapping/gui/rf_feature_space_explorer.py`
+- `src/analysis/receptive_field_mapping/gui/touch_playback_explorer.py`
+- `src/analysis/receptive_field_mapping/gui/touch_population_explorer.py`
+- `src/analysis/receptive_field_mapping/pipelines/rf_cluster_gui_launchers.py`
+- `src/analysis/receptive_field_mapping/pipelines/rf_single_touch_pipeline.py`
+- `src/analysis/touch_analytics/preparation_pipeline.py`
+- `src/utils/gui/analysis_runner_gui/task_detail_panel.py`
+- `tests/rf_accumulator_fixtures.py`
+- `tests/test_contact_depth_field_io.py`
+- `tests/test_depth_weight_alpha_config.py`
+- `tests/test_rf_depth_weighting_parity.py`
+- `tests/test_touch_playback_depth.py`
+- `tests/test_touch_playback_vertex_source.py`
+- `tests/test_vertex_accumulator.py`
+- `tests/test_vertex_weights.py`
+
+38 files.

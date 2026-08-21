@@ -57,6 +57,16 @@ tasks:
     enabled: true
     options:
       force_processing: false
+      # Exponent of the per-contact-point depth weighting applied to the right-hand
+      # heatmap. The viewer runs the same weighting the spatial_map_single_touch stage
+      # runs, through the same shared depth->weight conversion and the same shared
+      # reduction, so the map on screen is the map the stage writes into
+      # single_touch_rf_maps_mean.npz. Keep this in step with
+      # tasks.spatial_map_single_touch.options.depth_weight_alpha in the processing DAG
+      # config: two configs, one number. Required -- no level of the call chain has a
+      # default, so removing this key raises instead of quietly drawing the unweighted
+      # map. 0.0 reproduces the pre-weighting heatmap exactly.
+      depth_weight_alpha: 1.0
       # Where the per-vertex contact-depth-field parquet sidecars live. The playback
       # loader reads each contact point's vertex_id off these, joined on frame_index,
       # so the viewer draws the same vertex assignment the pipeline writes to disk.

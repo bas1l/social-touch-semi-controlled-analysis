@@ -40,6 +40,7 @@ from PyQt5.QtWidgets import (
 from pyvistaqt import QtInteractor
 
 from analysis.receptive_field_mapping.data.touch_playback_data import PlaybackData, TouchEvent
+from analysis.receptive_field_mapping.data.touch_frame_weights import touch_frame_weights
 from analysis.receptive_field_mapping.data.vertex_accumulator import (
     AccumResult,
     accumulate_vertex_values_into,
@@ -56,7 +57,15 @@ logger = logging.getLogger(__name__)
 # The window keeps one accumulator per displayed channel (IFF and spike).
 # Both are fed the same contact points with the same weights, so their
 # ``weight_sum`` arrays are identical and either one is *the* per-vertex
-# contact count; ``iff_accum.weight_sum`` is used throughout.
+# weight sum; ``iff_accum.weight_sum`` is used throughout.
+#
+# The heatmap drawn here is the **same weighted mean** the pipeline writes to
+# ``single_touch_rf_maps_mean.npz``: same reduction (``vertex_accumulator``) and
+# same depth -> weight conversion (``touch_frame_weights``), at the same
+# ``depth_weight_alpha``. That agreement is the entire reason the nine
+# duplicated accumulator blocks were merged in the first place — a viewer
+# drawing a different map from the one on disk is the failure mode that
+# actively misleads — so nothing in this module may re-spell either step.
 # ----------------------------------------------------------------------
 
 def accumulate_touch_frame(
@@ -64,16 +73,29 @@ def accumulate_touch_frame(
     spike_accum: AccumResult,
     touch: TouchEvent,
     frame_idx: int,
+    depth_weight_alpha: float,
 ) -> None:
     """Credit frame ``frame_idx``'s IFF and spike value to every vertex it touched.
 
     The frame's neuron value is a single scalar broadcast across the frame's
-    contact points, and every point carries weight ``1.0`` — the frame is
-    credited in full to each contacted vertex regardless of how deeply the
-    skin was indented there.
+    contact points, and each point carries the weight ``touch_frame_weights``
+    derives from its penetration depth: a vertex pressed to 47% of the frame's
+    maximum depth is credited with 47% of that frame's firing rate at
+    ``depth_weight_alpha = 1``.
+
+    ``depth_weight_alpha`` is **required** — there is no default at any level of
+    this call chain, so a viewer that forgot to thread it through is a
+    ``TypeError`` rather than a window silently drawing a different map from the
+    saved one. ``0.0`` gives every point weight ``1.0`` and reproduces the
+    unweighted heatmap exactly, through this same code path.
+
+    An empty frame is a no-op: it has no maximum depth, so there are no weights
+    to ask for (``vertex_weights`` raises on an empty array by design).
     """
     verts = touch.frame_vertex_indices[frame_idx]
-    weights = np.ones(len(verts), dtype=np.float64)
+    if len(verts) == 0:
+        return
+    weights = touch_frame_weights(touch, frame_idx, depth_weight_alpha)
     accumulate_vertex_values_into(
         iff_accum, verts, float(touch.frame_iff[frame_idx]), weights
     )
@@ -83,24 +105,32 @@ def accumulate_touch_frame(
 
 
 def replay_touch_frames(
-    touch: TouchEvent, n_frames: int, n_verts: int
+    touch: TouchEvent, n_frames: int, n_verts: int, depth_weight_alpha: float
 ) -> Tuple[AccumResult, AccumResult]:
     """Fresh ``(iff_accum, spike_accum)`` holding frames ``[0, n_frames)`` of *touch*."""
     iff_accum = empty_accumulator(n_verts)
     spike_accum = empty_accumulator(n_verts)
     for fi in range(n_frames):
-        accumulate_touch_frame(iff_accum, spike_accum, touch, fi)
+        accumulate_touch_frame(iff_accum, spike_accum, touch, fi, depth_weight_alpha)
     return iff_accum, spike_accum
 
 
 def mean_heatmap_scalars(
-    value_sum: np.ndarray, contact_count: np.ndarray
+    value_sum: np.ndarray, weight_sum: np.ndarray
 ) -> np.ndarray:
-    """Per-vertex mean; NaN where the vertex has not been contacted yet."""
-    has_contact = contact_count > 0
+    """Per-vertex weighted mean; NaN where the vertex has not been contacted yet.
+
+    The divisor is the **weight sum**, not the frame count — the same divisor
+    ``_compute_touch_rf`` uses, so the number stays a firing rate in Hz whatever
+    the weights were. The parameter is named for what it now holds: at
+    ``depth_weight_alpha = 0`` every weight is ``1.0`` and it *is* the contact
+    count, but above 0 it is not, and keeping the old name would have made an
+    old screenshot and a new one silently incomparable.
+    """
+    has_contact = weight_sum > 0
     return np.where(
         has_contact,
-        value_sum / np.where(has_contact, contact_count, 1.0),
+        value_sum / np.where(has_contact, weight_sum, 1.0),
         np.nan,
     )
 
@@ -112,6 +142,14 @@ class TouchPlaybackExplorer(QMainWindow):
     ----------
     playback_data:
         Pre-loaded data for the initial session.
+    depth_weight_alpha:
+        Depth-weighting exponent for the right-hand heatmap, **keyword-only and
+        required**.  It must be the same value the ``spatial_map_single_touch``
+        stage ran with, because this window and that stage draw/write the same
+        quantity; the viewers DAG config carries its own copy of the key beside
+        the processing DAG's, and both scripts read it with no default.  Passing
+        ``0.0`` reproduces the unweighted heatmap this window drew before depth
+        weighting existed.
     sessions:
         Optional list of ``(label, PlaybackData)`` tuples for the session
         selector.  If ``None``, defaults to ``[("Session 1", playback_data)]``.
@@ -124,6 +162,8 @@ class TouchPlaybackExplorer(QMainWindow):
     def __init__(
         self,
         playback_data: PlaybackData,
+        *,
+        depth_weight_alpha: float,
         sessions: Optional[List[Tuple[str, PlaybackData]]] = None,
         title: str = "Touch Playback Explorer",
         parent: Optional[QWidget] = None,
@@ -131,6 +171,7 @@ class TouchPlaybackExplorer(QMainWindow):
         super().__init__(parent)
         self.setWindowTitle(title)
 
+        self._depth_weight_alpha = float(depth_weight_alpha)
         self._data = playback_data
         self._sessions: List[Tuple[str, PlaybackData]] = (
             sessions if sessions is not None else [("Session 1", playback_data)]
@@ -360,7 +401,7 @@ class TouchPlaybackExplorer(QMainWindow):
         # Replay accumulation for preceding frames so the heatmap
         # is persistent, matching Play-mode behaviour.
         self._iff_accum, self._spike_accum = replay_touch_frames(
-            self._current_touch, value, n_verts
+            self._current_touch, value, n_verts, self._depth_weight_alpha
         )
         self._render_frame(value)
 
@@ -585,7 +626,8 @@ class TouchPlaybackExplorer(QMainWindow):
 
         # Replay: accumulate all frames from 0 to current_frame (inclusive).
         self._iff_accum, self._spike_accum = replay_touch_frames(
-            self._current_touch, self._current_frame + 1, n_verts
+            self._current_touch, self._current_frame + 1, n_verts,
+            self._depth_weight_alpha,
         )
 
         self._update_heatmap_scalars()
@@ -635,7 +677,8 @@ class TouchPlaybackExplorer(QMainWindow):
 
         # ---- Right view: accumulate spike + IFF heatmap (incremental, O(K)) ----
         accumulate_touch_frame(
-            self._iff_accum, self._spike_accum, self._current_touch, frame_idx
+            self._iff_accum, self._spike_accum, self._current_touch, frame_idx,
+            self._depth_weight_alpha,
         )
 
         self._update_heatmap_scalars()
@@ -986,7 +1029,9 @@ class TouchPlaybackExplorer(QMainWindow):
                         pl_left.add_mesh(empty, color="red", point_size=1, name="contacts")
 
                     # Right: accumulate heatmap.
-                    accumulate_touch_frame(iff_accum, spike_accum, touch, fi)
+                    accumulate_touch_frame(
+                        iff_accum, spike_accum, touch, fi, self._depth_weight_alpha
+                    )
 
                     channel = iff_accum if self._heatmap_mode == "iff" else spike_accum
                     scalars = mean_heatmap_scalars(

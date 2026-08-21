@@ -31,6 +31,7 @@ from .vertex_accumulator import (
     accumulate_vertex_values_into,
 )
 from .vertex_weights import vertex_weights
+from .touch_frame_weights import touch_frame_weights, touch_label
 from .rf_extraction_io import (
     RF_CAMERA_SETTINGS_FILENAME,
     load_neuron_contacts,
@@ -126,6 +127,9 @@ __all__ = [
     "accumulate_vertex_values_into",
     # vertex_weights
     "vertex_weights",
+    # touch_frame_weights
+    "touch_frame_weights",
+    "touch_label",
     # rf_extraction_io
     "RF_CAMERA_SETTINGS_FILENAME",
     "load_neuron_contacts",
