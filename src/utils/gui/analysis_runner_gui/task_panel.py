@@ -20,9 +20,18 @@ from PyQt5.QtWidgets import (
 )
 
 from analysis.pipeline.execution_events import TaskStatus
+from utils.gui.analysis_runner_gui.dag_graph_items import BYPASS_TOOLTIP
 from utils.gui.analysis_runner_gui.dag_graph_view import DagGraphView
 from utils.gui.analysis_runner_gui.task_detail_panel import TaskDetailPanel
 from utils.pipeline.dag_config_model import DagConfigModel
+
+#: Roles of the per-task checkboxes in the ``Enabled`` cell.  The table keeps a
+#: role → widget map per row instead of discriminating on ``QCheckBox.text()``:
+#: with three boxes, a text test with an "everything else is Enabled" fallback
+#: silently writes the enabled state into the ``Bypass`` box.
+_ROLE_ENABLED = "enabled"
+_ROLE_BYPASS = "bypass"
+_ROLE_FORCE = "force"
 
 
 def _status_text(status: TaskStatus) -> str:
@@ -49,6 +58,7 @@ class TaskPanel(QWidget):
         super().__init__(parent)
         self._model: DagConfigModel | None = None
         self._row_task: list[str] = []
+        self._row_checkboxes: list[dict[str, QCheckBox]] = []
         self._selected_task: str | None = None
 
         outer_layout = QVBoxLayout(self)
@@ -87,6 +97,7 @@ class TaskPanel(QWidget):
         self._graph_view.node_clicked.connect(self._on_graph_node_clicked)
         self._graph_view.enabled_changed.connect(self._on_graph_enabled_changed)
         self._graph_view.force_changed.connect(self._on_graph_force_changed)
+        self._graph_view.bypass_changed.connect(self._on_graph_bypass_changed)
 
         self._stack = QStackedWidget()
         self._stack.addWidget(self._graph_view)
@@ -116,6 +127,7 @@ class TaskPanel(QWidget):
         """Clear and rebuild the table from *model*."""
         self._model = model
         self._row_task.clear()
+        self._row_checkboxes.clear()
         self._selected_task = None
 
         self._graph_view.populate(model)
@@ -147,24 +159,33 @@ class TaskPanel(QWidget):
             cell_layout.setContentsMargins(4, 0, 4, 0)
             cell_layout.setAlignment(Qt.AlignVCenter)
 
+            boxes: dict[str, QCheckBox] = {}
+
             cb_enabled = QCheckBox()
             cb_enabled.setChecked(model.is_task_enabled(name))
             cb_enabled.stateChanged.connect(self._make_enabled_handler(name, cb_enabled))
             cell_layout.addWidget(cb_enabled)
+            boxes[_ROLE_ENABLED] = cb_enabled
+
+            cell_layout.addWidget(self._cell_separator())
+            cb_bypass = QCheckBox("Bypass")
+            cb_bypass.setChecked(model.is_task_bypassed(name))
+            cb_bypass.setToolTip(BYPASS_TOOLTIP)
+            cb_bypass.stateChanged.connect(self._make_bypass_handler(name, cb_bypass))
+            cell_layout.addWidget(cb_bypass)
+            boxes[_ROLE_BYPASS] = cb_bypass
 
             force_val = model.get_task_option(name, "force_processing")
             if force_val is not None:
-                sep = QFrame()
-                sep.setFrameShape(QFrame.VLine)
-                sep.setFrameShadow(QFrame.Sunken)
-                sep.setFixedWidth(10)
-                cell_layout.addWidget(sep)
+                cell_layout.addWidget(self._cell_separator())
                 cb_force = QCheckBox("Force")
                 cb_force.setChecked(bool(force_val))
                 cb_force.setToolTip("Force processing (ignore cached results)")
                 cb_force.stateChanged.connect(self._make_force_handler(name, cb_force))
                 cell_layout.addWidget(cb_force)
+                boxes[_ROLE_FORCE] = cb_force
 
+            self._row_checkboxes.append(boxes)
             self._table.setCellWidget(row, self._COL_ENABLED, container)
 
             item_status = QTableWidgetItem(_status_text(TaskStatus.PENDING))
@@ -226,21 +247,39 @@ class TaskPanel(QWidget):
         if self._selected_task is not None:
             self._graph_view.select_task(self._selected_task)
 
+    @staticmethod
+    def _cell_separator() -> QFrame:
+        sep = QFrame()
+        sep.setFrameShape(QFrame.VLine)
+        sep.setFrameShadow(QFrame.Sunken)
+        sep.setFixedWidth(10)
+        return sep
+
+    def _read_role(self, role: str, task_name: str) -> bool:
+        """Read one checkbox role's current value out of the model."""
+        assert self._model is not None
+        if role == _ROLE_ENABLED:
+            return self._model.is_task_enabled(task_name)
+        if role == _ROLE_BYPASS:
+            return self._model.is_task_bypassed(task_name)
+        if role == _ROLE_FORCE:
+            return bool(self._model.get_task_option(task_name, "force_processing"))
+        raise KeyError(f"unknown checkbox role {role!r}")
+
     def _sync_table_checkboxes(self) -> None:
+        """Re-read every table checkbox from the model, keyed by role.
+
+        Roles are looked up explicitly.  The previous dispatch tested
+        ``cb.text() == "Force"`` and treated everything else as ``Enabled``,
+        which with a third box would have written the enabled state over
+        ``Bypass`` on every switch to the table view.
+        """
         if self._model is None:
             return
-        for row, name in enumerate(self._row_task):
-            container = self._table.cellWidget(row, self._COL_ENABLED)
-            if container is None:
-                continue
-            for cb in container.findChildren(QCheckBox):
+        for name, boxes in zip(self._row_task, self._row_checkboxes):
+            for role, cb in boxes.items():
                 cb.blockSignals(True)
-                if cb.text() == "Force":
-                    val = self._model.get_task_option(name, "force_processing")
-                    if val is not None:
-                        cb.setChecked(bool(val))
-                else:
-                    cb.setChecked(self._model.is_task_enabled(name))
+                cb.setChecked(self._read_role(role, name))
                 cb.blockSignals(False)
 
     def _show_table_view(self) -> None:
@@ -274,6 +313,12 @@ class TaskPanel(QWidget):
         self._model.set_task_option(task_name, "force_processing", value)
         self.task_changed.emit()
 
+    def _on_graph_bypass_changed(self, task_name: str, value: bool) -> None:
+        if self._model is None:
+            return
+        self._model.set_task_bypassed(task_name, value)
+        self.task_changed.emit()
+
     # ------------------------------------------------------------------
     # Handler factories
     # ------------------------------------------------------------------
@@ -283,6 +328,14 @@ class TaskPanel(QWidget):
             if self._model is None:
                 return
             self._model.set_task_enabled(task_name, cb.isChecked())
+            self.task_changed.emit()
+        return _handler
+
+    def _make_bypass_handler(self, task_name: str, cb: QCheckBox):
+        def _handler(_state: int) -> None:
+            if self._model is None:
+                return
+            self._model.set_task_bypassed(task_name, cb.isChecked())
             self.task_changed.emit()
         return _handler
 

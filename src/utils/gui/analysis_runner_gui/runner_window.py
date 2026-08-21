@@ -358,11 +358,61 @@ class AnalysisRunnerGUI(QMainWindow):
             self._run_label.setStyleSheet("")
             self._run_button.setEnabled(True)
 
+    def _enabled_bypassed_tasks(self) -> list[str]:
+        """Tasks this run will bypass, in config order.
+
+        A disabled task's ``bypass`` is inert — the ladder never reaches row 3
+        for it — so it is deliberately not listed.
+        """
+        if self._model is None:
+            return []
+        return [
+            name
+            for name in self._model.get_task_names()
+            if self._model.is_task_enabled(name) and self._model.is_task_bypassed(name)
+        ]
+
+    def _confirm_bypasses(self) -> bool:
+        """Ask before a run that bypasses anything; True means "go ahead".
+
+        ``bypass`` persists in the YAML, so the flag that unblocked yesterday's
+        re-run is still set today.  This modal is the first of the three
+        mitigations for that — the console banner and the violet node are the
+        other two — and it says outright that *nothing* is checked, because a
+        bypass is an assertion by the user about the disk that the pipeline
+        neither tests nor can test.  Cancel is the default and the escape
+        button: the safe answer must be the one a reflexive Enter produces.
+        """
+        bypassed = self._enabled_bypassed_tasks()
+        if not bypassed:
+            return True
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("Bypassed Tasks")
+        box.setText(f"{len(bypassed)} enabled task(s) will be BYPASSED in this run.")
+        box.setInformativeText(
+            "A bypassed task is marked completed so its dependents can run, but "
+            "it does not run and nothing about it is checked — no file, no "
+            "folder, no timestamp. Downstream tasks will read whatever is "
+            "already on disk, however old, partial or unrelated it is.\n\n"
+            "Tasks to be bypassed:\n"
+            + "\n".join(f"  • {name}" for name in bypassed)
+        )
+        box.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
+        box.setDefaultButton(QMessageBox.Cancel)
+        box.setEscapeButton(QMessageBox.Cancel)
+        return box.exec_() == QMessageBox.Ok
+
     def _on_run(self) -> None:
         if self._current_entry is None:
             return
         if self._model:
             self._on_save()
+        # Ordering: validate, then confirm, and only then clear the statuses.
+        # Cancelling here must leave the previous run's report on the graph.
+        if not self._confirm_bypasses():
+            self.statusBar().showMessage("Run cancelled — bypassed tasks unconfirmed", 5000)
+            return
         if not self._server_manager.is_running():
             self.statusBar().showMessage("Restarting Prefect server…")
             self._server_manager.start()

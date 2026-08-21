@@ -68,6 +68,14 @@ _COLOR_EDGE = QColor("#555555")
 _STATUS_GLYPH_BOX = 20   # side of the square the status glyph is centred in
 _STATUS_GLYPH_INSET = 22  # from rect.right(); the category badge keeps 12
 
+#: Shown on every ``Bypass`` checkbox, in the graph and in the table alike.
+#: The flag persists, so the tooltip is the one place a user meets its full
+#: meaning before ticking it — the run-time modal only lists what is already set.
+BYPASS_TOOLTIP = (
+    "Bypass: mark this task completed so its dependents can run, without "
+    "running it and without checking anything on disk."
+)
+
 #: How each run status repaints a node, as
 #: ``(fill | None, border | None, border_width, dim, glyph)``.
 #:
@@ -106,6 +114,7 @@ class DagTaskNode(QGraphicsRectItem):
         node_clicked = pyqtSignal(str)
         enabled_changed = pyqtSignal(str, bool)
         force_changed = pyqtSignal(str, bool)
+        bypass_changed = pyqtSignal(str, bool)
         position_changed = pyqtSignal(str, float, float)  # task_name, x, y
 
     def __init__(
@@ -133,6 +142,7 @@ class DagTaskNode(QGraphicsRectItem):
         self.setFlag(QGraphicsItem.ItemSendsGeometryChanges, True)
 
         self._enabled = model.is_task_enabled(task_name)
+        self._bypass = model.is_task_bypassed(task_name)
         force_val = model.get_task_option(task_name, "force_processing")
         self._has_force = force_val is not None
 
@@ -162,6 +172,12 @@ class DagTaskNode(QGraphicsRectItem):
         self._cb_enabled.stateChanged.connect(self._on_enabled_changed)
         cb_layout.addWidget(self._cb_enabled)
 
+        self._cb_bypass = QCheckBox("Bypass")
+        self._cb_bypass.setChecked(self._bypass)
+        self._cb_bypass.setToolTip(BYPASS_TOOLTIP)
+        self._cb_bypass.stateChanged.connect(self._on_bypass_changed)
+        cb_layout.addWidget(self._cb_bypass)
+
         self._cb_force: QCheckBox | None = None
         if self._has_force:
             self._cb_force = QCheckBox("Force")
@@ -171,6 +187,16 @@ class DagTaskNode(QGraphicsRectItem):
 
         cb_layout.addStretch()
         inner_layout.addWidget(cb_row)
+
+        self._apply_interlocks()
+
+        # Three checkboxes are wider than _MIN_NODE_W and wider than most task
+        # names, so the node is re-measured from the assembled widget rather
+        # than from the label alone.
+        row_w = inner.sizeHint().width() + 2 * _INSET
+        if row_w > node_w:
+            node_w = row_w
+            self.setRect(0, 0, node_w, _NODE_H)
 
         proxy = QGraphicsProxyWidget(self)
         proxy.setWidget(inner)
@@ -190,6 +216,21 @@ class DagTaskNode(QGraphicsRectItem):
             border = _COLOR_BORDER_DISABLED
         self.setBrush(QBrush(bg))
         self.setPen(QPen(border, 1.5))
+
+    def _apply_interlocks(self) -> None:
+        """Grey out the flags the current state makes irrelevant.
+
+        ``setEnabled`` only — **never** ``setChecked``.  A disabled task's
+        ``bypass`` is *inert*, not cancelled: the ladder ignores it while the
+        task stays disabled, and the persisted value must survive the round trip
+        untouched.  Clearing the tick here would quietly rewrite the YAML on the
+        next save, which is exactly the silent mutation this design forbids.
+        """
+        self._cb_bypass.setEnabled(self._enabled)
+        if self._cb_force is not None:
+            # A bypassed task runs nothing, so "force it to re-run" has no
+            # meaning; the value stays as authored.
+            self._cb_force.setEnabled(not self._bypass)
 
     # ------------------------------------------------------------------
     # Run status
@@ -298,8 +339,20 @@ class DagTaskNode(QGraphicsRectItem):
         try:
             self._enabled = self._cb_enabled.isChecked()
             self._apply_colors()
+            self._apply_interlocks()
             self.update()
             self.signals.enabled_changed.emit(self._task_name, self._enabled)
+        finally:
+            self._updating = False
+
+    def _on_bypass_changed(self, _state: int) -> None:
+        if self._updating:
+            return
+        self._updating = True
+        try:
+            self._bypass = self._cb_bypass.isChecked()
+            self._apply_interlocks()
+            self.signals.bypass_changed.emit(self._task_name, self._bypass)
         finally:
             self._updating = False
 
@@ -324,7 +377,10 @@ class DagTaskNode(QGraphicsRectItem):
         try:
             self._enabled = model.is_task_enabled(self._task_name)
             self._cb_enabled.setChecked(self._enabled)
+            self._bypass = model.is_task_bypassed(self._task_name)
+            self._cb_bypass.setChecked(self._bypass)
             self._apply_colors()
+            self._apply_interlocks()
             self.update()
             if self._cb_force is not None:
                 force_val = model.get_task_option(self._task_name, "force_processing")

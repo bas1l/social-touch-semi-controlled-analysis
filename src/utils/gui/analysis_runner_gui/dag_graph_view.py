@@ -42,11 +42,13 @@ class DagGraphView(QGraphicsView):
     node_clicked(task_name)
     enabled_changed(task_name, new_value)
     force_changed(task_name, new_value)
+    bypass_changed(task_name, new_value)
     """
 
     node_clicked = pyqtSignal(str)
     enabled_changed = pyqtSignal(str, bool)
     force_changed = pyqtSignal(str, bool)
+    bypass_changed = pyqtSignal(str, bool)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -141,6 +143,7 @@ class DagGraphView(QGraphicsView):
             node.signals.node_clicked.connect(self.node_clicked)
             node.signals.enabled_changed.connect(self.enabled_changed)
             node.signals.force_changed.connect(self.force_changed)
+            node.signals.bypass_changed.connect(self.bypass_changed)
             node.signals.position_changed.connect(self._on_node_moved)
 
         for name in task_names:

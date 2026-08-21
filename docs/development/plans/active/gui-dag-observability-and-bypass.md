@@ -450,24 +450,24 @@ unaware of it, exactly as `enabled` is today.
 ### Phase 4: Bypass, end to end
 **Goal:** A downstream slice can be re-run without re-deriving its upstream.
 
-- [ ] 4.1 — `DagConfigModel`: add `is_task_bypassed` / `set_task_bypassed`, using
+- [x] 4.1 — `DagConfigModel`: add `is_task_bypassed` / `set_task_bypassed`, using
       `CommentedMap.insert` so a newly written key lands after `enabled` rather than at the
       end of the task map. Add `set_task_dependencies` (writes a `CommentedSeq`, preserving
       flow style where the existing value used it).
-- [ ] 4.2 — `DagTaskNode`: add the `Bypass` checkbox and a `bypass_changed` signal;
+- [x] 4.2 — `DagTaskNode`: add the `Bypass` checkbox and a `bypass_changed` signal;
       `_apply_interlocks` greys `Bypass` when `Enabled` is off and greys `Force` when
       `Bypass` is on — **`setEnabled` only, never `setChecked`**, so an inert flag survives
       untouched. Re-measure the node width from `inner.sizeHint()` after assembling the
       checkbox row, since three checkboxes exceed `_MIN_NODE_W = 180`.
-- [ ] 4.3 — `DagGraphView`: re-emit `bypass_changed`.
-- [ ] 4.4 — `TaskPanel`: add the table-view `Bypass` checkbox and `_make_bypass_handler`;
+- [x] 4.3 — `DagGraphView`: re-emit `bypass_changed`.
+- [x] 4.4 — `TaskPanel`: add the table-view `Bypass` checkbox and `_make_bypass_handler`;
       **replace the `cb.text() == "Force"` / else-is-enabled dispatch in
       `_sync_table_checkboxes` with an explicit role-keyed dict** — with a third checkbox the
       current `else` branch would overwrite `Bypass` with the enabled state.
-- [ ] 4.5 — `runner_window`: `_confirm_bypasses` — a modal listing every enabled+bypassed
+- [x] 4.5 — `runner_window`: `_confirm_bypasses` — a modal listing every enabled+bypassed
       task, stating plainly that nothing is checked, with Cancel as the default button.
       Called before the statuses are cleared, so cancelling preserves the prior run report.
-- [ ] 4.6 — Verify by inspection and by test that the bypass path in `dag_execution`
+- [x] 4.6 — Verify by inspection and by test that the bypass path in `dag_execution`
       performs no filesystem access.
 
 **Files Modified:**
@@ -590,10 +590,10 @@ guarded by `pytest.importorskip("PyQt5")`.
 - [ ] `kill_process_tree` on an already-exited process is a no-op.
 
 `tests/test_dag_config_model_bypass.py`
-- [ ] `set_task_bypassed` round-trips through save/reload with comments, key order and value
+- [x] `set_task_bypassed` round-trips through save/reload with comments, key order and value
       types preserved, and the key placed immediately after `enabled`.
-- [ ] `set_task_dependencies` round-trips and preserves flow style where the original used it.
-- [ ] Mutations set `dirty`.
+- [x] `set_task_dependencies` round-trips and preserves flow style where the original used it.
+- [x] Mutations set `dirty`.
 
 `tests/test_task_registry.py`
 - [ ] Every task id in both live DAG configs resolves in the registry.
