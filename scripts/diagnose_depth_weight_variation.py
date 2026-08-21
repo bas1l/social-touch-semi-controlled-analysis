@@ -55,8 +55,9 @@ separately, because including them would bias the answer in opposite directions:
 * **zero-weight vertices** — contacted at least once with a clamped (grazing)
   penetration, so ``min(w) == 0`` and the ratio is infinite.  These are counted
   and named rather than divided by: at ``alpha > 0`` a vertex whose weights are
-  *all* zero makes ``_compute_touch_rf`` raise, and one whose weights are only
-  *sometimes* zero is the most extreme variation there is.
+  *all* zero has no estimate at all — ``_compute_touch_rf`` excludes it from the
+  map and counts it — and one whose weights are only *sometimes* zero is the most
+  extreme variation there is.
 
 A coefficient of variation (std / mean of each vertex's weights) is reported
 beside the ratio because the ratio is a two-sample statistic — one deep frame and

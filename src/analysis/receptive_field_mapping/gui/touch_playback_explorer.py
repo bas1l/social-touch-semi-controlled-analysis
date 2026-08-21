@@ -4,7 +4,11 @@ Presents two side-by-side PyVista 3D forearm views:
   - Left:  current-frame contact points as red spheres on the forearm point
            cloud (PLY vertex colours when available, grey otherwise)
   - Right: heatmap accumulating from touch start (jet colormap, NaN=grey);
-           mode toggleable between spike density and mean IFF (Hz)
+           mode toggleable between spike density and mean IFF (Hz).  Grey means
+           **no estimate** — never contacted, contacted only grazingly (zero
+           total weight), or no neural value — and never "zero response".  The
+           toolbar counts the contacted vertices in that state, because grey
+           alone cannot distinguish an excluded vertex from an untouched one.
 
 A toolbar provides session / trial / touch dropdowns, playback controls
 (Play, Play All, Stop), a speed spinbox, a heatmap mode combo, and a frame
@@ -46,6 +50,11 @@ from analysis.receptive_field_mapping.data.vertex_accumulator import (
     accumulate_vertex_values_into,
     empty_accumulator,
 )
+from analysis.receptive_field_mapping.data.vertex_estimate import (
+    NoEstimateCounts,
+    count_no_estimate,
+    weighted_mean_or_nan,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -60,12 +69,19 @@ logger = logging.getLogger(__name__)
 # weight sum; ``iff_accum.weight_sum`` is used throughout.
 #
 # The heatmap drawn here is the **same weighted mean** the pipeline writes to
-# ``single_touch_rf_maps_mean.npz``: same reduction (``vertex_accumulator``) and
-# same depth -> weight conversion (``touch_frame_weights``), at the same
-# ``depth_weight_alpha``. That agreement is the entire reason the nine
-# duplicated accumulator blocks were merged in the first place — a viewer
-# drawing a different map from the one on disk is the failure mode that
-# actively misleads — so nothing in this module may re-spell either step.
+# ``single_touch_rf_maps_mean.npz``: same depth -> weight conversion
+# (``touch_frame_weights``), same reduction (``vertex_accumulator``) and same
+# estimator (``vertex_estimate``), at the same ``depth_weight_alpha``. That
+# agreement is the entire reason the nine duplicated accumulator blocks were
+# merged in the first place — a viewer drawing a different map from the one on
+# disk is the failure mode that actively misleads — so nothing in this module may
+# re-spell any of the three steps.
+#
+# The third step was the last to be shared, and it was shared because the two
+# sides had in fact disagreed: the pipeline *raised* on a contacted vertex whose
+# weights all came out zero while this window quietly painted it grey, so the
+# viewer rendered sessions the pipeline refused. Both now exclude that vertex and
+# count it.
 # ----------------------------------------------------------------------
 
 def accumulate_touch_frame(
@@ -118,21 +134,69 @@ def replay_touch_frames(
 def mean_heatmap_scalars(
     value_sum: np.ndarray, weight_sum: np.ndarray
 ) -> np.ndarray:
-    """Per-vertex weighted mean; NaN where the vertex has not been contacted yet.
+    """Per-vertex weighted mean; NaN wherever there is **no estimate**.
 
-    The divisor is the **weight sum**, not the frame count — the same divisor
-    ``_compute_touch_rf`` uses, so the number stays a firing rate in Hz whatever
-    the weights were. The parameter is named for what it now holds: at
-    ``depth_weight_alpha = 0`` every weight is ``1.0`` and it *is* the contact
-    count, but above 0 it is not, and keeping the old name would have made an
-    old screenshot and a new one silently incomparable.
+    Delegates to ``data.vertex_estimate.weighted_mean_or_nan`` — the same
+    function ``_compute_touch_rf`` divides with — so the map on screen and the
+    map on disk cannot drift apart, and the vertices this leaves NaN are exactly
+    the vertices the pipeline omits from the saved ``.npz``.
+
+    The divisor is the **weight sum**, not the frame count, so the number stays a
+    firing rate in Hz whatever the weights were. The parameter is named for what
+    it now holds: at ``depth_weight_alpha = 0`` every weight is ``1.0`` and it
+    *is* the contact count, but above 0 it is not, and keeping the old name would
+    have made an old screenshot and a new one silently incomparable.
+
+    NaN is painted grey by the right-hand plotter (``nan_color``) and means **no
+    estimate** — never "zero response". Three facts land on it, and the plotter
+    cannot tell them apart because none of them is a measurement: the vertex was
+    never contacted; it was contacted but every frame that touched it was
+    grazing, so its total weight is 0 at this alpha; or every contributing
+    frame's neuron value was NaN. A grazing-only vertex must **not** be painted
+    as a low-but-real value — it has no penetration evidence at all, and the
+    weighted estimator is undefined there rather than small. The window's
+    "no estimate" counter reports the second and third cases, which are the two
+    the pipeline also counts.
     """
-    has_contact = weight_sum > 0
-    return np.where(
-        has_contact,
-        value_sum / np.where(has_contact, weight_sum, 1.0),
-        np.nan,
-    )
+    return weighted_mean_or_nan(value_sum, weight_sum)
+
+
+def contacted_vertices(touch: TouchEvent, n_frames: int) -> np.ndarray:
+    """Vertices touched at least once in frames ``[0, n_frames)`` of *touch*.
+
+    Read off the frame vertex lists, never from ``weight_sum > 0``: those two
+    agree at ``depth_weight_alpha = 0`` and part company above it, and telling
+    "never contacted" apart from "contacted but weightless" is the entire point
+    of asking. Same rule as ``_compute_touch_rf``'s contacted set, so the counts
+    below and the pipeline's counts are over the same population.
+    """
+    lists = [
+        np.asarray(touch.frame_vertex_indices[fi])
+        for fi in range(min(n_frames, len(touch.frame_vertex_indices)))
+    ]
+    lists = [v for v in lists if len(v) > 0]
+    if not lists:
+        return np.empty(0, dtype=np.int64)
+    return np.unique(np.concatenate(lists))
+
+
+def no_estimate_summary(
+    value_sum: np.ndarray,
+    weight_sum: np.ndarray,
+    touch: TouchEvent,
+    n_frames: int,
+) -> NoEstimateCounts:
+    """How many *contacted* vertices the heatmap is painting grey, and why.
+
+    The viewer paints "no estimate" and "never touched" the same grey, which is
+    correct — neither is a measurement — but it also makes an excluded vertex
+    invisible. This is what the window puts a number on, using the same
+    ``count_no_estimate`` the pipeline aggregates into
+    ``single_touch_rf_summary.json``, so the screen and the artifact report the
+    same thing.
+    """
+    idx = contacted_vertices(touch, n_frames)
+    return count_no_estimate(value_sum[idx], weight_sum[idx])
 
 
 class TouchPlaybackExplorer(QMainWindow):
@@ -327,6 +391,24 @@ class TouchPlaybackExplorer(QMainWindow):
         self._frame_label = QLabel("Frame: 0 / 0")
         self._frame_label.setFixedWidth(100)
         toolbar.addWidget(self._frame_label)
+
+        toolbar.addSeparator()
+
+        # No-estimate counter. Grey on the right-hand view means "no estimate",
+        # and grey is also what an untouched vertex looks like — so without a
+        # number an excluded vertex is invisible on screen exactly as it is
+        # invisible in the saved ``.npz``. This is the screen's copy of the
+        # ``no_estimate_vertices`` block in ``single_touch_rf_summary.json``.
+        self._no_estimate_label = QLabel("No estimate: 0")
+        self._no_estimate_label.setFixedWidth(230)
+        self._no_estimate_label.setToolTip(
+            "Contacted vertices with no weighted mean, painted grey and omitted "
+            "from the saved map. 'grazing' = every frame that touched the vertex "
+            "was grazing, so its total weight is 0 at this depth_weight_alpha; "
+            "'no neural value' = every contributing frame's IFF was NaN. Neither "
+            "is a zero response — nothing was measured there."
+        )
+        toolbar.addWidget(self._no_estimate_label)
 
     # ------------------------------------------------------------------
     # Combo cascade helpers
@@ -569,6 +651,7 @@ class TouchPlaybackExplorer(QMainWindow):
         n_verts = len(self._data.session_data.forearm_vertices)
         self._forearm_cloud_right["heatmap"] = np.full(n_verts, np.nan, dtype=np.float64)
         self._forearm_cloud_right.Modified()
+        self._no_estimate_label.setText("No estimate: 0")
         self._plotter_right.render()
 
     def _current_heatmap_clim(self) -> Tuple[float, float]:
@@ -596,6 +679,28 @@ class TouchPlaybackExplorer(QMainWindow):
         scalars = mean_heatmap_scalars(channel.value_sum, self._iff_accum.weight_sum)
         self._forearm_cloud_right["heatmap"] = scalars
         self._forearm_cloud_right.Modified()
+        self._update_no_estimate_label(channel)
+
+    def _update_no_estimate_label(self, channel: AccumResult) -> None:
+        """Report how many *contacted* vertices the heatmap is drawing grey.
+
+        Counted over the frames replayed so far, so the number tracks playback
+        the same way the heatmap does. A grazing-only vertex may acquire an
+        estimate later in the touch, once a frame presses in on it.
+        """
+        if self._current_touch is None:
+            self._no_estimate_label.setText("No estimate: 0")
+            return
+        counts = no_estimate_summary(
+            channel.value_sum,
+            self._iff_accum.weight_sum,
+            self._current_touch,
+            self._current_frame + 1,
+        )
+        self._no_estimate_label.setText(
+            f"No estimate: {counts.total} vtx "
+            f"({counts.zero_weight} grazing, {counts.nan_value} no neural value)"
+        )
 
     def _on_heatmap_mode_changed(self, index: int) -> None:
         """Switch the active heatmap mode and rebuild the display."""

@@ -584,24 +584,70 @@ class TestEstimatorGuards:
                 "iff",
             )
 
-    def test_a_contacted_vertex_with_zero_total_weight_raises(self):
-        """Vertex 1 grazes in the only frame that touches it.
+    def test_a_contacted_vertex_with_zero_total_weight_is_excluded_and_counted(self):
+        """Vertex 1 grazes in **both** frames that touch it.
 
-        ``sum(w) == 0`` is a 0/0 in the estimator. It must raise: a NaN in the
-        map would render as an invisible vertex with a non-zero contact count,
-        and falling back to the unweighted mean would mix two estimators in one
-        picture.
+        Frame 0: depths ``(-2.0, +0.4)`` -> penetrations ``(2.0, -0.4)``, clamped
+        to ``(2.0, 0.0)``, ``d_max = 2.0``, weights ``(1.0, 0.0)``.
+        Frame 1: depths ``(-3.0, 0.0)`` -> penetrations ``(3.0, 0.0)``,
+        ``d_max = 3.0``, weights ``(1.0, 0.0)``.
+        So ``sum(w)`` is ``2.0`` at v0 and exactly ``0.0`` at v1.
+
+        ``sum(w) == 0`` is a 0/0: the vertex carries **no penetration evidence**
+        at this alpha, so the weighted estimator is undefined there. The answer
+        is "no estimate", not "stop" — the run originally raised here and that
+        blocked real sessions. It is excluded from all four lists (never
+        emitted as ``0.0`` or ``NaN``, never backfilled from the unweighted mean,
+        which would mix two estimators in one picture) and it is **counted**, so
+        the exclusion is visible in the artifact rather than silent.
+
+        v0 is unaffected: ``(1.0*50 + 1.0*100) / 2.0 == 75.0``.
         """
         touch = _touch(
             frame_vertices=[[0, 1], [0, 1]],
             frame_signed_depths=[[-2.0, 0.4], [-3.0, 0.0]],
             frame_iff=[50.0, 100.0],
         )
-        with pytest.raises(ValueError, match="total weight of 0"):
-            _compute_touch_rf(touch, 2, "iff", 1.0)
+        maps = _compute_touch_rf(touch, 2, "iff", 1.0)
+        assert [i for i, _ in maps.mean_pairs] == [0]
+        assert dict(maps.mean_pairs)[0] == 75.0
+        assert [i for i, _ in maps.max_pairs] == [0]
+        assert [i for i, _ in maps.weight_sum_pairs] == [0]
+        assert [i for i, _ in maps.n_eff_pairs] == [0]
+        assert maps.n_no_estimate_zero_weight == 1
+        assert maps.n_no_estimate_nan_value == 0
+
+    def test_a_partly_grazing_vertex_still_gets_a_normal_weighted_mean(self):
+        """Only an **all**-grazing vertex is excluded. One deep frame is enough.
+
+        v1 grazes in frame 0 (weight 0) and is the deepest point of frame 1
+        (weight 1.0), so ``sum(w) = 1.0`` and its mean is the plain 100 Hz of the
+        one frame that pressed in — the grazing frame contributes 0 to both the
+        numerator and the denominator and therefore cannot dilute it.
+        v0: weights ``(1.0, 1.0/3.0)``, mean ``(50 + 100/3) / (4/3) = 62.5``.
+        """
+        touch = _touch(
+            frame_vertices=[[0, 1], [0, 1]],
+            frame_signed_depths=[[-2.0, 0.4], [-1.0, -3.0]],
+            frame_iff=[50.0, 100.0],
+        )
+        maps = _compute_touch_rf(touch, 2, "iff", 1.0)
+        got = dict(maps.mean_pairs)
+        assert sorted(got) == [0, 1]
+        assert got[1] == 100.0
+        assert got[0] == pytest.approx(62.5, rel=1e-12)
+        assert dict(maps.weight_sum_pairs)[1] == 1.0
+        assert maps.n_no_estimate_zero_weight == 0
+        assert maps.n_no_estimate_nan_value == 0
 
     def test_the_same_vertex_is_fine_at_alpha_zero(self):
-        """A grazing vertex is not an error — it is only weightless above 0."""
+        """A grazing vertex is only weightless above 0 — and never at 0.
+
+        This is the invariant the exclusion cannot touch: at ``alpha = 0`` every
+        weight is exactly ``1.0`` (``0.0 ** 0.0 == 1.0``), so a contacted vertex
+        can never reach ``sum(w) == 0`` and nothing is ever excluded for that
+        reason.
+        """
         touch = _touch(
             frame_vertices=[[0, 1], [0, 1]],
             frame_signed_depths=[[-2.0, 0.4], [-3.0, 0.0]],
@@ -656,13 +702,19 @@ class TestEstimatorGuards:
             _compute_touch_rf(touch, 3, "iff", 1.0)
 
     def test_a_touch_with_no_contact_points_returns_four_empty_lists(self):
+        """No contact points means nothing to exclude, so both counts are 0.
+
+        Zero excluded is the honest answer here: the touch contacted no vertex,
+        so no vertex failed to get an estimate. It is *not* the same fact as
+        "every contacted vertex was grazing", which the counts report as > 0.
+        """
         touch = _touch(
             frame_vertices=[[], []],
             frame_signed_depths=[[], []],
             frame_iff=[50.0, 100.0],
         )
         maps = _compute_touch_rf(touch, 4, "iff", 1.0)
-        assert maps == ([], [], [], [])
+        assert maps == ([], [], [], [], 0, 0)
 
 
 class TestUniformDepthReproducesTodaysMap:

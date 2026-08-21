@@ -30,6 +30,12 @@ from .vertex_accumulator import (
     accumulate_vertex_values,
     accumulate_vertex_values_into,
 )
+from .vertex_estimate import (
+    NoEstimateCounts,
+    weighted_mean_or_nan,
+    has_estimate,
+    count_no_estimate,
+)
 from .vertex_weights import vertex_weights
 from .touch_frame_weights import touch_frame_weights, touch_label
 from .rf_extraction_io import (
@@ -125,6 +131,11 @@ __all__ = [
     "empty_accumulator",
     "accumulate_vertex_values",
     "accumulate_vertex_values_into",
+    # vertex_estimate
+    "NoEstimateCounts",
+    "weighted_mean_or_nan",
+    "has_estimate",
+    "count_no_estimate",
     # vertex_weights
     "vertex_weights",
     # touch_frame_weights

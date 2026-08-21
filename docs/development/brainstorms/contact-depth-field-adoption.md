@@ -416,15 +416,59 @@ no tuning knob deciding the peak, and the numbers stay honest Hz.
 ### Guards that are not optional
 - **d_max = 0** (every vertex in a frame grazing) is a 0/0. NumPy would quietly rescue
   alpha=0 via `NaN ** 0 == 1.0`. Explicit check, explicit raise — no relying on IEEE trivia.
+  This one is untouched: a *frame* in which nothing pressed in says the frame should not have
+  been recorded as a touch at all.
 - **sum(w) = 0** for a vertex is reachable at alpha > 0. Today `count >= 1` always. Explicit
-  policy, never a NaN flowing into the map.
+  policy, never a NaN flowing into the map. **Revised 2026-08-21: the policy is exclude-and-count,
+  not raise.** See "Guards revised after contact with data" below.
 - **NaN depth** rejected at the loader boundary, where "zero" and "absent" are still separable.
   At alpha > 0 both collapse to w = 0.
 - **Not a guard: duplicate `(frame_index, vertex_id)`.** Section 7 item 3 put "assert, don't reduce"
   on this list. It was implemented, it fired on real data, and it was then **removed** — see the
   correction in section 7 item 3. The premise (that the numerator/denominator cancellation held only
   while every weight was 1) did not survive contact with the algebra: IFF is a per-frame scalar and
-  factors out at any weights. The duplicate rows are summed; the three guards above are untouched.
+  factors out at any weights. The duplicate rows are summed.
+
+### Guards revised after contact with data
+
+Two of the items originally written as hard stops have now been revised after they fired on real
+sessions. Recording that honestly matters more than the section title: "not optional" was a claim
+about *policy being explicit*, and it survives both revisions — what did not survive, twice, was the
+assumption that "explicit" had to mean "raise".
+
+**1. Duplicate `(frame_index, vertex_id)`** — removed entirely. Its premise was false; the algebra
+never required it. See section 7 item 3.
+
+**2. `sum(w) = 0` for a vertex** — downgraded from raise to **exclude and count**, 2026-08-21.
+
+It fired on `2022-06-15_ST14-02`, block 2 / trial 6 / single_touch 32, vertex 2252, at
+`depth_weight_alpha = 1.0`, and blocked the run. The error message's *reasoning* was right and is
+still enforced: there is no fallback to the unweighted mean, because that would put two different
+estimators inside one map and nothing on disk would say which vertex used which. What was wrong was
+the severity. A vertex whose every contact was grazing carries **zero penetration evidence**; the
+weighted estimator is genuinely undefined there. "No estimate" is the correct output. "Stop" is not
+— it treats an undefined vertex as if it were a broken input, and one such vertex out of thousands
+halted a whole session.
+
+So the vertex is dropped from all four output lists — never emitted as `0.0`, never as `NaN`
+pretending to be a measurement, never backfilled — and it is **counted**: per touch in
+`TouchRFMaps.n_no_estimate_zero_weight`, and aggregated into `single_touch_rf_summary.json` under
+`no_estimate_vertices`, alongside the `depth_weight_alpha` that produced it. Excluding and reporting
+is not a silent fallback; excluding and saying nothing would be.
+
+The same episode exposed a second, quieter bug. The viewer had **no** zero-weight handling at all:
+`mean_heatmap_scalars` divided only where `weight_sum > 0` and left the rest NaN, so the Touch
+Playback Explorer had been rendering that exact session without complaint while the pipeline refused
+it. Screen and file disagreed about which vertices even had a value — the failure mode the
+nine-site accumulator merge existed to prevent, reappearing one layer up in the *estimator* rather
+than the reduction. The fix is the same shape as that merge: the estimator and the "no estimate"
+predicate now live once, in `data/vertex_estimate.py`, and both the pipeline and the viewer call it.
+A test pins that the vertices painted grey and the vertices missing from the saved map are the same
+set, at every alpha, for both causes of "no estimate".
+
+**The `alpha = 0` invariant is untouched by all of this.** At `alpha = 0` every weight is exactly
+`1.0`, so a contacted vertex can never reach `sum(w) = 0` and nothing is ever excluded for that
+reason. The byte-identity parity claim stands unchanged.
 
 ### Scope decision
 The averaging maths exists in **9 places** (pipeline, `rf_population_heatmap.py`, and 7 copies
