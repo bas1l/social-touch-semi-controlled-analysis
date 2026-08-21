@@ -20,6 +20,7 @@ tasks:
   explore_precompute_caches:
     category: viewer_support
     enabled: false
+    bypass: false
     options:
       force_processing: false
       max_workers: 1
@@ -36,6 +37,7 @@ tasks:
   explore_preparation:
     category: viewer
     enabled: false
+    bypass: false
     options:
       force_processing: false
     depends_on: []
@@ -46,6 +48,7 @@ tasks:
   explore_feature_space:
     category: viewer
     enabled: false
+    bypass: false
     options:
       force_processing: false
     depends_on: [explore_precompute_caches]
@@ -55,6 +58,7 @@ tasks:
   explore_touch_playback:
     category: viewer
     enabled: true
+    bypass: false
     options:
       force_processing: false
       # Exponent of the per-contact-point depth weighting applied to the right-hand
@@ -84,6 +88,7 @@ tasks:
   explore_single_touch_rf:
     category: viewer
     enabled: false
+    bypass: false
     options:
       force_processing: false
       neuron_mode: iff
@@ -97,6 +102,7 @@ tasks:
   explore_touch_population:
     category: viewer
     enabled: false
+    bypass: false
     options:
       force_processing: false
       neuron_mode: iff
@@ -110,6 +116,7 @@ tasks:
   explore_rf_gallery:
     category: viewer
     enabled: false
+    bypass: false
     options:
       force_processing: false
       cluster_groups: [pressure_velocity_mean_cartesian_binning]
@@ -123,6 +130,7 @@ tasks:
   explore_rf_surface:
     category: viewer
     enabled: false
+    bypass: false
     options:
       force_processing: false
       neuron_mode: iff

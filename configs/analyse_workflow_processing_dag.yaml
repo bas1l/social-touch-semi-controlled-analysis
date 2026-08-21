@@ -24,6 +24,7 @@ tasks:
   touch_summarize_blocks:
     category: foundation
     enabled: true
+    bypass: false
     options:
       force_processing: false
     depends_on: []
@@ -34,6 +35,7 @@ tasks:
   touch_prepare_sessions:
     category: foundation
     enabled: true
+    bypass: false
     options:
       force_processing: false
       preparation:
@@ -48,6 +50,7 @@ tasks:
   spatial_map_single_touch:
     category: spatial_sensitivity
     enabled: true
+    bypass: false
     options:
       force_processing: false
       neuron_mode: iff
@@ -81,6 +84,7 @@ tasks:
   touch_compute_series:
     category: foundation
     enabled: true
+    bypass: false
     options:
       force_processing: false
       transforms:
@@ -118,6 +122,7 @@ tasks:
   spatial_set_camera:
     category: viewer_required
     enabled: true
+    bypass: false
     options:
       force_processing: false
     depends_on: [touch_compute_series]
@@ -129,6 +134,7 @@ tasks:
   spatial_map_baseline:
     category: spatial_sensitivity
     enabled: true
+    bypass: false
     options:
       force_processing: false
       # Debugging toggle: when true, opens an interactive matplotlib window mid-run.
@@ -145,6 +151,7 @@ tasks:
   spatial_configure_slim_uv:
     category: viewer_required
     enabled: true
+    bypass: false
     options:
       # When false (default), sessions that already have slim_uv_config.yaml
       # are skipped; the GUI only opens for sessions missing a config.
@@ -170,6 +177,7 @@ tasks:
   spatial_precompute_slim_uv:
     category: spatial_sensitivity
     enabled: true
+    bypass: false
     options:
       force_processing: false
       n_iter: 40
@@ -209,6 +217,7 @@ tasks:
   spatial_configure_stroke_axis:
     category: viewer_required
     enabled: true
+    bypass: false
     options:
       # When false (default), sessions that already have a saved stroke-axis JSON
       # are skipped; the GUI only opens for sessions missing one. Set true to
@@ -229,6 +238,7 @@ tasks:
   spatial_build_response_fields:
     category: automated
     enabled: true
+    bypass: false
     options:
       force_processing: false
       # Which IFF aggregation NPZ to consume ('mean' or 'max'). 'both' is not
@@ -261,6 +271,7 @@ tasks:
   spatial_extract_boundary__radial:
     category: spatial_sensitivity
     enabled: true
+    bypass: false
     options:
       force_processing: false
       neuron_mode: iff
@@ -288,6 +299,7 @@ tasks:
   spatial_extract_boundary__gradient:
     category: spatial_sensitivity
     enabled: true
+    bypass: false
     options:
       force_processing: false
       neuron_mode: iff
@@ -309,6 +321,7 @@ tasks:
   spatial_extract_boundary__inflection:
     category: spatial_sensitivity
     enabled: true
+    bypass: false
     options:
       force_processing: false
       neuron_mode: iff
@@ -330,6 +343,7 @@ tasks:
   spatial_extract_boundaries:
     category: spatial_sensitivity
     enabled: true
+    bypass: false
     options:
       force_processing: false
       # Must match the method nodes' iff_metric (used to locate their run sentinels
@@ -349,6 +363,7 @@ tasks:
   spatial_tune_rf_contours:
     category: viewer_required
     enabled: true
+    bypass: false
     options:
       # When false (default), sessions that already have a tuned JSON for every
       # gesture subset are skipped; the GUI only opens for sessions missing at
@@ -378,6 +393,7 @@ tasks:
   spatial_compare_boundaries:
     category: spatial_sensitivity
     enabled: true
+    bypass: false
     options:
       force_processing: false
       iff_metric: both
@@ -395,6 +411,7 @@ tasks:
   spatial_compare_proximal_distal:
     category: spatial_sensitivity
     enabled: true
+    bypass: false
     options:
       force_processing: false
       iff_metric: both
@@ -412,6 +429,7 @@ tasks:
   spatial_compare_tap_stroke:
     category: spatial_sensitivity
     enabled: true
+    bypass: false
     options:
       force_processing: false
       iff_metric: both
@@ -428,6 +446,7 @@ tasks:
   spatial_extract_rf_profiles:
     category: spatial_sensitivity
     enabled: true
+    bypass: false
     options:
       force_processing: true
       iff_metric: mean
@@ -438,6 +457,7 @@ tasks:
   stimulus_extract_features:
     category: stimulus_sensitivity
     enabled: true
+    bypass: false
     options:
       force_processing: false
       # Each key is an aggregation family. StatisticalExtractor auto-discovers all numeric
@@ -471,6 +491,7 @@ tasks:
   stimulus_render_radar:
     category: stimulus_sensitivity
     enabled: true
+    bypass: false
     options:
       force_processing: false
       radar_groups:
@@ -488,6 +509,7 @@ tasks:
   stimulus_compare_sessions:
     category: stimulus_sensitivity
     enabled: true
+    bypass: false
     options:
       force_processing: false
       plot_type: box_strip
@@ -509,6 +531,7 @@ tasks:
   stimulus_response_tuning:
     category: stimulus_sensitivity
     enabled: true
+    bypass: false
     options:
       force_processing: false
       response_metric: all
@@ -541,6 +564,7 @@ tasks:
   stimulus_response_instruction_tuning:
     category: stimulus_sensitivity
     enabled: true
+    bypass: false
     options:
       force_processing: false
       iff_metric: both
@@ -564,6 +588,7 @@ tasks:
   spatial_tuning_rf_metrics:
     category: spatial_sensitivity
     enabled: false
+    bypass: false
     options:
       force_processing: false
       gesture_subsets: [all, tap, stroke, stroke_proximal, stroke_distal]
@@ -591,6 +616,7 @@ tasks:
   cross_map_feature_grid:
     category: cross_domain
     enabled: false
+    bypass: false
     options:
       force_processing: false
       iff_metric: mean
@@ -629,6 +655,7 @@ tasks:
   cross_extract_grid_metrics:
     category: cross_domain
     enabled: false
+    bypass: false
     options:
       force_processing: false
       projection_method: tangent_plane
@@ -639,6 +666,7 @@ tasks:
   cross_render_grid_metrics:
     category: cross_domain
     enabled: true
+    bypass: false
     options:
       force_processing: false
       extracted_features:
@@ -657,6 +685,7 @@ tasks:
   cross_render_sessions:
     category: cross_domain
     enabled: true
+    bypass: false
     options:
       force_processing: false
       neuron_mode: iff
@@ -679,6 +708,7 @@ tasks:
   stimulus_cluster_touches:
     category: stimulus_sensitivity
     enabled: false
+    bypass: false
     options:
       force_processing: false
       cluster_groups:
@@ -861,6 +891,7 @@ tasks:
   stimulus_compare_clusters:
     category: stimulus_sensitivity
     enabled: false
+    bypass: false
     options:
       force_processing: false
       cluster_groups: [pressure_velocity_mean_cartesian_binning]
@@ -886,6 +917,7 @@ tasks:
   stimulus_analyse_efficacy:
     category: stimulus_sensitivity
     enabled: false
+    bypass: false
     options:
       force_processing: false
     depends_on: [stimulus_extract_features]
@@ -895,6 +927,7 @@ tasks:
   cross_extract_cluster_rf:
     category: cross_domain
     enabled: false
+    bypass: false
     options:
       force_processing: false
       cluster_groups: [pressure_velocity_mean_cartesian_binning]
@@ -905,6 +938,7 @@ tasks:
   cross_compute_cluster_metrics:
     category: cross_domain
     enabled: false
+    bypass: false
     options:
       force_processing: false
       cluster_groups: [pressure_velocity_mean_cartesian_binning]
@@ -916,6 +950,7 @@ tasks:
   cross_render_cluster_rf:
     category: cross_domain
     enabled: false
+    bypass: false
     options:
       force_processing: false
       cluster_groups: [pressure_velocity_mean_cartesian_binning]

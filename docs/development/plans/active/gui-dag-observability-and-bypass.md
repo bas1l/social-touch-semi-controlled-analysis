@@ -360,29 +360,29 @@ unaware of it, exactly as `enabled` is today.
 ### Phase 1: Qt-free execution core and event contract
 **Goal:** The child process walks the DAG through a testable pure core and reports a truthful exit code.
 
-- [ ] 1.1 — Add `execution_events.py`: `TaskStatus`, the four frozen event dataclasses,
+- [x] 1.1 — Add `execution_events.py`: `TaskStatus`, the four frozen event dataclasses,
       `SENTINEL_PREFIX`, `encode_event`, `decode_event`.
-- [ ] 1.2 — Add `dag_plan.py`: `DagTask`, `DagPlan` with strict key validation (required:
+- [x] 1.2 — Add `dag_plan.py`: `DagTask`, `DagPlan` with strict key validation (required:
       `category`, `enabled`, `bypass`, `options`, `depends_on`; optional: `min_inputs`,
       `max_inputs`), unknown-key rejection, unknown-dependency rejection, cycle detection
       naming the members, Kahn ordering with YAML authoring order as tie-break,
       `can_run` / `mark_completed` / `mark_bypassed` / `guard_violation`.
-- [ ] 1.3 — Add `dag_execution.py`: `RunOutcome` and `execute_dag` implementing the 7-row
+- [x] 1.3 — Add `dag_execution.py`: `RunOutcome` and `execute_dag` implementing the 7-row
       ladder, emitting exactly one terminal event per task.
-- [ ] 1.4 — Rewrite `stage_runner.run_pipeline_stages` as the adapter: build a `DagPlan`
+- [x] 1.4 — Rewrite `stage_runner.run_pipeline_stages` as the adapter: build a `DagPlan`
       from the `DagConfigHandler`'s already-loaded mapping, inject a `run_task` that opens
       the existing per-task work (lazy `params()`, common kwargs, Prefect flow call) and
       converts an exception into a non-zero result, inject an `emit` that prints
       `encode_event(...)` with `flush=True` **and** forwards to `PipelineMonitor.update` so
       the existing status vocabulary keeps working. Return the `RunOutcome`.
-- [ ] 1.5 — `analysis_workflow_processing.main()` and `analysis_workflow_viewers.main()`
+- [x] 1.5 — `analysis_workflow_processing.main()` and `analysis_workflow_viewers.main()`
       return `outcome.exit_code`; both entry guards become `sys.exit(main())`. Print a
       final summary block (counts per status; named failed and skipped tasks).
-- [ ] 1.6 — Add `bypass: false` to all 35 tasks in `configs/analyse_workflow_processing_dag.yaml`,
+- [x] 1.6 — Add `bypass: false` to all 35 tasks in `configs/analyse_workflow_processing_dag.yaml`,
       all 8 in `analyse_workflow_viewers_dag.yaml`, and all 15 in the unused
       `analyse_workflow_dag.yaml`, inserted immediately after `enabled` to preserve the
       repo-wide `category, enabled, bypass, options, depends_on` key order.
-- [ ] 1.7 — Add `min_inputs`/`max_inputs` support in the plan parser (no config declares
+- [x] 1.7 — Add `min_inputs`/`max_inputs` support in the plan parser (no config declares
       them yet; the keys are optional).
 
 **Files Modified:**

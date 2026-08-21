@@ -179,6 +179,52 @@ def test_barrier_has_layout():
     )
 
 
+_ALL_DAG_YAMLS = sorted((_REPO / "configs").glob("analyse_workflow*_dag.yaml"))
+
+
+def test_every_dag_config_is_discovered():
+    # Guards the glob above: a renamed config must not silently drop out of the
+    # bypass conformance check below.
+    assert len(_ALL_DAG_YAMLS) == 3, [p.name for p in _ALL_DAG_YAMLS]
+
+
+@pytest.mark.parametrize("dag_yaml", _ALL_DAG_YAMLS, ids=lambda p: p.name)
+def test_every_task_declares_bypass(dag_yaml):
+    """``bypass`` is a *required* key, so a config that omits it fails at load.
+
+    A branch that adds a task node merges cleanly as text but produces a config
+    the plan parser rejects; this test makes that failure surface in CI rather
+    than at run time.
+    """
+    yaml = YAML()
+    with open(dag_yaml, "r", encoding="utf-8") as f:
+        tasks = yaml.load(f)["tasks"]
+
+    missing = [name for name, task in tasks.items() if "bypass" not in task]
+    assert not missing, f"{dag_yaml.name}: task(s) with no 'bypass' key: {missing}"
+
+    non_boolean = [
+        name for name, task in tasks.items() if not isinstance(task["bypass"], bool)
+    ]
+    assert not non_boolean, (
+        f"{dag_yaml.name}: task(s) whose 'bypass' is not a boolean: {non_boolean}"
+    )
+
+
+@pytest.mark.parametrize("dag_yaml", _ALL_DAG_YAMLS, ids=lambda p: p.name)
+def test_bypass_sits_immediately_after_enabled(dag_yaml):
+    yaml = YAML()
+    with open(dag_yaml, "r", encoding="utf-8") as f:
+        tasks = yaml.load(f)["tasks"]
+
+    misplaced = {
+        name: list(task.keys())[:3]
+        for name, task in tasks.items()
+        if list(task.keys())[:3] != ["category", "enabled", "bypass"]
+    }
+    assert not misplaced, f"{dag_yaml.name}: unexpected leading key order: {misplaced}"
+
+
 def test_downstream_consumers_still_depend_on_barrier_only():
     # Phase 4 must not touch downstream depends_on: each still points at the barrier.
     for consumer in (
