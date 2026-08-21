@@ -501,13 +501,19 @@ unaware of it, exactly as `enabled` is today.
       shipped this as a fix for a startup `RecursionError` when `_load_layout` sets positions.
 - [ ] 5.7 — Declare `min_inputs`/`max_inputs` on the tasks that need them (candidates
       identified during implementation; none is mandatory to ship the mechanism).
+- [ ] 5.8 — Replace `DagGraphView._load_layout`'s `saved.get("nodes", {})` with a loud
+      failure on a sidecar that has no `"nodes"` mapping. That silent default is what turned
+      the flat-to-nested schema change into invisible loss of hand-placed node positions:
+      the GUI auto-laid-out every launch and overwrote the file on the first drag. A layout
+      file that exists but cannot be read is a fail-fast condition, not a fallback to
+      auto-layout. (Repairing the data was Phase 0; this closes the hole that hid it.)
 
 **Files Modified:**
 - `configs/analysis_task_registry.yaml` — new.
 - `src/analysis/pipeline/task_registry.py` — new.
 - `src/utils/gui/analysis_runner_gui/task_detail_panel.py` — description label.
 - `src/utils/gui/analysis_runner_gui/dag_graph_items.py` — grid snap, drag threshold.
-- `src/utils/gui/analysis_runner_gui/dag_graph_view.py` — background grid, re-entrancy guard.
+- `src/utils/gui/analysis_runner_gui/dag_graph_view.py` — background grid, re-entrancy guard, loud layout-load failure.
 
 **Dependencies:** Phase 2
 
