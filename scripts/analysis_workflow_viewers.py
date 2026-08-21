@@ -5,7 +5,7 @@ import argparse
 import logging
 from pathlib import Path
 from multiprocessing import Queue, freeze_support
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from prefect import flow
 
@@ -75,6 +75,7 @@ def explore_feature_space_flow(
 def explore_touch_playback_flow(
     input_items: List[Tuple[Path, Path]],
     force_processing: bool = False,
+    contact_depth_field: Optional[dict] = None,
 ) -> None:
     """
     Launch the Touch Playback Explorer GUI for the given sessions.
@@ -87,7 +88,7 @@ def explore_touch_playback_flow(
     if not input_items:
         return
 
-    launch_touch_playback_explorer(input_items)
+    launch_touch_playback_explorer(input_items, contact_depth_field=contact_depth_field)
 
 
 @flow(name="explore_touch_population")
@@ -342,7 +343,11 @@ def main():
         {
             "name": "explore_touch_playback",
             "func": explore_touch_playback_flow,
-            "params": lambda: {},
+            "params": lambda: {
+                "contact_depth_field": dag_handler.get_task_options(
+                    "explore_touch_playback"
+                ).get("contact_depth_field"),
+            },
         },
         {
             "name": "explore_single_touch_rf",

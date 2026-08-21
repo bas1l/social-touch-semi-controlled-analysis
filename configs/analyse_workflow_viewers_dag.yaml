@@ -57,6 +57,14 @@ tasks:
     enabled: true
     options:
       force_processing: false
+      # Where the per-vertex contact-depth-field parquet sidecars live. The playback
+      # loader reads each contact point's vertex_id off these, joined on frame_index,
+      # so the viewer draws the same vertex assignment the pipeline writes to disk.
+      # Keep in step with tasks.spatial_map_single_touch.options.contact_depth_field
+      # in the processing DAG config.
+      contact_depth_field:
+        blocks_stage_dir: blocks_rf_centered
+        block_csv_stem_suffix: _pca-xyz
     depends_on: []
 
   # Single-Touch RF Explorer: per-touch RF heatmap viewer on the 3D forearm model.

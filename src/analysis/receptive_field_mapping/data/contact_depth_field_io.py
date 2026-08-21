@@ -87,6 +87,19 @@ COORDINATE_SPACES: tuple[str, ...] = (
     "rf_centered",
 )
 
+# The three coordinate spaces a *terminal* ``blocks_rf_centered/`` sidecar can
+# legitimately declare. ``rf_centered`` is the normal case; ``pca_calibrated`` means the
+# RF-centring stage took its documented passthrough branch (no RF cluster found, so the
+# file is a byte-identical copy of ``blocks_pca_calibrated/`` and the RF centre was never
+# subtracted); ``kinect_space_1`` means the block additionally had no ICP snapshot.
+# Asserting membership in this closed set is NOT a fallback: it is the full enumeration of
+# what the producer can honestly write there, and anything outside it is a contract breach.
+TERMINAL_RF_CENTERED_SPACES: tuple[str, ...] = (
+    "rf_centered",
+    "pca_calibrated",
+    "kinect_space_1",
+)
+
 # The three post-projection forearm PLYs that are transformed *in place, in file
 # order*, with no reordering, filtering or count change — so ``vertex_id`` indexes
 # all of them identically. Any other blocks directory has no documented in-place
@@ -151,6 +164,40 @@ def depth_field_path_for_csv(csv_path: Path) -> Path:
         )
     sidecar_stem = stem.replace(_MERGED_DATA_MARKER, _DEPTH_FIELD_MARKER)
     return csv_path.parent / f"{sidecar_stem}.parquet"
+
+
+def declared_coordinate_space(sidecar_path: Path) -> str:
+    """Return the ``coordinate_space`` *declared in the parquet file metadata*.
+
+    Reads the schema only — no row group is touched — so this is cheap enough to call
+    before deciding what to expect of the file.
+
+    This exists because :func:`load_depth_field` requires an ``expect_space``, while a
+    terminal ``blocks_rf_centered/`` sidecar has **three** legitimate declared values
+    (:data:`TERMINAL_RF_CENTERED_SPACES`). The caller reads the declared value here,
+    asserts it against its own closed set, and then passes what it actually found. The
+    trap this module closes is *inferring* the space from a directory name; reading it
+    from the file and checking it against an enumeration is the opposite of that.
+
+    Raises ``FileNotFoundError`` when the sidecar is absent and ``ValueError`` when the
+    file carries no metadata or no ``coordinate_space`` key.
+    """
+    sidecar_path = Path(sidecar_path)
+    if not sidecar_path.exists():
+        raise FileNotFoundError(
+            f"declared_coordinate_space: depth-field sidecar not found: {sidecar_path}"
+        )
+    schema = pq.read_schema(sidecar_path)
+    raw = schema.metadata
+    if not raw:
+        raise ValueError(
+            f"declared_coordinate_space: sidecar {sidecar_path} carries no file-level "
+            f"metadata, so its coordinate space cannot be read. The directory name is "
+            f"NEVER consulted as a substitute — it is documented to lie for 8 of 11 "
+            f"sessions. Regenerate the sidecar."
+        )
+    meta = {k.decode("utf-8"): v.decode("utf-8") for k, v in raw.items()}
+    return _require_meta(meta, "coordinate_space", sidecar_path)
 
 
 def forearm_ply_path_for_sidecar(sidecar_path: Path, session_id: str) -> Path:
@@ -283,6 +330,31 @@ class DepthField:
         if self.has_vertex_id:
             selected = selected.sort_values(VERTEX_ID_COLUMN, kind="stable")
         return selected
+
+    def frame_row_positions_in_file_order(self) -> dict[int, np.ndarray]:
+        """Map each ``frame_index`` **value** to its row positions, in **file order**.
+
+        This is the index that makes *ordered correspondence* possible: within one
+        ``frame_index``, the k-th row of this file is the k-th point listed in that
+        frame's CSV ``contact_points`` cell. The producer enforces that agreement after
+        every stage (``assert_row_counts_agree_with_csv``), and it is the only exact
+        pairing the two artifacts have.
+
+        Deliberately **unsorted within a frame**, unlike :meth:`frame`, which sorts by
+        ``vertex_id`` defensively for callers that only aggregate. Sorting here would
+        silently destroy the correspondence and hand every contact point the wrong
+        vertex, so the two accessors are kept separate rather than parameterised.
+
+        This is *not* a licence to join row *i* of this file to row *i* of the CSV
+        across the whole file: the CSV is at nerve rate with a variable number of points
+        per frame while this file is at frame rate. Locate the frame by ``frame_index``
+        value first; only then index by position *inside* that frame.
+        """
+        return {
+            int(key): np.asarray(positions, dtype=np.int64)
+            for key, positions in
+            self.frames.groupby("frame_index", sort=False).indices.items()
+        }
 
     def xyz_for(self, frame_index: int) -> np.ndarray:
         """Return the ``(N, 3)`` contact coordinates of frame *frame_index*.

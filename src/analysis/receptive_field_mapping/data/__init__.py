@@ -9,6 +9,7 @@ from .rf_data_loader import (
 )
 from .contact_depth_field_io import (
     COORDINATE_SPACES,
+    TERMINAL_RF_CENTERED_SPACES,
     VERTEX_ID_COLUMN,
     CoordinateSpaceError,
     DepthFieldSchemaError,
@@ -16,6 +17,7 @@ from .contact_depth_field_io import (
     DepthField,
     load_depth_field,
     penetration_mm,
+    declared_coordinate_space,
     depth_field_path_for_csv,
     forearm_ply_path_for_sidecar,
     validate_depth_field_schema,
@@ -67,6 +69,7 @@ from .touch_population_data import (
 from .touch_playback_data import (
     PlaybackSessionData,
     TouchEvent,
+    DepthFieldProvenance,
     PlaybackData,
     load_playback_data,
 )
@@ -98,6 +101,7 @@ __all__ = [
     "load_grouped_spatial_data",
     # contact_depth_field_io
     "COORDINATE_SPACES",
+    "TERMINAL_RF_CENTERED_SPACES",
     "VERTEX_ID_COLUMN",
     "CoordinateSpaceError",
     "DepthFieldSchemaError",
@@ -105,6 +109,7 @@ __all__ = [
     "DepthField",
     "load_depth_field",
     "penetration_mm",
+    "declared_coordinate_space",
     "depth_field_path_for_csv",
     "forearm_ply_path_for_sidecar",
     "validate_depth_field_schema",
@@ -152,6 +157,7 @@ __all__ = [
     # touch_playback_data
     "PlaybackSessionData",
     "TouchEvent",
+    "DepthFieldProvenance",
     "PlaybackData",
     "load_playback_data",
     # rf_explorer_data

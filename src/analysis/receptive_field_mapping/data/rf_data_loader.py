@@ -202,21 +202,40 @@ def parse_contact_points(point_str: str) -> List[Tuple[float, float, float]]:
 
     Expected format: ``[[x1 y1 z1] [x2 y2 z2]]`` or ``"[]"``.
     Returns a list of ``(x, y, z)`` tuples.
+
+    Every bracketed group **must** parse as exactly three floats. A group that
+    does not raises ``ValueError`` — it is never skipped. Silently dropping a
+    malformed triplet is the single most dangerous failure mode this parser has:
+    the k-th point of a frame is joined to the k-th row of that frame in the
+    contact-depth-field parquet sidecar (ordered correspondence, see
+    ``docs/data-contracts/contact-depth-field.md``), so one dropped point shifts
+    every later point of the frame onto the **wrong** sidecar row and produces a
+    plausible-looking but wrong map. Raising here is the first line of defence;
+    the per-frame count assertion against the sidecar is the second.
     """
-    if pd.isna(point_str) or point_str.strip() == "[]" or not isinstance(point_str, str):
+    if pd.isna(point_str) or not isinstance(point_str, str) or point_str.strip() == "[]":
         return []
 
     points: List[Tuple[float, float, float]] = []
     matches = re.findall(r'\[([^\]]+)\]', point_str)
 
     for match in matches:
+        parts = match.strip().lstrip("[").split()
+        if len(parts) != 3:
+            raise ValueError(
+                f"parse_contact_points: bracketed group {match!r} has {len(parts)} "
+                f"field(s), expected exactly 3 (x y z). Full cell: {point_str!r}. "
+                f"A malformed triplet is never skipped — dropping it would shift "
+                f"every later point of this frame onto the wrong depth-field row."
+            )
         try:
-            parts = match.strip().lstrip("[").split()
-            if len(parts) == 3:
-                pt = (float(parts[0]), float(parts[1]), float(parts[2]))
-                points.append(pt)
-        except ValueError:
-            continue
+            pt = (float(parts[0]), float(parts[1]), float(parts[2]))
+        except ValueError as exc:
+            raise ValueError(
+                f"parse_contact_points: bracketed group {match!r} is not three "
+                f"floats ({exc}). Full cell: {point_str!r}."
+            ) from exc
+        points.append(pt)
 
     return points
 

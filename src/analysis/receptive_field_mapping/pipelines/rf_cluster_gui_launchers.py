@@ -127,6 +127,7 @@ def launch_feature_space_explorer(
 
 def launch_touch_playback_explorer(
     input_items: List[Tuple[Path, Path]],
+    contact_depth_field: Optional[dict] = None,
 ) -> None:
     """Launch the Touch Playback Explorer GUI for all sessions in input_items.
 
@@ -141,21 +142,46 @@ def launch_touch_playback_explorer(
     input_items:
         List of ``(aggregated_csv_path, database_path)`` tuples, one per
         session — the same format used throughout the analysis pipeline.
+    contact_depth_field:
+        Options block naming the blocks stage subdirectory holding the
+        contact-depth-field parquet sidecars and the stem suffix that stage uses.
+        Required: each contact point's vertex identity is read off those sidecars,
+        so the viewer draws the same assignment the pipeline writes to disk.
     """
     from analysis.receptive_field_mapping.data.touch_playback_data import load_playback_data
+    from analysis.receptive_field_mapping.pipelines.rf_single_touch_pipeline import (
+        _require_depth_field_config,
+    )
     from analysis.receptive_field_mapping.gui import TouchPlaybackExplorer
     from PyQt5.QtWidgets import QApplication
+
+    blocks_stage_dir, block_csv_stem_suffix = _require_depth_field_config(
+        contact_depth_field
+    )
 
     session_specs = _resolve_explorer_session_paths(input_items)
     n = len(session_specs)
     if n == 0:
         raise ValueError("launch_touch_playback_explorer: no sessions to display.")
 
+    # ``csv_path.parent`` is the session's merged output root; the stage subdirectory
+    # under it comes from config. No path fragment is composed from repo knowledge.
+    depth_blocks_dir_by_session = {
+        session_id_from_path(csv_path): csv_path.parent / blocks_stage_dir
+        for csv_path, _ in input_items
+    }
+
     print(f"[Touch Playback] Loading {n} session(s)...")
 
     def _load_one(spec: Tuple[str, Path, Path]) -> Tuple[str, object]:
         session_id, series_csv, forearm_ply = spec
-        return session_id, load_playback_data(series_csv, forearm_ply)
+        return session_id, load_playback_data(
+            series_csv,
+            forearm_ply,
+            depth_blocks_dir=depth_blocks_dir_by_session[session_id],
+            block_csv_stem_suffix=block_csv_stem_suffix,
+            session_id=session_id,
+        )
 
     with ThreadPoolExecutor(max_workers=min(4, n)) as executor:
         sessions: List[Tuple[str, object]] = list(executor.map(_load_one, session_specs))

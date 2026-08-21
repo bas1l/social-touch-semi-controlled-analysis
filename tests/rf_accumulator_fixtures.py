@@ -10,6 +10,23 @@ apart:
    that the depth-weighting parity test compares against. A weighted run at
    ``alpha = 0`` must reproduce these arrays byte for byte.
 
+Baseline status after Phase 2.5 (re-pin)
+----------------------------------------
+Phase 2.5 replaced nearest-vertex snapping with the ``vertex_id`` recorded by
+the contact-depth-field sidecar, which moves credit between vertices on purpose.
+These fixtures are **numerically unchanged** by that, and that is not an
+oversight — they hand ``frame_vertex_indices`` to the reduction directly, so
+they pin the *reduction*, never the vertex source. What changed is what those
+indices now mean: every one of them is a sidecar ``vertex_id``, the value the
+producing pipeline measured, not an answer re-derived here from coordinates.
+
+Consequently the ``alpha = 0`` parity test (Phase 6.1) compares against these
+same arrays, and its claim is exactly one thing: the weighting machinery is an
+exact no-op at ``alpha = 0``. It says nothing about agreement with maps produced
+before Phase 2.5 — those were built on a different, wrong vertex assignment, and
+the size of that difference is a property of the real data, measured by
+``scripts/diagnose_vertex_reassignment.py``.
+
 Nothing here reads the experimental database. Every array is constructed in
 code from literals or a seeded generator.
 """

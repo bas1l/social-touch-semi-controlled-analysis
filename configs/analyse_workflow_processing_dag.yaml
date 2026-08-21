@@ -51,6 +51,17 @@ tasks:
     options:
       force_processing: false
       neuron_mode: iff
+      # Where the per-vertex contact-depth-field parquet sidecars live. Contact
+      # points take their vertex identity from these sidecars, joined on frame_index.
+      # The session merged root is the directory of the aggregated session CSV the DAG
+      # already resolved, so it is not repeated here; these two keys say which stage
+      # subdirectory under it to read, and what suffix that stage appends to the block
+      # stem (PCA calibration renames '_merged_data' to '_merged_data_pca-xyz').
+      # vertex_id exists only from 'blocks_projected' onward -- pointing this at an
+      # earlier stage raises rather than falling back to nearest-vertex snapping.
+      contact_depth_field:
+        blocks_stage_dir: blocks_rf_centered
+        block_csv_stem_suffix: _pca-xyz
     depends_on: [touch_prepare_sessions]
 
   # Stage 2a (Series Transforms): Per-session kinematics, pressure, and MoS computation.
@@ -314,8 +325,8 @@ tasks:
       # Must match the method nodes' iff_metric (used to locate their run sentinels
       # for the barrier's integrity check).
       iff_metric: mean
-    depends_on: [spatial_extract_boundary__radial, spatial_extract_boundary__gradient,
-        spatial_extract_boundary__inflection]
+    depends_on: [spatial_extract_boundary__radial, 
+        spatial_extract_boundary__gradient, spatial_extract_boundary__inflection]
 
   # Per-(session, gesture) RF-contour parameter tuning GUI: opens an interactive
   # PyQt5/PyVista viewer that lets the researcher tune the five radial

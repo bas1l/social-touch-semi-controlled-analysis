@@ -10,14 +10,28 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
-from scipy.spatial import cKDTree
 
+from .contact_depth_field_io import (
+    TERMINAL_RF_CENTERED_SPACES,
+    VERTEX_ID_COLUMN,
+    DepthField,
+    declared_coordinate_space,
+    depth_field_path_for_csv,
+    load_depth_field,
+)
 from .rf_data_loader import load_forearm_vertex_colors, load_forearm_vertices
 from analysis.pipeline.shared_constants import NERVE_SPIKE_COL, NERVE_FREQ_COL, CONTACT_POINTS_COL
 
 logger = logging.getLogger(__name__)
 
-_CACHE_SCHEMA_VERSION = 3
+# v4: contact-point vertex identity is read off the contact-depth-field sidecar
+# instead of re-derived by nearest-vertex snapping, and the sidecar provenance is
+# stored alongside. A v3 cache holds KDTree-derived vertex indices, which are a
+# different (and wrong) answer, so it must not be reused.
+_CACHE_SCHEMA_VERSION = 4
+
+_FRAME_INDEX_COL = "frame_index"
+_SOURCE_BLOCK_FILE_COL = "source_block_file"
 
 _REQUIRED_COLUMNS = (
     CONTACT_POINTS_COL,
@@ -27,13 +41,212 @@ _REQUIRED_COLUMNS = (
     NERVE_SPIKE_COL,
     NERVE_FREQ_COL,
     "gesture_type",
+    # The only exact join key the merged CSV and the depth-field parquet share.
+    _FRAME_INDEX_COL,
+    # The basename of the block CSV this row came from; the sidecar is resolved from
+    # it, never synthesised from ``block_order_id`` (which is a zero-padded string
+    # parsed by regex and may be None, and whose two spellings — ``block-order02``
+    # and ``block-order-02`` — are never converted into one another upstream).
+    _SOURCE_BLOCK_FILE_COL,
 )
+
+# Forward-filled together, in ONE statement — see ``load_playback_data``.
+_FFILL_COLUMNS = (CONTACT_POINTS_COL, _FRAME_INDEX_COL)
 
 _bracket_re = re.compile(r'\[([^\[\]]+)\]')
 
 
 def _ts() -> str:
     return datetime.now().strftime("%H:%M:%S.%f")[:-3]
+
+
+# ------------------------------------------------------------------
+# Contact-point parsing
+# ------------------------------------------------------------------
+
+def _parse_contact_points_strict(cell: str) -> np.ndarray:
+    """Parse one ``contact_points`` cell into an ``(K, 3)`` float64 array.
+
+    Raises ``ValueError`` on any bracketed group that is not exactly three floats.
+    A malformed triplet is **never** skipped: the k-th point of a frame is joined
+    to the k-th sidecar row of that same frame (ordered correspondence), so one
+    dropped point shifts every later point of the frame onto the wrong row and
+    yields a plausible-looking but wrong map. The per-frame count assertion in
+    ``_BlockVertexSource`` is the second line of defence, not the first.
+    """
+    groups = _bracket_re.findall(cell)
+    pts: list[list[float]] = []
+    for group in groups:
+        parts = group.split()
+        if len(parts) != 3:
+            raise ValueError(
+                f"_parse_contact_points_strict: bracketed group {group!r} has "
+                f"{len(parts)} field(s), expected exactly 3 (x y z). Full cell: "
+                f"{cell!r}. Dropping it would shift every later point of this frame "
+                f"onto the wrong contact-depth-field row."
+            )
+        try:
+            pts.append([float(parts[0]), float(parts[1]), float(parts[2])])
+        except ValueError as exc:
+            raise ValueError(
+                f"_parse_contact_points_strict: bracketed group {group!r} is not "
+                f"three floats ({exc}). Full cell: {cell!r}."
+            ) from exc
+    if not pts:
+        return np.empty((0, 3), dtype=np.float64)
+    return np.array(pts, dtype=np.float64)
+
+
+# ------------------------------------------------------------------
+# Contact-depth-field sidecar: the ordered-correspondence vertex source
+# ------------------------------------------------------------------
+
+class _BlockVertexSource:
+    """One block's ``vertex_id`` column, addressable by ``frame_index`` value.
+
+    This is the whole of the join, and it is deliberately narrow.
+
+    **Ordered correspondence.** Within a single ``frame_index``, the k-th point
+    listed in that frame's CSV ``contact_points`` cell is the k-th parquet row
+    carrying that ``frame_index``. ``frame_index`` is the only exact join key the
+    two artifacts share, and the producing pipeline enforces the per-frame
+    row-count agreement after every stage (``assert_row_counts_agree_with_csv``).
+
+    **This is NOT row-position joining.** Pairing parquet row *i* with CSV row *i*
+    across a whole file is unsafe and forbidden: the CSV is at nerve rate with a
+    variable number of points per frame, the parquet is at frame rate. Locate the
+    frame by ``frame_index`` **value** first; only then index by position *inside*
+    that frame. Anyone who "generalises" the second into the first breaks the join
+    silently, which is why the distinction is spelled out here and not only in the
+    plan.
+
+    Rows are held in **file order**, never sorted by ``vertex_id`` — sorting is what
+    ``DepthField.frame()`` does for aggregating callers, and it would hand every
+    contact point the wrong vertex here.
+    """
+
+    def __init__(self, depth_field: DepthField, source_block_file: str) -> None:
+        if not depth_field.has_vertex_id:
+            stage_dir = depth_field.sidecar_path.parent.name
+            raise ValueError(
+                f"_BlockVertexSource: sidecar {depth_field.sidecar_path} has no "
+                f"{VERTEX_ID_COLUMN!r} column. Stage directory {stage_dir!r} is a "
+                f"pre-projection stage — only 'blocks_projected', "
+                f"'blocks_pca_calibrated' and 'blocks_rf_centered' carry "
+                f"{VERTEX_ID_COLUMN!r} (schema version 2). Point the blocks-stage "
+                f"config key at one of those. There is NO fallback: nearest-vertex "
+                f"snapping on this data was measured overshooting 29 mm off-surface "
+                f"at touch boundaries, which is exactly what this loader stopped doing."
+            )
+        self.source_block_file = source_block_file
+        self.sidecar_path = depth_field.sidecar_path
+        self.coordinate_space = depth_field.space
+        self._rows_by_frame = depth_field.frame_row_positions_in_file_order()
+        # int32 as the schema stores it — a whole block's column at 4 bytes a row.
+        self._vertex_id = depth_field.frames[VERTEX_ID_COLUMN].to_numpy(dtype=np.int32)
+        self._n_forearm_vertices = int(len(depth_field.forearm_vertices))
+
+    def vertex_ids_for_frame(self, frame_index: int, n_points: int) -> np.ndarray:
+        """Return the ``vertex_id`` of frame *frame_index*'s rows, in file order.
+
+        *n_points* is the number of contact points parsed from the CSV for this
+        frame. It **must** equal the number of sidecar rows carrying this
+        ``frame_index``; a mismatch raises. That assertion is the entire reason
+        ordered correspondence is safe, and it mirrors the producer's own
+        ``assert_row_counts_agree_with_csv``.
+
+        A frame absent from the sidecar has zero rows, which means *no contact in
+        that frame* — legal, and it must then have zero parsed points too.
+        """
+        positions = self._rows_by_frame.get(int(frame_index))
+        n_rows = 0 if positions is None else int(len(positions))
+        if n_rows != n_points:
+            raise ValueError(
+                f"_BlockVertexSource: per-frame contact-point count mismatch for "
+                f"frame_index={int(frame_index)}: the CSV parsed {n_points} contact "
+                f"point(s) but the sidecar carries {n_rows} row(s) for that frame. "
+                f"Sidecar: {self.sidecar_path}. Block CSV: {self.source_block_file}. "
+                f"Ordered correspondence is only safe while these agree — a single "
+                f"dropped or extra point shifts every later point of the frame onto "
+                f"the wrong row."
+            )
+        if n_rows == 0:
+            return np.empty(0, dtype=np.int64)
+        vertex_ids = self._vertex_id[positions].astype(np.int64)
+        lo = int(vertex_ids.min())
+        hi = int(vertex_ids.max())
+        if lo < 0 or hi >= self._n_forearm_vertices:
+            raise ValueError(
+                f"_BlockVertexSource: frame_index={int(frame_index)} of "
+                f"{self.sidecar_path} references {VERTEX_ID_COLUMN} in [{lo}, {hi}] "
+                f"but the reference forearm has only {self._n_forearm_vertices} "
+                f"vertices."
+            )
+        return vertex_ids
+
+
+def _load_block_vertex_source(
+    depth_blocks_dir: Path,
+    source_block_file: str,
+    block_csv_stem_suffix: str,
+    session_id: str,
+    forearm_ply_path: Path,
+) -> _BlockVertexSource:
+    """Resolve and load the depth-field sidecar for one block.
+
+    The path is composed from three things and nothing else: *depth_blocks_dir* and
+    *block_csv_stem_suffix* come from config, and *source_block_file* comes from the
+    CSV's own ``source_block_file`` column. This module composes no path fragment
+    from repo knowledge and hardcodes no directory or stage name. The
+    CSV-name -> parquet-name rule lives in ``depth_field_path_for_csv`` and is not
+    reimplemented here.
+
+    The coordinate space is read from the parquet **metadata**, never inferred from
+    the directory name, and asserted against :data:`TERMINAL_RF_CENTERED_SPACES`.
+    """
+    stage_stem = f"{Path(source_block_file).stem}{block_csv_stem_suffix}"
+    stage_csv = Path(depth_blocks_dir) / f"{stage_stem}.csv"
+    sidecar_path = depth_field_path_for_csv(stage_csv)
+    if not sidecar_path.exists():
+        raise FileNotFoundError(
+            f"_load_block_vertex_source: depth-field sidecar not found: {sidecar_path}"
+            f" | blocks dir (config): {depth_blocks_dir}"
+            f" | source_block_file (CSV column): {source_block_file}"
+            f" | stem suffix (config): {block_csv_stem_suffix!r}."
+            f" The PCA calibration stage renames the block stem from '_merged_data' "
+            f"to '_merged_data_pca-xyz', so the configured stem suffix must match the "
+            f"stage the blocks directory points at. A missing file means the artifact "
+            f"was never produced; zero rows would mean 'no contact' and is a "
+            f"different thing entirely."
+        )
+
+    # Read the declared space from the file, then assert it against the closed set of
+    # what a terminal blocks stage can legitimately carry, then hand back what was
+    # actually found. This is an assertion, not a fallback: the three values are the
+    # full enumeration of the producer's documented outcomes (normal RF centring, the
+    # RF-centring passthrough when no RF cluster was found, and the additional ICP
+    # passthrough when the block had no registration snapshot). Depth weighting
+    # consumes exactly two things — depth magnitude and vertex identity — and neither
+    # is spatial, so the operation is genuinely space-agnostic. A fourth, undocumented
+    # value raises, and whichever value was found is recorded in run provenance so a
+    # surprise surfaces in the run record instead of being absorbed.
+    space = declared_coordinate_space(sidecar_path)
+    if space not in TERMINAL_RF_CENTERED_SPACES:
+        raise ValueError(
+            f"_load_block_vertex_source: sidecar {sidecar_path} declares "
+            f"coordinate_space={space!r}, which is not one of the documented terminal "
+            f"values {list(TERMINAL_RF_CENTERED_SPACES)}. Either the blocks-stage "
+            f"config key points at an intermediate stage, or the producer emitted a "
+            f"space this consumer has never been told about."
+        )
+
+    depth_field = load_depth_field(
+        stage_csv,
+        expect_space=space,
+        session_id=session_id,
+        forearm_ply_path=forearm_ply_path,
+    )
+    return _BlockVertexSource(depth_field, source_block_file)
 
 
 # ------------------------------------------------------------------
@@ -54,9 +267,26 @@ class TouchEvent:
     gesture_type: str                       # 'tap', 'stroke_proximal', etc.
     # Per 1kHz row:
     frame_contact_pts: list                 # list of (K_i, 3) raw contact coords
-    frame_vertex_indices: list              # list of (K_i,) nearest vertex per contact pt
+    frame_vertex_indices: list              # list of (K_i,) vertex_id per contact pt,
+                                            # read off the contact-depth-field sidecar
+                                            # row that the point corresponds to
     frame_spikes: np.ndarray               # (n_frames,) bool — per-row Nerve_spike
     frame_iff: np.ndarray                  # (n_frames,) float64 — per-row Nerve_freq (Hz)
+
+
+@dataclass(frozen=True)
+class DepthFieldProvenance:
+    """Which depth-field sidecar supplied one block's vertex identities.
+
+    ``coordinate_space`` is the value **declared in the parquet metadata**, not
+    inferred from the directory name. It is carried out of the loader so the run
+    record shows which of the documented terminal spaces each block was actually in
+    — a passthrough session surfaces in the summary instead of being absorbed.
+    """
+
+    source_block_file: str
+    sidecar_path: str
+    coordinate_space: str
 
 
 @dataclass
@@ -65,6 +295,7 @@ class PlaybackData:
     block_order_ids: list                   # sorted unique strings (by numeric value)
     trial_ids_by_block: dict                # block_order_id -> sorted list[int]
     touches_by_block_trial: dict            # (block_order_id, trial_id) -> sorted list[TouchEvent]
+    depth_field_provenance: list            # sorted list[DepthFieldProvenance], one per block
 
 
 # ------------------------------------------------------------------
@@ -171,6 +402,21 @@ def _save_playback_cache(
         cp_frame_touch = np.empty(0, dtype=np.int32)
         cp_frame_fi = np.empty(0, dtype=np.int32)
 
+    # Depth-field provenance, one entry per block. Persisted so a cache hit still
+    # reports which sidecar and which declared coordinate space produced these vertex
+    # identities; without it a warm cache would silently drop the provenance the run
+    # record is supposed to carry.
+    provenance = list(data.depth_field_provenance)
+    depth_provenance_block_files = np.array(
+        [pv.source_block_file for pv in provenance], dtype=str
+    )
+    depth_provenance_sidecar_paths = np.array(
+        [pv.sidecar_path for pv in provenance], dtype=str
+    )
+    depth_provenance_spaces = np.array(
+        [pv.coordinate_space for pv in provenance], dtype=str
+    )
+
     optional_arrays: dict = {}
     if data.session_data.forearm_vertex_colors is not None:
         optional_arrays["forearm_vertex_colors"] = data.session_data.forearm_vertex_colors
@@ -192,6 +438,9 @@ def _save_playback_cache(
             cp_frame_touch=cp_frame_touch,
             cp_frame_fi=cp_frame_fi,
             forearm_vertices=data.session_data.forearm_vertices,
+            depth_provenance_block_files=depth_provenance_block_files,
+            depth_provenance_sidecar_paths=depth_provenance_sidecar_paths,
+            depth_provenance_spaces=depth_provenance_spaces,
             **optional_arrays,
         )
     except Exception as exc:
@@ -247,6 +496,11 @@ def _load_playback_cache(
         "cp_unique_pts", "cp_unique_vtx", "cp_unique_offsets",
         "cp_frame_group", "cp_frame_touch", "cp_frame_fi",
         "forearm_vertices",
+        # Bumped in the same change as ``_CACHE_SCHEMA_VERSION`` — a version check that
+        # passes while the payload is missing is exactly the failure this guards.
+        "depth_provenance_block_files",
+        "depth_provenance_sidecar_paths",
+        "depth_provenance_spaces",
     )
     missing_keys = [k for k in required_keys if k not in npz]
     if missing_keys:
@@ -279,6 +533,9 @@ def _load_playback_cache(
     cp_frame_touch = npz["cp_frame_touch"]
     cp_frame_fi = npz["cp_frame_fi"]
     forearm_vertices = npz["forearm_vertices"]
+    depth_provenance_block_files = npz["depth_provenance_block_files"]
+    depth_provenance_sidecar_paths = npz["depth_provenance_sidecar_paths"]
+    depth_provenance_spaces = npz["depth_provenance_spaces"]
     # forearm_vertex_colors is optional — missing means PLY had no colours.
     forearm_vertex_colors: Optional[np.ndarray] = (
         npz["forearm_vertex_colors"] if "forearm_vertex_colors" in npz else None
@@ -351,6 +608,34 @@ def _load_playback_cache(
             f"{forearm_vertices.shape} (expected (N, 3)): {cache_path}"
         )
 
+    n_provenance = len(depth_provenance_block_files)
+    for arr_name, arr in [
+        ("depth_provenance_sidecar_paths", depth_provenance_sidecar_paths),
+        ("depth_provenance_spaces", depth_provenance_spaces),
+    ]:
+        if arr.ndim != 1 or len(arr) != n_provenance:
+            raise ValueError(
+                f"_load_playback_cache: '{arr_name}' has shape {arr.shape}, "
+                f"expected ({n_provenance},): {cache_path}"
+            )
+    unknown_spaces = sorted(
+        {str(v) for v in depth_provenance_spaces} - set(TERMINAL_RF_CENTERED_SPACES)
+    )
+    if unknown_spaces:
+        raise ValueError(
+            f"_load_playback_cache: cached depth-field provenance declares coordinate "
+            f"space(s) {unknown_spaces}, none of which is one of the documented "
+            f"terminal values {list(TERMINAL_RF_CENTERED_SPACES)}: {cache_path}"
+        )
+    depth_field_provenance = [
+        DepthFieldProvenance(
+            source_block_file=str(depth_provenance_block_files[i]),
+            sidecar_path=str(depth_provenance_sidecar_paths[i]),
+            coordinate_space=str(depth_provenance_spaces[i]),
+        )
+        for i in range(n_provenance)
+    ]
+
     # Build a lookup: frame_lookup[ti][fi] = group_idx
     # so we can reconstruct per-frame pts/vtx slices efficiently.
     frame_lookup: dict[int, dict[int, int]] = {}
@@ -421,6 +706,7 @@ def _load_playback_cache(
         block_order_ids=block_order_ids,
         trial_ids_by_block=trial_ids_by_block,
         touches_by_block_trial=touches_by_block_trial,
+        depth_field_provenance=depth_field_provenance,
     )
 
 
@@ -431,23 +717,50 @@ def _load_playback_cache(
 def load_playback_data(
     series_csv_path: Path,
     forearm_ply_path: Path,
+    *,
+    depth_blocks_dir: Path,
+    block_csv_stem_suffix: str,
+    session_id: str,
 ) -> PlaybackData:
     """Load per-touch data at 1kHz frame rate from *series_csv_path* + *forearm_ply_path*.
 
-    No coordinate transforms, no deduplication, no distance filtering.
-    Matches preparation_viewer_data.py exactly: each CSV row becomes one frame,
-    contact_points are forward-filled within each touch group, empty frames are
-    kept as np.empty((0, 3)), and Nerve_spike is taken directly per row.
+    No coordinate transforms, no deduplication, no distance filtering. Each CSV row
+    becomes one frame, ``contact_points`` and ``frame_index`` are forward-filled
+    together within each touch group, empty frames are kept as ``np.empty((0, 3))``,
+    and ``Nerve_spike`` is taken directly per row.
 
-    Vertex snapping (cKDTree on raw forearm vertices) is applied for heatmap
-    accumulation only.
+    **Vertex identity comes from the contact-depth-field sidecar, not from geometry.**
+    For each frame the loader takes the sidecar rows carrying that ``frame_index``, in
+    file order, and reads ``vertex_id`` off the k-th row for the k-th parsed contact
+    point (*ordered correspondence*; see ``_BlockVertexSource``). The nearest-vertex
+    KDTree that used to answer this question was **removed, not reconciled**: it
+    assigns a different vertex from the one the sidecar recorded, and that discrepancy
+    *is* the measured 29 mm off-surface error, not a symptom of some other bug.
 
-    Raises ``ValueError`` on missing required columns, empty data after
-    filtering, or forearm loading failure.
+    Parameters
+    ----------
+    depth_blocks_dir:
+        Directory holding the block stage CSVs and their depth-field parquet
+        sidecars, already composed by the caller from the session merged root and the
+        configured blocks-stage subdirectory. This module composes no path fragment
+        from repo knowledge and hardcodes no stage name.
+    block_csv_stem_suffix:
+        Suffix the stage appends to the block stem, from config (the PCA calibration
+        stage renames ``..._merged_data`` to ``..._merged_data_pca-xyz``). Applied to
+        the ``source_block_file`` basename before the sidecar naming rule.
+    session_id:
+        Session identifier, passed through to the depth-field loader for its
+        diagnostics.
+
+    Raises ``ValueError`` on missing required columns, empty data after filtering,
+    forearm loading failure, a malformed contact-point triplet, or a per-frame
+    contact-point count that disagrees with the sidecar; ``FileNotFoundError`` when a
+    block sidecar is absent.
     """
     t_session = time.perf_counter()
 
     # --- Cache check ---
+    depth_blocks_dir = Path(depth_blocks_dir)
     cached = _load_playback_cache(series_csv_path, forearm_ply_path)
     if cached is not None:
         print(
@@ -477,10 +790,15 @@ def load_playback_data(
             f"{missing_cols}"
         )
 
-    # Forward-fill contact_points before grouping (avoids per-group ffill overhead).
-    df[CONTACT_POINTS_COL] = df.groupby(
-        ["trial_id", "single_touch_id"]
-    )[CONTACT_POINTS_COL].ffill()
+    # Forward-fill contact_points AND frame_index in ONE statement, over the same
+    # groupby and the same column list. Two statements would fill the same gaps today
+    # and could drift apart tomorrow; one statement makes desynchronisation of the
+    # frame index from the contact points structurally impossible rather than merely
+    # tested for. The depth join reads vertex identity off the sidecar rows of
+    # ``frame_index``, so a frame index that no longer belongs to its contact points
+    # would silently attribute every point of the frame to the wrong vertices.
+    _ffill_cols = list(_FFILL_COLUMNS)
+    df[_ffill_cols] = df.groupby(["trial_id", "single_touch_id"])[_ffill_cols].ffill()
 
     # Filter rows: keep only real touches (trial_id > 0 AND single_touch_id > 0).
     df = df[(df["trial_id"] > 0) & (df["single_touch_id"] > 0)].reset_index(drop=True)
@@ -517,12 +835,20 @@ def load_playback_data(
         flush=True,
     )
 
-    # --- Build KDTree over raw (unrotated) vertices ---
-    tree = cKDTree(vertices)
-
     # --- Group by (block_order_id, trial_id, single_touch_id) and build TouchEvents ---
+    #
+    # There is no KDTree here any more. Vertex identity is read off the depth-field
+    # sidecar row that each contact point corresponds to.
     t = time.perf_counter()
     touches_by_block_trial: dict[tuple[str, int], list[TouchEvent]] = {}
+
+    # Provenance for every block seen, and a one-entry cache of the loaded sidecar.
+    # ``groupby(sort=True)`` orders by block first, so all of a block's touches are
+    # consecutive and one slot is enough to avoid reloading a 5-90 MB parquet per
+    # touch. Only the compact per-frame index and the int32 vertex_id column are
+    # retained; the sidecar DataFrame is released with the DepthField.
+    provenance_by_block_file: dict[str, DepthFieldProvenance] = {}
+    block_source: Optional[_BlockVertexSource] = None
 
     group_keys = ["block_order_id", "trial_id", "single_touch_id"]
     for (block_order_id, trial_id, single_touch_id), group_df in df.groupby(group_keys, sort=True):
@@ -530,49 +856,89 @@ def load_playback_data(
         trial_id = int(trial_id)
         single_touch_id = int(single_touch_id)
 
+        source_block_files = group_df[_SOURCE_BLOCK_FILE_COL].astype(str).unique()
+        if len(source_block_files) != 1:
+            raise ValueError(
+                f"load_playback_data: touch (block={block_order_id}, trial={trial_id}, "
+                f"touch={single_touch_id}) spans {len(source_block_files)} distinct "
+                f"{_SOURCE_BLOCK_FILE_COL!r} values {sorted(source_block_files)} in "
+                f"{series_csv_path}. One touch must come from exactly one block, or "
+                f"its contact points cannot be joined to a single depth-field sidecar."
+            )
+        source_block_file = str(source_block_files[0])
+
+        if block_source is None or block_source.source_block_file != source_block_file:
+            block_source = _load_block_vertex_source(
+                depth_blocks_dir=depth_blocks_dir,
+                source_block_file=source_block_file,
+                block_csv_stem_suffix=block_csv_stem_suffix,
+                session_id=session_id,
+                forearm_ply_path=forearm_ply_path,
+            )
+            provenance_by_block_file[source_block_file] = DepthFieldProvenance(
+                source_block_file=source_block_file,
+                sidecar_path=str(block_source.sidecar_path),
+                coordinate_space=block_source.coordinate_space,
+            )
+
         cp_strings = group_df[CONTACT_POINTS_COL].values
+        frame_index_values = group_df[_FRAME_INDEX_COL].to_numpy()
         spikes_arr = group_df[NERVE_SPIKE_COL].to_numpy(dtype=bool)
         iff_arr = group_df[NERVE_FREQ_COL].to_numpy(dtype=np.float64)
         gesture_type = str(group_df["gesture_type"].iloc[0])
 
-        # Row-by-row parsing matching preparation_viewer_data.py exactly.
-        # Optimization: reuse parsed result for consecutive identical strings.
         frame_contact_pts: list[np.ndarray] = []
         frame_vertex_indices: list[np.ndarray] = []
         frame_spikes: list[bool] = []
         frame_iff: list[float] = []
 
-        prev_string: Optional[str] = None
+        # Reuse the parsed arrays for consecutive rows that share BOTH the
+        # contact-point text and the frame index. The frame index is part of the key
+        # on purpose: two Kinect frames can carry identical contact-point text while
+        # addressing different sidecar rows, so keying on the text alone would
+        # broadcast one frame's vertex identities across the other. Sharing the array
+        # object within a frame is also what ``_save_playback_cache`` deduplicates on.
+        prev_key: Optional[tuple] = None
         prev_pts: np.ndarray = np.empty((0, 3), dtype=np.float64)
         prev_vtx: np.ndarray = np.empty(0, dtype=np.int64)
 
-        for row_idx, s in enumerate(cp_strings):
-            s_str = str(s)
-            if s_str == prev_string:
-                # Reuse parsed result from previous identical string.
+        for row_idx, cell in enumerate(cp_strings):
+            cell_str = str(cell)
+            raw_frame_index = frame_index_values[row_idx]
+            frame_missing = pd.isna(raw_frame_index)
+            frame_index = None if frame_missing else int(raw_frame_index)
+            key = (cell_str, frame_index)
+
+            if key == prev_key:
                 frame_contact_pts.append(prev_pts)
                 frame_vertex_indices.append(prev_vtx)
             else:
-                matches = _bracket_re.findall(s_str)
-                pts: list[list[float]] = []
-                for m in matches:
-                    parts = m.split()
-                    if len(parts) == 3:
-                        try:
-                            pts.append([float(parts[0]), float(parts[1]), float(parts[2])])
-                        except ValueError:
-                            pass
-
-                if pts:
-                    pts_arr = np.array(pts, dtype=np.float64)
-                    _, vtx_idx = tree.query(pts_arr)
-                    prev_pts = pts_arr
-                    prev_vtx = vtx_idx.astype(np.int64)
-                else:
+                pts_arr = _parse_contact_points_strict(cell_str)
+                if frame_missing:
+                    # ``frame_index`` and ``contact_points`` are filled by the same
+                    # statement, so a missing frame index can only mean "no contact
+                    # geometry has been seen yet in this touch". Contact points
+                    # without a frame index would mean the two columns have drifted
+                    # apart, which is unrecoverable rather than something to patch up.
+                    if len(pts_arr) > 0:
+                        raise ValueError(
+                            f"load_playback_data: {len(pts_arr)} contact point(s) on a "
+                            f"row whose {_FRAME_INDEX_COL!r} is null "
+                            f"(block={block_order_id}, trial={trial_id}, "
+                            f"touch={single_touch_id}) in {series_csv_path}. The two "
+                            f"columns are forward-filled by one statement and must "
+                            f"never disagree; without a frame index these points "
+                            f"cannot be joined to any depth-field row."
+                        )
                     prev_pts = np.empty((0, 3), dtype=np.float64)
                     prev_vtx = np.empty(0, dtype=np.int64)
+                else:
+                    prev_vtx = block_source.vertex_ids_for_frame(
+                        frame_index, len(pts_arr)
+                    )
+                    prev_pts = pts_arr
 
-                prev_string = s_str
+                prev_key = key
                 frame_contact_pts.append(prev_pts)
                 frame_vertex_indices.append(prev_vtx)
 
@@ -623,6 +989,9 @@ def load_playback_data(
         block_order_ids=block_order_ids,
         trial_ids_by_block=trial_ids_by_block,
         touches_by_block_trial=touches_by_block_trial,
+        depth_field_provenance=[
+            provenance_by_block_file[key] for key in sorted(provenance_by_block_file)
+        ],
     )
 
     # --- Save cache ---

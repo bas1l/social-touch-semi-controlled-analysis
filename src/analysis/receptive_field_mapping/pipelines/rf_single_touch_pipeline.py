@@ -56,6 +56,12 @@ def _compute_touch_rf(
     weights are passed explicitly rather than assumed so that the reduction has
     no notion of an "unweighted" default.
 
+    ``touch.frame_vertex_indices`` now holds the ``vertex_id`` recorded by the
+    contact-depth-field sidecar for each contact point, not a nearest-vertex
+    answer computed here. Credit therefore lands on the vertex the producing
+    pipeline measured, which is a different vertex from the one the retired
+    KDTree picked at patch boundaries.
+
     Parameters
     ----------
     touch:
@@ -124,12 +130,51 @@ def _compute_touch_rf(
     return mean_pairs, max_pairs
 
 
+# Config keys that say where a session's contact-depth-field sidecars live. Both are
+# required: contact points take their vertex identity from those sidecars, so there is
+# no run without them and no default that could quietly pick the wrong stage.
+_BLOCKS_STAGE_DIR_KEY = "blocks_stage_dir"
+_BLOCK_CSV_STEM_SUFFIX_KEY = "block_csv_stem_suffix"
+
+
+def _require_depth_field_config(contact_depth_field: Optional[dict]) -> Tuple[str, str]:
+    """Validate the ``contact_depth_field`` option block and return its two values.
+
+    Raises ``ValueError`` when the block is absent or either key is missing. There is
+    deliberately no default: guessing a blocks stage would silently decide which
+    vertices every contact point is credited to.
+    """
+    if not isinstance(contact_depth_field, dict):
+        raise ValueError(
+            "run_single_touch_rf_mapping: 'contact_depth_field' options block is "
+            f"required, got {contact_depth_field!r}. Add it under "
+            "tasks.spatial_map_single_touch.options in the processing DAG config with "
+            f"the keys {_BLOCKS_STAGE_DIR_KEY!r} and {_BLOCK_CSV_STEM_SUFFIX_KEY!r}."
+        )
+    missing = [
+        key for key in (_BLOCKS_STAGE_DIR_KEY, _BLOCK_CSV_STEM_SUFFIX_KEY)
+        if key not in contact_depth_field
+    ]
+    if missing:
+        raise ValueError(
+            f"run_single_touch_rf_mapping: 'contact_depth_field' is missing key(s) "
+            f"{missing}. Present keys: {sorted(contact_depth_field)}."
+        )
+    blocks_stage_dir = str(contact_depth_field[_BLOCKS_STAGE_DIR_KEY])
+    if not blocks_stage_dir:
+        raise ValueError(
+            f"run_single_touch_rf_mapping: {_BLOCKS_STAGE_DIR_KEY!r} is empty."
+        )
+    return blocks_stage_dir, str(contact_depth_field[_BLOCK_CSV_STEM_SUFFIX_KEY])
+
+
 def run_single_touch_rf_mapping(
     input_items: List[Tuple[Path, Path]],
     output_dir: Path,
     force: bool = False,
     neuron_mode: str = "iff",
     preparation_dir: Optional[Path] = None,
+    contact_depth_field: Optional[dict] = None,
 ) -> List[Path]:
     """Compute per-touch RF maps for all sessions and save as ``.npz`` files.
 
@@ -158,6 +203,10 @@ def run_single_touch_rf_mapping(
         Directory containing ``<session>_prepared.csv`` files produced by
         ``touch_prepare_sessions``.  If ``None``, raises ``ValueError`` immediately
         since prepared CSVs are a hard dependency.
+    contact_depth_field:
+        Options block naming the blocks stage subdirectory holding the depth-field
+        parquet sidecars and the stem suffix that stage uses. Required — contact
+        points take their vertex identity from those sidecars.
 
     Returns
     -------
@@ -174,6 +223,10 @@ def run_single_touch_rf_mapping(
             "run_single_touch_rf_mapping: 'preparation_dir' is required — "
             "this task depends on touch_prepare_sessions output."
         )
+
+    blocks_stage_dir, block_csv_stem_suffix = _require_depth_field_config(
+        contact_depth_field
+    )
 
     preparation_dir = Path(preparation_dir)
     if not preparation_dir.exists():
@@ -216,10 +269,26 @@ def run_single_touch_rf_mapping(
                 f"{csv_path.parent}. Expected '{session_id}_forearm.ply'."
             )
 
-        # --- Load playback data (handles CSV parsing, KDTree snapping, caching) ---
+        # --- Resolve the depth-field blocks directory ---
+        # ``csv_path.parent`` is the session's merged output root — the directory the
+        # DAG resolved the aggregated session CSV from, and the same one
+        # ``resolve_forearm_ply`` is given above. The stage subdirectory under it comes
+        # from config; nothing here is composed from repo knowledge of the layout.
+        depth_blocks_dir = csv_path.parent / blocks_stage_dir
+        if not depth_blocks_dir.is_dir():
+            raise ValueError(
+                f"[Single-Touch RF] {session_id}: contact-depth-field blocks directory "
+                f"not found: {depth_blocks_dir} (session merged root "
+                f"{csv_path.parent}, {_BLOCKS_STAGE_DIR_KEY}={blocks_stage_dir!r})."
+            )
+
+        # --- Load playback data (CSV parsing, sidecar vertex_id join, caching) ---
         playback: PlaybackData = load_playback_data(
             series_csv_path=prepared_csv,
             forearm_ply_path=forearm_ply,
+            depth_blocks_dir=depth_blocks_dir,
+            block_csv_stem_suffix=block_csv_stem_suffix,
+            session_id=session_id,
         )
 
         n_vertices = len(playback.session_data.forearm_vertices)
@@ -268,6 +337,24 @@ def run_single_touch_rf_mapping(
                     'neuron_mode': neuron_mode,
                     'n_touches': total_touches,
                     'n_vertices': n_vertices,
+                    # Which depth-field sidecar supplied each block's vertex
+                    # identities, and the coordinate space each one *declared* in its
+                    # parquet metadata (never inferred from the directory name). A
+                    # passthrough session — 'pca_calibrated' or 'kinect_space_1' in a
+                    # terminal blocks directory — is legal and shows up here rather
+                    # than being absorbed.
+                    'contact_depth_field': {
+                        'blocks_dir': str(depth_blocks_dir),
+                        'block_csv_stem_suffix': block_csv_stem_suffix,
+                        'blocks': [
+                            {
+                                'source_block_file': pv.source_block_file,
+                                'sidecar_path': pv.sidecar_path,
+                                'coordinate_space': pv.coordinate_space,
+                            }
+                            for pv in playback.depth_field_provenance
+                        ],
+                    },
                 },
                 f,
                 indent=2,

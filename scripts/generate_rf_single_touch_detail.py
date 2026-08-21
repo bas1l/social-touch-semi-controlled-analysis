@@ -40,6 +40,9 @@ from analysis.receptive_field_mapping.data.touch_playback_data import load_playb
 
 SESSION = "2022-06-17_ST16-02"
 BLOCK, TRIAL, TOUCH = 3, 7, 81  # touch #166 in the population ordering
+# Depth-field sidecar location, mirroring the DAG config keys of the same names.
+BLOCKS_STAGE_DIR = 'blocks_rf_centered'
+BLOCK_CSV_STEM_SUFFIX = '_pca-xyz'
 CMAP = "inferno"
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -255,7 +258,17 @@ def main() -> None:
     if ply is None:
         raise FileNotFoundError("generate_rf_single_touch_detail: RF-centred PLY not found")
 
-    pb = load_playback_data(csv_path, ply)
+    # Vertex identity for every contact point is read off the contact-depth-field
+    # parquet sidecars, joined on frame_index. This figure script names the stage
+    # explicitly (it has no DAG config to read); the pipeline gets the same two values
+    # from tasks.spatial_map_single_touch.options.contact_depth_field.
+    pb = load_playback_data(
+        csv_path,
+        ply,
+        depth_blocks_dir=_require(data_root / '3_merged' / SESSION / BLOCKS_STAGE_DIR),
+        block_csv_stem_suffix=BLOCK_CSV_STEM_SUFFIX,
+        session_id=SESSION,
+    )
     forearm_xyz = pb.session_data.forearm_vertices
     events = pb.touches_by_block_trial[(str(BLOCK), TRIAL)]
     matches = [e for e in events if e.single_touch_id == TOUCH]

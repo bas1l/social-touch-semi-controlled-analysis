@@ -433,6 +433,7 @@ def spatial_map_single_touch_flow(
     force_processing: bool = False,
     neuron_mode: str = "iff",
     preparation_dir: Optional[Path] = None,
+    contact_depth_field: Optional[dict] = None,
 ) -> List[Path]:
     """Per-touch RF mapping: accumulate per-vertex neuron values for every single touch.
 
@@ -451,6 +452,7 @@ def spatial_map_single_touch_flow(
         force=force_processing,
         neuron_mode=neuron_mode,
         preparation_dir=preparation_dir,
+        contact_depth_field=contact_depth_field,
     )
 
 
@@ -1968,6 +1970,9 @@ def _build_pipeline_stages(dag_handler: DagConfigHandler, items_to_process) -> l
             "params": lambda: {
                 "neuron_mode": dag_handler.get_task_options("spatial_map_single_touch").get("neuron_mode", "iff"),
                 "preparation_dir": _preparation_dir(),
+                "contact_depth_field": dag_handler.get_task_options(
+                    "spatial_map_single_touch"
+                ).get("contact_depth_field"),
             },
         },
         {

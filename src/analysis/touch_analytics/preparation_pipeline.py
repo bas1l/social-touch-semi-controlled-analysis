@@ -29,7 +29,12 @@ from .preparation.gesture_type import assign_gesture_type
 from analysis.pipeline.shared_constants import GESTURE_TYPES
 
 
-_DROP_COLUMNS = ['frame_index', 'green_levels', 'time_nerve', 'time_kinect', 'trial_on']
+# ``frame_index`` is deliberately NOT dropped: it is the only exact join key the
+# merged CSV and the per-vertex contact-depth-field parquet sidecars share, and the
+# receptive-field playback loader reads ``vertex_id`` off those sidecars by
+# ``frame_index`` value. Dropping it here severs that join.
+# See docs/data-contracts/contact-depth-field.md.
+_DROP_COLUMNS = ['green_levels', 'time_nerve', 'time_kinect', 'trial_on']
 _GESTURE_TYPES = GESTURE_TYPES  # backward-compat alias
 
 
