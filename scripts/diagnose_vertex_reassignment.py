@@ -72,6 +72,8 @@ def _kdtree_reassign(touch: TouchEvent, forearm_vertices: np.ndarray) -> TouchEv
         gesture_type=touch.gesture_type,
         frame_contact_pts=touch.frame_contact_pts,
         frame_vertex_indices=frame_vertex_indices,
+        # Depth is untouched: only vertex identity is being reassigned here.
+        frame_depths=touch.frame_depths,
         frame_spikes=touch.frame_spikes,
         frame_iff=touch.frame_iff,
     )

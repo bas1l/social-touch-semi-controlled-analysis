@@ -514,7 +514,10 @@ class TestCacheCarriesTheSidecarAnswer:
         # v3 caches hold KDTree-derived vertex indices — a different, wrong answer.
         # The version bump and the provenance keys landed in the same change, so a
         # cache cannot pass the version check while lacking the payload.
-        assert _CACHE_SCHEMA_VERSION == 4
+        # Asserted as an inequality, not a literal: this test's claim is that the
+        # schema has moved past 3 and stays past it, which no later bump invalidates.
+        # The exact current version is pinned once, in tests/test_touch_playback_depth.py.
+        assert _CACHE_SCHEMA_VERSION > 3
         _write_sidecar(env["blocks_dir"], frame_index=[1], vertex_id=[30])
         _write_series_csv(
             env["csv_path"], [{"cell": _cell([0.0]), "frame_index": 1}]
@@ -631,6 +634,7 @@ class TestMagnitudeOfTheVertexReassignment:
             gesture_type=touch.gesture_type,
             frame_contact_pts=touch.frame_contact_pts,
             frame_vertex_indices=kdtree_indices,
+            frame_depths=touch.frame_depths,
             frame_spikes=touch.frame_spikes,
             frame_iff=touch.frame_iff,
         )

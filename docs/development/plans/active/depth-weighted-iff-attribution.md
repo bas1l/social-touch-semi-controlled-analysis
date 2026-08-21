@@ -263,7 +263,9 @@ away without removing the coupling.
    per frame where weights are built and raise on violation.
 5. **`_CACHE_SCHEMA_VERSION` mismatch currently returns `None` and silently recomputes**
    (`:235`). Do not extend that pattern to the depth path. Bump the version **and** extend
-   `required_keys` in the same change, or a v3 cache passes the version check while lacking depth.
+   `required_keys` in the same change, or a stale cache passes the version check while lacking
+   depth. Done twice: Phase 2.5 took the schema 3 -> 4 (retired KDTree indices) and Phase 3 took
+   it 4 -> 5 (depth), each bumping the version and extending `required_keys` in one change.
 6. **`_save_playback_cache` swallows write failures with `logger.warning`.** Pre-existing silent
    fallback; the depth path must not inherit it.
 7. **Zero is not absent.** `depth = 0.0` (grazing) and `depth = missing` (no sidecar row) are
@@ -518,34 +520,92 @@ join rows to rows by position across a whole file; see *ordered correspondence* 
 **Dependencies:** Phases 1, 2.
 
 ### Phase 3: Carry depth to the estimator
+**Started:** 2026-08-21
+**Completed:** 2026-08-21
+
 **Goal:** Transport per-contact-point penetration depth from the sidecar row that Phase 2.5 has
 already located, through the cache, to `_compute_touch_rf`. **The join moved to Phase 2.5.** Depth
 comes off the *same row* as `vertex_id`, so this phase contains no sidecar lookup, no `frame_index`
 matching and no alignment step — those tasks were deleted from here, not shrunk. What remains is
 storage and validation.
 
-- [ ] 3.1 — Add `frame_depths: list  # (K_i,) float64` to `TouchEvent` (`:49-59`), aligned with
+- [x] 3.1 — Add `frame_depths: list  # (K_i,) float64` to `TouchEvent` (`:49-59`), aligned with
       `frame_vertex_indices`. Both are built from the same sidecar rows, in the same order, in the
       same loop.
-- [ ] 3.2 — Read `signed_depth_mm` off the rows already located in 2.5.5. There is no second join
+- [x] 3.2 — Read `signed_depth_mm` off the rows already located in 2.5.5. There is no second join
       and no `.get(vertex_id, ...)` anywhere.
-- [ ] 3.3 — Assert `(frame_index, vertex_id)` uniqueness per frame and raise on violation
+- [x] 3.3 — Assert `(frame_index, vertex_id)` uniqueness per frame and raise on violation
       (hazard 4). **Assert, do not reduce** — the cancellation that makes duplicates harmless today
       only holds while every weight is 1.
-- [ ] 3.4 — Store depth **per contact-frame**, not per dedup group. Hazard 1 is unchanged by the
+- [x] 3.4 — Store depth **per contact-frame**, not per dedup group. Hazard 1 is unchanged by the
       corrected join and is still the most dangerous item in this plan: two frames with identical
       `contact_points` text can carry different depths, and `_save_playback_cache` dedups groups by
       `id()` of the vertex array (`:131`). Bump `_CACHE_SCHEMA_VERSION` **4 to 5** (Phase 2.5 already took it 3 to 4), add the keys
       to `required_keys` (`:243-250`) **in the same change** (hazard 5), unpack them, add shape
       checks in the `:288-352` block, pass to the constructor at `:367`.
-- [ ] 3.5 — Reject NaN depth at the loader boundary with file/frame/vertex context. Zero is not
+- [x] 3.5 — Reject NaN depth at the loader boundary with file/frame/vertex context. Zero is not
       absent (hazard 7); a *missing* row is now impossible by construction because 2.5.6 asserts the
       per-frame counts agree, so NaN is the only remaining form of absence and it raises.
 
+**Implementation notes (2026-08-21)**
+
+- **Hazard 1 was already half-closed by Phase 2.5, and the test that proves the depth
+  channel is safe had to be built accordingly.** Phase 2.5's parse-reuse key is
+  `(contact_points text, frame_index)`, so two *different* Kinect frames never share a
+  vertex-array object and therefore never land in the same `id()`-keyed dedup group. A
+  cold-load test with two frames sharing contact-point text but differing depths
+  consequently **cannot distinguish** per-group storage from per-frame storage: it passes
+  either way. That test is kept as the behavioural claim, but the one with teeth
+  (`test_a_shared_dedup_group_still_carries_per_frame_depths`) drives
+  `_save_playback_cache` / `_load_playback_cache` directly with a `TouchEvent` whose two
+  frames hold the **same ndarray object** and different depth arrays — the exact shape
+  `id()` dedup collapses. Per-group depth storage returns one frame's depths for both and
+  fails it. The mitigation and the dedup live in different functions, so relying on the
+  reuse key alone would have made the depth channel's correctness a property of code that
+  has no idea depth exists.
+- **Depth cache layout.** Two arrays, both indexed by contact-frame position `i` — the
+  same `i` that indexes `cp_frame_group` / `cp_frame_touch` / `cp_frame_fi`, and
+  explicitly *not* the group index: `cp_frame_depth_data` (float64, concatenated) and
+  `cp_frame_depth_offsets` (int64, `n_contact_frames + 1`). On read, each contact frame's
+  depth count is checked against its dedup group's point count, which is the check that
+  would catch a broadcast, plus offset monotonicity, endpoint agreement and a NaN sweep.
+- **`_save_playback_cache`'s warn-on-write-failure was not inherited.** Every depth
+  consistency check runs *before* the `try`, so a misaligned depth channel raises while a
+  failed write still only costs a cache. The docstring now says so, because the two look
+  identical from the call site.
+- **`TouchEvent.frame_depths` is a required field with no default**, which forced four
+  existing construction sites to supply it: `tests/rf_accumulator_fixtures.py` (both
+  fixtures), `scripts/diagnose_vertex_reassignment.py` and one test in
+  `tests/test_touch_playback_vertex_source.py`. A default would have let a depth-free
+  touch reach the weighting stage looking structurally valid. The Phase 2 characterization
+  numbers are unchanged — all 41 accumulator tests still pass by `np.array_equal`.
+- **Sign, stated once.** `WORKED_EXAMPLE_DEPTHS_MM` is *penetration* (positive, what the
+  weight function will consume); `TouchEvent.frame_depths` is `signed_depth_mm` (negative
+  = penetrating, what the file stores). `WORKED_EXAMPLE_SIGNED_DEPTHS_MM` was added beside
+  it as the negated form so both are visible in one place, and Phase 4 recovers the first
+  from the second through `penetration_mm` — the single documented negation point.
+- **`SIGNED_DEPTH_COLUMN` added to `contact_depth_field_io.py`** so the column name is not
+  spelled a second time in a second module. Not an accessor and not new behaviour.
+- **`vertex_ids_for_frame` became `rows_for_frame`**, returning a `_FrameRows` NamedTuple
+  of `(vertex_ids, signed_depth_mm)`. One join answers both questions, which is the point:
+  a separate depth accessor would have invited a `vertex_id`-keyed lookup and quietly
+  reintroduced the matching step ordered correspondence exists to remove.
+- **The Phase 2.5 test's `_CACHE_SCHEMA_VERSION == 4` pin was relaxed to `> 3`.** Its claim
+  is that the schema has moved past 3 and stays past it, which no later bump invalidates;
+  the exact current version is pinned once, in `tests/test_touch_playback_depth.py`.
+
 **Files Modified:**
-- `src/analysis/receptive_field_mapping/data/touch_playback_data.py` — `:20`, `:49-59`,
-  `:120-137`, `:243-250`, `:288-352`, `:367`, `:540-591`
-- `tests/test_touch_playback_depth.py` — new
+- `src/analysis/receptive_field_mapping/data/touch_playback_data.py` — `_FrameRows`,
+  `_BlockVertexSource.rows_for_frame` (uniqueness + NaN assertions), `TouchEvent.frame_depths`,
+  cache v4 to v5 with per-contact-frame depth storage and its shape checks
+- `src/analysis/receptive_field_mapping/data/contact_depth_field_io.py` — `SIGNED_DEPTH_COLUMN`
+- `src/analysis/receptive_field_mapping/data/__init__.py` — re-export
+- `tests/test_touch_playback_depth.py` — new, 23 tests
+- `tests/rf_accumulator_fixtures.py` — `frame_depths` on both fixtures;
+  `WORKED_EXAMPLE_SIGNED_DEPTHS_MM`, `NAN_AND_DUPLICATE_SIGNED_DEPTHS_MM`
+- `tests/test_touch_playback_vertex_source.py` — `frame_depths` at one construction site;
+  version pin relaxed to `> 3`
+- `scripts/diagnose_vertex_reassignment.py` — `frame_depths` passed through unchanged
 
 **Dependencies:** Phases 1, 2.5.
 
@@ -649,9 +709,11 @@ storage and validation.
       from the nearest-vertex answer resolves to the **sidecar's** value.
 - [ ] `frame_index` and `contact_points` are filled by one `ffill` statement and cannot drift: a
       fixture with gaps in both columns yields matched, non-null pairs on every row.
-- [ ] Cache round-trip: write v4, read back, depth arrays match per **frame** — specifically a case
-      where two frames share a `contact_points` string but carry different depths (hazard 1).
-- [ ] A v3 cache on disk is rejected loudly, not silently recomputed into a depth-free result.
+- [x] Cache round-trip: write v5, read back, depth arrays match per **frame** — specifically a case
+      where two frames share a `contact_points` string but carry different depths (hazard 1), and
+      a second case where two frames genuinely share one dedup group, which is the only form of
+      the hazard the Phase 2.5 reuse key does not already prevent.
+- [x] A v4 cache on disk is rejected loudly, not silently recomputed into a depth-free result.
 
 ### Manual Verification
 - [ ] Launch the GUI (`scripts/launch_pipeline_gui.py`); confirm `depth_weight_alpha` renders in the
@@ -665,7 +727,7 @@ storage and validation.
 - [ ] A vertex contacted in exactly one frame gives a value identical to today, any alpha (the
       weight cancels).
 - [ ] All-identical depths across a patch gives weights all 1.0 and output identical to today.
-- [ ] Duplicate `(frame_index, vertex_id)` in a frame raises (assert, do not reduce).
+- [x] Duplicate `(frame_index, vertex_id)` in a frame raises (assert, do not reduce).
 - [ ] A frame whose parsed contact-point count differs from its sidecar row count raises with the
       parquet path, the `frame_index`, and both counts (2.5.6).
 - [ ] A malformed contact-point triplet raises in `parse_contact_points` rather than being dropped
@@ -708,8 +770,8 @@ storage and validation.
    `feature/port-stroke-centroid-baseline`; each phase is its own commit, so any phase can be
    reverted individually. Phase 2 (the merge) is behaviour-neutral and can stay even if the
    weighting is abandoned.
-2. **Data considerations:** the playback cache goes v3 to v4. Rolling back requires **deleting** v4
-   caches — v3 code must not read a v4 file. No source data is modified; sidecars are read-only.
+2. **Data considerations:** the playback cache goes v3 to v4 (Phase 2.5) and v4 to v5 (Phase 3).
+   Rolling back requires **deleting** the newer caches — older code must not read a newer file. No source data is modified; sidecars are read-only.
    Separately, Phase 2.5 restores `frame_index` upstream, which invalidates every `_prepared.csv`
    and `_series_augmented.csv`; those must be regenerated, and reverting Phase 2.5 re-drops the
    column and invalidates them a second time. Do not revert 2.5 to "get the old maps back" — the

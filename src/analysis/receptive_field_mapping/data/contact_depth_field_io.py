@@ -63,6 +63,11 @@ _REQUIRED_COLUMNS: tuple[str, ...] = (
     "signed_depth_mm",
 )
 
+# The signed penetration column. Named here so consumers outside this module never
+# spell it a second time: **negative is penetrating**, and the single documented
+# negation point is :func:`penetration_mm`.
+SIGNED_DEPTH_COLUMN: str = "signed_depth_mm"
+
 # The optional seventh column, present only from ``blocks_projected/`` onward.
 VERTEX_ID_COLUMN: str = "vertex_id"
 
@@ -75,7 +80,7 @@ _EXPECTED_DTYPES: dict[str, np.dtype] = {
     "x": np.dtype(np.float32),
     "y": np.dtype(np.float32),
     "z": np.dtype(np.float32),
-    "signed_depth_mm": np.dtype(np.float64),
+    SIGNED_DEPTH_COLUMN: np.dtype(np.float64),
     VERTEX_ID_COLUMN: np.dtype(np.int32),
 }
 
@@ -434,12 +439,12 @@ def penetration_mm(frames: pd.DataFrame) -> np.ndarray:
     contacts, not errors, and are returned as small negative penetrations rather than
     clipped. Raises ``KeyError`` when *frames* has no ``signed_depth_mm`` column.
     """
-    if "signed_depth_mm" not in frames.columns:
+    if SIGNED_DEPTH_COLUMN not in frames.columns:
         raise KeyError(
-            f"penetration_mm: frames has no 'signed_depth_mm' column; got "
+            f"penetration_mm: frames has no {SIGNED_DEPTH_COLUMN!r} column; got "
             f"{list(frames.columns)}"
         )
-    return -frames["signed_depth_mm"].to_numpy()
+    return -frames[SIGNED_DEPTH_COLUMN].to_numpy()
 
 
 # ---------------------------------------------------------------------------

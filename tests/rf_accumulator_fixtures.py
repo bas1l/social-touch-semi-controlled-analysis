@@ -38,6 +38,8 @@ from analysis.receptive_field_mapping.data.touch_playback_data import TouchEvent
 __all__ = [
     "WORKED_EXAMPLE_N_VERTICES",
     "WORKED_EXAMPLE_DEPTHS_MM",
+    "WORKED_EXAMPLE_SIGNED_DEPTHS_MM",
+    "NAN_AND_DUPLICATE_SIGNED_DEPTHS_MM",
     "worked_example_touch",
     "nan_and_duplicate_touch",
     "random_contact_points",
@@ -89,6 +91,14 @@ WORKED_EXAMPLE_DEPTHS_MM = [
     np.array([2.00, 4.00, 1.20, 0.40, 3.80], dtype=np.float64),
 ]
 
+# ``WORKED_EXAMPLE_DEPTHS_MM`` above is **penetration** magnitude — positive,
+# the quantity the weight function consumes. ``TouchEvent.frame_depths`` carries
+# the sidecar column as stored, which is *signed* with negative = penetrating,
+# so the touch fixture negates once. Keeping both forms visible here is
+# deliberate: it is the sign flip that a depth-weighting bug is most likely to
+# get wrong, and ``penetration_mm`` is the single place production code flips it.
+WORKED_EXAMPLE_SIGNED_DEPTHS_MM = [-d for d in WORKED_EXAMPLE_DEPTHS_MM]
+
 
 def _contact_pts_for(frame_vertices):
     """Plausible (K_i, 3) contact coordinates; only the GUI's left view reads them."""
@@ -111,6 +121,7 @@ def worked_example_touch() -> TouchEvent:
         gesture_type="stroke_proximal",
         frame_contact_pts=_contact_pts_for(frame_vertices),
         frame_vertex_indices=frame_vertices,
+        frame_depths=[d.copy() for d in WORKED_EXAMPLE_SIGNED_DEPTHS_MM],
         frame_spikes=_WORKED_EXAMPLE_SPIKES.copy(),
         frame_iff=_WORKED_EXAMPLE_IFF.copy(),
     )
@@ -147,12 +158,27 @@ def nan_and_duplicate_touch() -> TouchEvent:
         gesture_type="tap",
         frame_contact_pts=_contact_pts_for(frame_vertices),
         frame_vertex_indices=frame_vertices,
+        frame_depths=[d.copy() for d in NAN_AND_DUPLICATE_SIGNED_DEPTHS_MM],
         frame_spikes=np.array([False, True, True, False, True], dtype=bool),
         frame_iff=np.array([12.5, 1e8, np.nan, 37.25, 1e-8], dtype=np.float64),
     )
 
 
 NAN_AND_DUPLICATE_N_VERTICES = 8
+
+# Signed depths (negative = penetrating) aligned element-for-element with each
+# frame's vertex list above, including the empty frame and the duplicated
+# vertex. The duplicate is kept: the reduction must go on handling it
+# bit-identically. The *loader* refuses to produce one (a duplicate
+# ``(frame_index, vertex_id)`` raises there), which is a statement about what
+# may enter the pipeline, not about what this reduction must survive.
+NAN_AND_DUPLICATE_SIGNED_DEPTHS_MM = [
+    np.array([], dtype=np.float64),
+    np.array([-1.5, -2.25, -0.75, -3.0], dtype=np.float64),
+    np.array([-0.5, -1.25, -2.0], dtype=np.float64),
+    np.array([-4.0, -0.125, -1.0], dtype=np.float64),
+    np.array([-2.5, -2.5, -0.25, -3.75, -1.0], dtype=np.float64),
+]
 
 
 # ----------------------------------------------------------------------

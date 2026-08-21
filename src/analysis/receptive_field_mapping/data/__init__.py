@@ -10,6 +10,7 @@ from .rf_data_loader import (
 from .contact_depth_field_io import (
     COORDINATE_SPACES,
     TERMINAL_RF_CENTERED_SPACES,
+    SIGNED_DEPTH_COLUMN,
     VERTEX_ID_COLUMN,
     CoordinateSpaceError,
     DepthFieldSchemaError,
@@ -102,6 +103,7 @@ __all__ = [
     # contact_depth_field_io
     "COORDINATE_SPACES",
     "TERMINAL_RF_CENTERED_SPACES",
+    "SIGNED_DEPTH_COLUMN",
     "VERTEX_ID_COLUMN",
     "CoordinateSpaceError",
     "DepthFieldSchemaError",

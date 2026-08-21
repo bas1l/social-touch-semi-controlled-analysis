@@ -6,12 +6,13 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import NamedTuple, Optional
 
 import numpy as np
 import pandas as pd
 
 from .contact_depth_field_io import (
+    SIGNED_DEPTH_COLUMN,
     TERMINAL_RF_CENTERED_SPACES,
     VERTEX_ID_COLUMN,
     DepthField,
@@ -24,11 +25,16 @@ from analysis.pipeline.shared_constants import NERVE_SPIKE_COL, NERVE_FREQ_COL, 
 
 logger = logging.getLogger(__name__)
 
+# v5: every contact frame additionally carries its ``signed_depth_mm`` values, one
+# per contact point, read off the same sidecar rows that supplied ``vertex_id``.
+# A v4 cache has no depth at all, so reusing one would hand the weighting stage a
+# depth-free touch that still looks structurally valid.
+#
 # v4: contact-point vertex identity is read off the contact-depth-field sidecar
 # instead of re-derived by nearest-vertex snapping, and the sidecar provenance is
 # stored alongside. A v3 cache holds KDTree-derived vertex indices, which are a
 # different (and wrong) answer, so it must not be reused.
-_CACHE_SCHEMA_VERSION = 4
+_CACHE_SCHEMA_VERSION = 5
 
 _FRAME_INDEX_COL = "frame_index"
 _SOURCE_BLOCK_FILE_COL = "source_block_file"
@@ -101,8 +107,28 @@ def _parse_contact_points_strict(cell: str) -> np.ndarray:
 # Contact-depth-field sidecar: the ordered-correspondence vertex source
 # ------------------------------------------------------------------
 
+class _FrameRows(NamedTuple):
+    """One frame's sidecar rows, in file order, unpacked into parallel arrays.
+
+    ``vertex_ids`` and ``signed_depth_mm`` are read off the **same rows** and are
+    aligned element-for-element: element k of both belongs to the k-th contact point
+    listed in that frame's CSV ``contact_points`` cell. There is no second lookup and
+    no vertex-keyed mapping anywhere — a ``.get(vertex_id, ...)`` would silently
+    reintroduce the matching step ordered correspondence exists to avoid.
+
+    ``signed_depth_mm`` is the stored column **verbatim**: negative is penetrating,
+    and positive values above the grazing epsilon are real grazing contacts. It is
+    not negated, clamped or rescaled here — :func:`penetration_mm` is the single
+    documented negation point, and it belongs to the weighting stage, not to
+    transport.
+    """
+
+    vertex_ids: np.ndarray       # (K,) int64
+    signed_depth_mm: np.ndarray  # (K,) float64
+
+
 class _BlockVertexSource:
-    """One block's ``vertex_id`` column, addressable by ``frame_index`` value.
+    """One block's ``vertex_id`` and ``signed_depth_mm``, by ``frame_index`` value.
 
     This is the whole of the join, and it is deliberately narrow.
 
@@ -122,7 +148,12 @@ class _BlockVertexSource:
 
     Rows are held in **file order**, never sorted by ``vertex_id`` — sorting is what
     ``DepthField.frame()`` does for aggregating callers, and it would hand every
-    contact point the wrong vertex here.
+    contact point the wrong vertex *and* the wrong depth here.
+
+    Depth travels on the same rows as vertex identity, so one join answers both
+    questions. Anything that reads depth by looking a ``vertex_id`` up in a
+    per-frame mapping has stopped using ordered correspondence and has quietly
+    reintroduced the matching step it exists to avoid.
     """
 
     def __init__(self, depth_field: DepthField, source_block_file: str) -> None:
@@ -144,10 +175,15 @@ class _BlockVertexSource:
         self._rows_by_frame = depth_field.frame_row_positions_in_file_order()
         # int32 as the schema stores it — a whole block's column at 4 bytes a row.
         self._vertex_id = depth_field.frames[VERTEX_ID_COLUMN].to_numpy(dtype=np.int32)
+        # float64 as the schema stores it, and carried verbatim: the stored value must
+        # stay bit-identical to the one the CSV's ``contact_depth`` was derived from.
+        self._signed_depth_mm = depth_field.frames[SIGNED_DEPTH_COLUMN].to_numpy(
+            dtype=np.float64
+        )
         self._n_forearm_vertices = int(len(depth_field.forearm_vertices))
 
-    def vertex_ids_for_frame(self, frame_index: int, n_points: int) -> np.ndarray:
-        """Return the ``vertex_id`` of frame *frame_index*'s rows, in file order.
+    def rows_for_frame(self, frame_index: int, n_points: int) -> _FrameRows:
+        """Return frame *frame_index*'s ``vertex_id`` and depth, in file order.
 
         *n_points* is the number of contact points parsed from the CSV for this
         frame. It **must** equal the number of sidecar rows carrying this
@@ -157,6 +193,24 @@ class _BlockVertexSource:
 
         A frame absent from the sidecar has zero rows, which means *no contact in
         that frame* — legal, and it must then have zero parsed points too.
+
+        Three further things are asserted here, at the loader boundary, because this
+        is the last place where the file, the frame and the vertex are all still in
+        hand:
+
+        * every ``vertex_id`` lies inside the reference forearm;
+        * ``(frame_index, vertex_id)`` is **unique** within the frame. The producer's
+          contract permits duplicates and this consumer does not: duplicates are
+          harmless today only because they double numerator and denominator equally,
+          a cancellation that holds while every weight is 1 and stops holding the
+          moment depth weighting is switched on. **Assert, do not reduce** — quietly
+          collapsing rows would pick a survivor (deepest? first?) that nothing here
+          is entitled to choose on the producer's behalf;
+        * no depth is ``NaN``. Zero is *not* absent — a grazing contact is a real
+          measurement of 0.0 mm — and a *missing row* is already impossible by
+          construction because the per-frame count assertion above has run, so NaN is
+          the only remaining form of absence and it raises rather than turning into a
+          zero weight indistinguishable from a grazing touch.
         """
         positions = self._rows_by_frame.get(int(frame_index))
         n_rows = 0 if positions is None else int(len(positions))
@@ -171,8 +225,14 @@ class _BlockVertexSource:
                 f"the wrong row."
             )
         if n_rows == 0:
-            return np.empty(0, dtype=np.int64)
+            return _FrameRows(
+                vertex_ids=np.empty(0, dtype=np.int64),
+                signed_depth_mm=np.empty(0, dtype=np.float64),
+            )
         vertex_ids = self._vertex_id[positions].astype(np.int64)
+        # Same rows, same order, one indexing operation each. Depth is NOT looked up
+        # by vertex_id: that would be a second join, and a wrong one.
+        depths = self._signed_depth_mm[positions].astype(np.float64)
         lo = int(vertex_ids.min())
         hi = int(vertex_ids.max())
         if lo < 0 or hi >= self._n_forearm_vertices:
@@ -182,7 +242,38 @@ class _BlockVertexSource:
                 f"but the reference forearm has only {self._n_forearm_vertices} "
                 f"vertices."
             )
-        return vertex_ids
+
+        unique_ids, counts = np.unique(vertex_ids, return_counts=True)
+        if len(unique_ids) != len(vertex_ids):
+            repeated = unique_ids[counts > 1]
+            raise ValueError(
+                f"_BlockVertexSource: duplicate ({_FRAME_INDEX_COL}, "
+                f"{VERTEX_ID_COLUMN}) pair(s) in frame_index={int(frame_index)}: "
+                f"{VERTEX_ID_COLUMN}(s) {repeated.tolist()} occur "
+                f"{counts[counts > 1].tolist()} times among {len(vertex_ids)} row(s). "
+                f"Sidecar: {self.sidecar_path}. Block CSV: {self.source_block_file}. "
+                f"This is asserted, never reduced: duplicates cancel between "
+                f"numerator and denominator only while every depth weight is 1, and "
+                f"choosing a survivor (deepest? first?) is a decision this loader is "
+                f"not entitled to make on the producer's behalf."
+            )
+
+        nan_mask = np.isnan(depths)
+        if nan_mask.any():
+            bad_positions = np.flatnonzero(nan_mask)
+            raise ValueError(
+                f"_BlockVertexSource: {SIGNED_DEPTH_COLUMN} is NaN on "
+                f"{int(nan_mask.sum())} of {len(depths)} row(s) of "
+                f"frame_index={int(frame_index)}. Contact-point position(s) within "
+                f"the frame: {bad_positions.tolist()}; {VERTEX_ID_COLUMN}(s): "
+                f"{vertex_ids[nan_mask].tolist()}. "
+                f"Sidecar: {self.sidecar_path}. Block CSV: {self.source_block_file}. "
+                f"A depth of 0.0 is a grazing contact — a real measurement — while "
+                f"NaN is an absent one, and the two must not collapse into the same "
+                f"zero weight downstream. There is no fallback value."
+            )
+
+        return _FrameRows(vertex_ids=vertex_ids, signed_depth_mm=depths)
 
 
 def _load_block_vertex_source(
@@ -270,6 +361,14 @@ class TouchEvent:
     frame_vertex_indices: list              # list of (K_i,) vertex_id per contact pt,
                                             # read off the contact-depth-field sidecar
                                             # row that the point corresponds to
+    frame_depths: list                      # list of (K_i,) float64 signed_depth_mm,
+                                            # off the SAME sidecar rows and aligned
+                                            # element-for-element with the line above.
+                                            # Verbatim: negative = penetrating. Not
+                                            # negated, clamped or normalised here —
+                                            # ``penetration_mm`` is the single
+                                            # documented negation point and it lives
+                                            # in the weighting stage, not in transport
     frame_spikes: np.ndarray               # (n_frames,) bool — per-row Nerve_spike
     frame_iff: np.ndarray                  # (n_frames,) float64 — per-row Nerve_freq (Hz)
 
@@ -317,7 +416,11 @@ def _save_playback_cache(
     offset/count arrays so the whole dataset fits in a single .npz.
 
     Write failures are logged as warnings and NOT raised, so callers stay on
-    the happy path.
+    the happy path. That pre-existing leniency covers the **write** only, and the
+    depth path does not inherit it: every consistency check on the depth arrays
+    runs *before* the ``try`` and raises. A misaligned depth channel is a wrong
+    answer, not a missing cache, and a caller that lost only its cache still
+    recomputes the same correct data next time.
     """
     cache_path = _playback_cache_path(series_csv_path)
 
@@ -359,6 +462,20 @@ def _save_playback_cache(
     # cp_frame_group    : (n_contact_frames,)   int32   — group index per frame
     # cp_frame_touch    : (n_contact_frames,)   int32   — touch index per frame
     # cp_frame_fi       : (n_contact_frames,)   int32   — frame-within-touch index
+    #
+    # Depth is emphatically NOT deduplicated with the group.  The group key is
+    # object identity of the vertex array, which the parser shares only across rows
+    # that agree on BOTH the contact-point text and the frame index — but depth is
+    # not implied by the contact-point string, and two Kinect frames can press the
+    # same coordinates to different depths.  Storing depth per unique group would
+    # therefore broadcast one frame's depths over every frame sharing it, and it
+    # would do so silently, producing a plausible map that is wrong.  Depth is
+    # stored **per contact-frame**, in the same order as cp_frame_group, so the
+    # correctness of the depth channel does not depend on the parser's reuse key
+    # staying what it is today:
+    #
+    # cp_frame_depth_data    : (total_frame_pts,)     float64 — depth per contact pt
+    # cp_frame_depth_offsets : (n_contact_frames + 1,) int64  — cumulative per frame
     seen: dict[int, int] = {}          # id(vtx_array) -> group index
     unique_pts_parts: list[np.ndarray] = []
     unique_vtx_parts: list[np.ndarray] = []
@@ -366,11 +483,35 @@ def _save_playback_cache(
     frame_group_list: list[int] = []
     frame_touch_list: list[int] = []
     frame_fi_list: list[int] = []
+    frame_depth_parts: list[np.ndarray] = []
+    frame_depth_sizes: list[int] = []
 
     for ti, touch in enumerate(all_touches):
-        for fi, (pts, vtx) in enumerate(zip(touch.frame_contact_pts, touch.frame_vertex_indices)):
+        n_frames_pts = len(touch.frame_contact_pts)
+        if not (len(touch.frame_vertex_indices) == len(touch.frame_depths) == n_frames_pts):
+            raise ValueError(
+                f"_save_playback_cache: touch (block={touch.block_order_id}, "
+                f"trial={touch.trial_id}, touch={touch.single_touch_id}) has "
+                f"{n_frames_pts} contact-point frame(s), "
+                f"{len(touch.frame_vertex_indices)} vertex frame(s) and "
+                f"{len(touch.frame_depths)} depth frame(s); all three are per-frame "
+                f"lists and must be the same length."
+            )
+        for fi, (pts, vtx, depths) in enumerate(
+            zip(touch.frame_contact_pts, touch.frame_vertex_indices, touch.frame_depths)
+        ):
             vtx_arr = np.asarray(vtx, dtype=np.int64)
+            depth_arr = np.asarray(depths, dtype=np.float64)
             k = len(vtx_arr)
+            if len(depth_arr) != k:
+                raise ValueError(
+                    f"_save_playback_cache: frame {fi} of touch "
+                    f"(block={touch.block_order_id}, trial={touch.trial_id}, "
+                    f"touch={touch.single_touch_id}) carries {k} vertex "
+                    f"index/indices but {len(depth_arr)} depth value(s). They come "
+                    f"off the same sidecar rows and must be aligned "
+                    f"element-for-element."
+                )
             if k == 0:
                 continue
             obj_id = id(vtx)
@@ -385,6 +526,8 @@ def _save_playback_cache(
             frame_group_list.append(group_idx)
             frame_touch_list.append(ti)
             frame_fi_list.append(fi)
+            frame_depth_parts.append(depth_arr)
+            frame_depth_sizes.append(k)
 
     if unique_pts_parts:
         cp_unique_pts = np.concatenate(unique_pts_parts, axis=0)
@@ -394,6 +537,9 @@ def _save_playback_cache(
         cp_frame_group = np.array(frame_group_list, dtype=np.int32)
         cp_frame_touch = np.array(frame_touch_list, dtype=np.int32)
         cp_frame_fi = np.array(frame_fi_list, dtype=np.int32)
+        cp_frame_depth_data = np.concatenate(frame_depth_parts).astype(np.float64)
+        cp_frame_depth_offsets = np.zeros(len(frame_depth_sizes) + 1, dtype=np.int64)
+        cp_frame_depth_offsets[1:] = np.cumsum(frame_depth_sizes, dtype=np.int64)
     else:
         cp_unique_pts = np.empty((0, 3), dtype=np.float32)
         cp_unique_vtx = np.empty(0, dtype=np.int32)
@@ -401,6 +547,8 @@ def _save_playback_cache(
         cp_frame_group = np.empty(0, dtype=np.int32)
         cp_frame_touch = np.empty(0, dtype=np.int32)
         cp_frame_fi = np.empty(0, dtype=np.int32)
+        cp_frame_depth_data = np.empty(0, dtype=np.float64)
+        cp_frame_depth_offsets = np.zeros(1, dtype=np.int64)
 
     # Depth-field provenance, one entry per block. Persisted so a cache hit still
     # reports which sidecar and which declared coordinate space produced these vertex
@@ -437,6 +585,8 @@ def _save_playback_cache(
             cp_frame_group=cp_frame_group,
             cp_frame_touch=cp_frame_touch,
             cp_frame_fi=cp_frame_fi,
+            cp_frame_depth_data=cp_frame_depth_data,
+            cp_frame_depth_offsets=cp_frame_depth_offsets,
             forearm_vertices=data.session_data.forearm_vertices,
             depth_provenance_block_files=depth_provenance_block_files,
             depth_provenance_sidecar_paths=depth_provenance_sidecar_paths,
@@ -501,6 +651,9 @@ def _load_playback_cache(
         "depth_provenance_block_files",
         "depth_provenance_sidecar_paths",
         "depth_provenance_spaces",
+        # v5, added in the same change as the version bump for the same reason.
+        "cp_frame_depth_data",
+        "cp_frame_depth_offsets",
     )
     missing_keys = [k for k in required_keys if k not in npz]
     if missing_keys:
@@ -532,6 +685,8 @@ def _load_playback_cache(
     cp_frame_group = npz["cp_frame_group"]
     cp_frame_touch = npz["cp_frame_touch"]
     cp_frame_fi = npz["cp_frame_fi"]
+    cp_frame_depth_data = npz["cp_frame_depth_data"]
+    cp_frame_depth_offsets = npz["cp_frame_depth_offsets"]
     forearm_vertices = npz["forearm_vertices"]
     depth_provenance_block_files = npz["depth_provenance_block_files"]
     depth_provenance_sidecar_paths = npz["depth_provenance_sidecar_paths"]
@@ -592,6 +747,12 @@ def _load_playback_cache(
             f"_load_playback_cache: 'cp_unique_offsets' has shape "
             f"{cp_unique_offsets.shape} (expected (n_groups+1,)): {cache_path}"
         )
+    n_groups = len(cp_unique_offsets) - 1
+    if cp_frame_group.ndim != 1:
+        raise ValueError(
+            f"_load_playback_cache: 'cp_frame_group' has shape "
+            f"{cp_frame_group.shape} (expected (n_contact_frames,)): {cache_path}"
+        )
     n_contact_frames = len(cp_frame_group)
     for arr_name, arr in [
         ("cp_frame_touch", cp_frame_touch),
@@ -602,6 +763,67 @@ def _load_playback_cache(
                 f"_load_playback_cache: '{arr_name}' has shape {arr.shape}, "
                 f"expected ({n_contact_frames},): {cache_path}"
             )
+    if n_contact_frames and (
+        int(cp_frame_group.min()) < 0 or int(cp_frame_group.max()) >= n_groups
+    ):
+        raise ValueError(
+            f"_load_playback_cache: 'cp_frame_group' references group(s) outside "
+            f"[0, {n_groups}) — range is "
+            f"[{int(cp_frame_group.min())}, {int(cp_frame_group.max())}]: {cache_path}"
+        )
+
+    # Depth is stored per contact-frame, never per dedup group, so its offsets are
+    # indexed by the contact-frame position i — the same i that indexes
+    # cp_frame_group / cp_frame_touch / cp_frame_fi — and NOT by the group index.
+    if cp_frame_depth_offsets.ndim != 1 or len(cp_frame_depth_offsets) != n_contact_frames + 1:
+        raise ValueError(
+            f"_load_playback_cache: 'cp_frame_depth_offsets' has shape "
+            f"{cp_frame_depth_offsets.shape}, expected "
+            f"({n_contact_frames + 1},): {cache_path}"
+        )
+    if cp_frame_depth_data.ndim != 1:
+        raise ValueError(
+            f"_load_playback_cache: 'cp_frame_depth_data' has shape "
+            f"{cp_frame_depth_data.shape} (expected 1-D): {cache_path}"
+        )
+    if int(cp_frame_depth_offsets[0]) != 0:
+        raise ValueError(
+            f"_load_playback_cache: 'cp_frame_depth_offsets' starts at "
+            f"{int(cp_frame_depth_offsets[0])}, expected 0: {cache_path}"
+        )
+    if int(cp_frame_depth_offsets[-1]) != len(cp_frame_depth_data):
+        raise ValueError(
+            f"_load_playback_cache: 'cp_frame_depth_offsets' ends at "
+            f"{int(cp_frame_depth_offsets[-1])} but 'cp_frame_depth_data' holds "
+            f"{len(cp_frame_depth_data)} value(s): {cache_path}"
+        )
+    depth_frame_sizes = np.diff(cp_frame_depth_offsets.astype(np.int64))
+    group_sizes_cached = (
+        np.diff(cp_unique_offsets.astype(np.int64))[cp_frame_group.astype(np.int64)]
+        if n_contact_frames
+        else np.empty(0, dtype=np.int64)
+    )
+    mismatched = np.flatnonzero(depth_frame_sizes != group_sizes_cached)
+    if mismatched.size:
+        i = int(mismatched[0])
+        raise ValueError(
+            f"_load_playback_cache: contact frame {i} (touch {int(cp_frame_touch[i])}, "
+            f"frame {int(cp_frame_fi[i])}) holds {int(depth_frame_sizes[i])} depth "
+            f"value(s) but {int(group_sizes_cached[i])} contact point(s); "
+            f"{mismatched.size} contact frame(s) disagree in total: {cache_path}. "
+            f"Depth is stored per contact-frame precisely so that it cannot be "
+            f"broadcast across the frames sharing a deduplicated contact-point "
+            f"group, and this is the check that says so."
+        )
+    if np.isnan(cp_frame_depth_data).any():
+        n_nan = int(np.isnan(cp_frame_depth_data).sum())
+        raise ValueError(
+            f"_load_playback_cache: 'cp_frame_depth_data' holds {n_nan} NaN "
+            f"value(s) out of {len(cp_frame_depth_data)}: {cache_path}. NaN depth "
+            f"is rejected at the loader boundary, and a cache is a loader boundary; "
+            f"delete the cache and recompute rather than letting an absent "
+            f"measurement become a zero weight."
+        )
     if forearm_vertices.ndim != 2 or forearm_vertices.shape[1] != 3:
         raise ValueError(
             f"_load_playback_cache: 'forearm_vertices' has shape "
@@ -636,14 +858,16 @@ def _load_playback_cache(
         for i in range(n_provenance)
     ]
 
-    # Build a lookup: frame_lookup[ti][fi] = group_idx
-    # so we can reconstruct per-frame pts/vtx slices efficiently.
-    frame_lookup: dict[int, dict[int, int]] = {}
+    # Build a lookup: frame_lookup[ti][fi] = (group_idx, contact_frame_row)
+    # so we can reconstruct per-frame pts/vtx slices from the deduplicated groups
+    # and per-frame depth slices from the contact-frame row — two different
+    # indexings on purpose, because depth is not shared across a group.
+    frame_lookup: dict[int, dict[int, tuple[int, int]]] = {}
     for i in range(n_contact_frames):
         ti_val = int(cp_frame_touch[i])
         fi_val = int(cp_frame_fi[i])
         g_val = int(cp_frame_group[i])
-        frame_lookup.setdefault(ti_val, {})[fi_val] = g_val
+        frame_lookup.setdefault(ti_val, {})[fi_val] = (g_val, i)
 
     # Reconstruct touch events.
     frames_offset = 0
@@ -663,16 +887,23 @@ def _load_playback_cache(
         ti_lookup = frame_lookup.get(ti, {})
         frame_pts_list: list[np.ndarray] = []
         frame_vtx_list: list[np.ndarray] = []
+        frame_depth_list: list[np.ndarray] = []
         for fi in range(n_frames):
             if fi in ti_lookup:
-                g = ti_lookup[fi]
+                g, cf = ti_lookup[fi]
                 start = int(cp_unique_offsets[g])
                 end = int(cp_unique_offsets[g + 1])
                 frame_pts_list.append(cp_unique_pts[start:end].astype(np.float64))
                 frame_vtx_list.append(cp_unique_vtx[start:end].astype(np.int64))
+                d_start = int(cp_frame_depth_offsets[cf])
+                d_end = int(cp_frame_depth_offsets[cf + 1])
+                frame_depth_list.append(
+                    cp_frame_depth_data[d_start:d_end].astype(np.float64)
+                )
             else:
                 frame_pts_list.append(np.empty((0, 3), dtype=np.float64))
                 frame_vtx_list.append(np.empty(0, dtype=np.int64))
+                frame_depth_list.append(np.empty(0, dtype=np.float64))
 
         event = TouchEvent(
             block_order_id=block_order_id,
@@ -681,6 +912,7 @@ def _load_playback_cache(
             gesture_type=gesture,
             frame_contact_pts=frame_pts_list,
             frame_vertex_indices=frame_vtx_list,
+            frame_depths=frame_depth_list,
             frame_spikes=spikes,
             frame_iff=iff,
         )
@@ -736,6 +968,13 @@ def load_playback_data(
     KDTree that used to answer this question was **removed, not reconciled**: it
     assigns a different vertex from the one the sidecar recorded, and that discrepancy
     *is* the measured 29 mm off-surface error, not a symptom of some other bug.
+
+    **Depth rides the same rows.** ``TouchEvent.frame_depths[i]`` holds the
+    ``signed_depth_mm`` of exactly the rows that supplied
+    ``frame_vertex_indices[i]``, aligned element-for-element, carried **verbatim**
+    (negative is penetrating). Nothing here negates, clamps or normalises it; the
+    weighting stage owns that, and ``penetration_mm`` is the one place the sign is
+    flipped.
 
     Parameters
     ----------
@@ -889,6 +1128,7 @@ def load_playback_data(
 
         frame_contact_pts: list[np.ndarray] = []
         frame_vertex_indices: list[np.ndarray] = []
+        frame_depths: list[np.ndarray] = []
         frame_spikes: list[bool] = []
         frame_iff: list[float] = []
 
@@ -901,6 +1141,7 @@ def load_playback_data(
         prev_key: Optional[tuple] = None
         prev_pts: np.ndarray = np.empty((0, 3), dtype=np.float64)
         prev_vtx: np.ndarray = np.empty(0, dtype=np.int64)
+        prev_depths: np.ndarray = np.empty(0, dtype=np.float64)
 
         for row_idx, cell in enumerate(cp_strings):
             cell_str = str(cell)
@@ -912,6 +1153,7 @@ def load_playback_data(
             if key == prev_key:
                 frame_contact_pts.append(prev_pts)
                 frame_vertex_indices.append(prev_vtx)
+                frame_depths.append(prev_depths)
             else:
                 pts_arr = _parse_contact_points_strict(cell_str)
                 if frame_missing:
@@ -932,8 +1174,9 @@ def load_playback_data(
                         )
                     prev_pts = np.empty((0, 3), dtype=np.float64)
                     prev_vtx = np.empty(0, dtype=np.int64)
+                    prev_depths = np.empty(0, dtype=np.float64)
                 else:
-                    prev_vtx = block_source.vertex_ids_for_frame(
+                    prev_vtx, prev_depths = block_source.rows_for_frame(
                         frame_index, len(pts_arr)
                     )
                     prev_pts = pts_arr
@@ -941,6 +1184,7 @@ def load_playback_data(
                 prev_key = key
                 frame_contact_pts.append(prev_pts)
                 frame_vertex_indices.append(prev_vtx)
+                frame_depths.append(prev_depths)
 
             frame_spikes.append(bool(spikes_arr[row_idx]))
             frame_iff.append(float(iff_arr[row_idx]))
@@ -952,6 +1196,7 @@ def load_playback_data(
             gesture_type=gesture_type,
             frame_contact_pts=frame_contact_pts,
             frame_vertex_indices=frame_vertex_indices,
+            frame_depths=frame_depths,
             frame_spikes=np.array(frame_spikes, dtype=bool),
             frame_iff=np.array(frame_iff, dtype=np.float64),
         )
