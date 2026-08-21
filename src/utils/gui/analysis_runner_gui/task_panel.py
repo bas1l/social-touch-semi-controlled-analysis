@@ -19,9 +19,20 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from analysis.pipeline.execution_events import TaskStatus
 from utils.gui.analysis_runner_gui.dag_graph_view import DagGraphView
 from utils.gui.analysis_runner_gui.task_detail_panel import TaskDetailPanel
 from utils.pipeline.dag_config_model import DagConfigModel
+
+
+def _status_text(status: TaskStatus) -> str:
+    """Render *status* for the table cell.
+
+    The wire vocabulary is the display vocabulary — inventing a second set of
+    labels here would let the table, the graph glyphs and the console drift
+    apart.  Only the underscores are softened for reading.
+    """
+    return status.value.replace("_", " ")
 
 
 class TaskPanel(QWidget):
@@ -31,7 +42,8 @@ class TaskPanel(QWidget):
 
     _COL_NAME = 0
     _COL_ENABLED = 1
-    _COL_DEPENDS = 2
+    _COL_STATUS = 2
+    _COL_DEPENDS = 3
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -113,10 +125,12 @@ class TaskPanel(QWidget):
         self._table.blockSignals(True)
         self._table.clear()
         self._table.setRowCount(len(task_names))
-        self._table.setColumnCount(3)
-        self._table.setHorizontalHeaderLabels(["Task Name", "Enabled", "Depends On"])
+        self._table.setColumnCount(4)
+        self._table.setHorizontalHeaderLabels(
+            ["Task Name", "Enabled", "Status", "Depends On"]
+        )
 
-        for col in range(2):
+        for col in range(3):
             self._table.horizontalHeader().setSectionResizeMode(
                 col, QHeaderView.ResizeToContents
             )
@@ -153,6 +167,10 @@ class TaskPanel(QWidget):
 
             self._table.setCellWidget(row, self._COL_ENABLED, container)
 
+            item_status = QTableWidgetItem(_status_text(TaskStatus.PENDING))
+            item_status.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+            self._table.setItem(row, self._COL_STATUS, item_status)
+
             dep_text = ", ".join(model.get_task_dependencies(name))
             item_dep = QTableWidgetItem(dep_text)
             item_dep.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
@@ -165,6 +183,35 @@ class TaskPanel(QWidget):
         if task_names:
             self._table.selectRow(0)
             # _on_current_cell_changed fires from selectRow and calls show_task
+
+    # ------------------------------------------------------------------
+    # Run status
+    # ------------------------------------------------------------------
+
+    def set_task_status(self, task_name: str, status: TaskStatus) -> None:
+        """Show *status* for *task_name* in both the graph and the table.
+
+        Unknown task names are ignored — see
+        :meth:`DagGraphView.set_task_status` for why a stale name must not
+        raise out of a Qt slot.
+        """
+        self._graph_view.set_task_status(task_name, status)
+        if task_name not in self._row_task:
+            return
+        item = self._table.item(self._row_task.index(task_name), self._COL_STATUS)
+        if item is None:
+            return
+        item.setText(_status_text(status))
+
+    def clear_task_statuses(self) -> None:
+        """Return every task to the pending status in both views."""
+        self._graph_view.clear_task_statuses()
+        pending = _status_text(TaskStatus.PENDING)
+        for row in range(len(self._row_task)):
+            item = self._table.item(row, self._COL_STATUS)
+            if item is None:
+                continue
+            item.setText(pending)
 
     # ------------------------------------------------------------------
     # Toggle handlers

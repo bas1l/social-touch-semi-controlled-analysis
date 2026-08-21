@@ -17,6 +17,7 @@ from grandalf.graphs import Graph
 from grandalf.graphs import Vertex
 from grandalf.layouts import SugiyamaLayout
 
+from analysis.pipeline.execution_events import TaskStatus
 from utils.gui.analysis_runner_gui.dag_graph_items import DagEdge, DagTaskNode
 from utils.pipeline.dag_config_model import DagConfigModel
 
@@ -76,7 +77,12 @@ class DagGraphView(QGraphicsView):
     # ------------------------------------------------------------------
 
     def populate(self, model: DagConfigModel) -> None:
-        """Clear and rebuild the graph from *model*."""
+        """Clear and rebuild the graph from *model*.
+
+        Every node is rebuilt from scratch, so any run status painted on the
+        previous graph is discarded with it: a freshly populated graph is
+        uniformly :attr:`TaskStatus.PENDING`.
+        """
         self._save_timer.stop()
         self._scene.clear()
         self._nodes = {}
@@ -180,6 +186,30 @@ class DagGraphView(QGraphicsView):
     def update_from_model(self, model: DagConfigModel) -> None:
         for node in self._nodes.values():
             node.update_from_model(model)
+
+    # ------------------------------------------------------------------
+    # Run status
+    # ------------------------------------------------------------------
+
+    def set_task_status(self, task_name: str, status: TaskStatus) -> None:
+        """Paint *task_name*'s node with *status*; no-op if it has no node.
+
+        An unknown name is tolerated on purpose: statuses arrive asynchronously
+        from a child process, and the user may have switched workflow while it
+        was still running.  Raising here would raise inside a Qt slot and take
+        the window down over a stale name.  Run status is transient view state
+        and is never persisted, so this method must not touch the layout
+        sidecar — it deliberately does not start the save timer.
+        """
+        node = self._nodes.get(task_name)
+        if node is None:
+            return
+        node.set_status(status)
+
+    def clear_task_statuses(self) -> None:
+        """Return every node to :attr:`TaskStatus.PENDING`."""
+        for node in self._nodes.values():
+            node.set_status(TaskStatus.PENDING)
 
     # ------------------------------------------------------------------
     # Layout persistence

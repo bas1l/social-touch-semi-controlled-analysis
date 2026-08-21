@@ -19,6 +19,10 @@ QT_FREE_MODULES = (
     "analysis.pipeline.dag_plan",
     "analysis.pipeline.dag_execution",
     "analysis.pipeline.stage_runner",
+    # The GUI's reader side of the same channel: it lives under the GUI package
+    # but must stay importable without Qt, so a run log can be replayed by a
+    # headless tool.
+    "utils.gui.analysis_runner_gui.status_channel",
 )
 
 _PROBE = """

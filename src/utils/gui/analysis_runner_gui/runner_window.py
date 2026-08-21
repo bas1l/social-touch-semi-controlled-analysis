@@ -27,12 +27,20 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from analysis.pipeline.execution_events import (
+    ConsoleLine,
+    RunFinished,
+    TaskFinished,
+    TaskStarted,
+    TaskStatus,
+)
 from utils.gui.analysis_runner_gui.console_widget import ConsoleWidget
 from utils.gui.analysis_runner_gui.kinect_directory_selector import SessionConfigSelector
 from utils.gui.analysis_runner_gui.runner_config import WorkflowEntry
 from utils.gui.analysis_runner_gui.prefect_server_manager import PrefectServerManager
 from utils.gui.analysis_runner_gui.process_output_reader import ProcessOutputReader
 from utils.gui.analysis_runner_gui.run_log_file import RunLogFile
+from utils.gui.analysis_runner_gui.status_channel import parse_status_line
 from utils.gui.analysis_runner_gui.task_panel import TaskPanel
 from utils.gui.analysis_runner_gui.workflow_selector import WorkflowSelector
 from utils.pipeline.dag_config_model import DagConfigModel
@@ -61,6 +69,8 @@ class AnalysisRunnerGUI(QMainWindow):
         self._reader: ProcessOutputReader | None = None
         self._log_file: RunLogFile | None = None
         self._aborting: bool = False
+        self._run_finished: RunFinished | None = None
+        self._status_channel_broken: bool = False
 
         self.setWindowTitle("AnalysisRunnerGUI")
         self.resize(1100, 700)
@@ -360,7 +370,10 @@ class AnalysisRunnerGUI(QMainWindow):
             cmd += ["--dag-config", str(self._current_entry.dag_config)]
         env = self._server_manager.get_env() if self._server_manager.is_running() else None
         self._aborting = False
+        self._run_finished = None
+        self._status_channel_broken = False
         self._console.clear()
+        self._task_panel.clear_task_statuses()
         self._log_file = self._open_run_log(project_root, cmd)
         self._process = subprocess.Popen(
             cmd,
@@ -370,7 +383,11 @@ class AnalysisRunnerGUI(QMainWindow):
             stderr=subprocess.STDOUT,
         )
         self._reader = ProcessOutputReader(self._process)
-        self._reader.line_received.connect(self._console.append_line)
+        # Full lines go through the status-channel filter first; tqdm frames
+        # never carry sentinels, so they keep their direct route.  Both kinds
+        # are logged verbatim, sentinels included, so a run log can be replayed
+        # into the graph later.
+        self._reader.line_received.connect(self._on_output_line)
         self._reader.cr_line_received.connect(self._console.replace_last_line)
         self._reader.line_received.connect(self._log_file.write_line)
         self._reader.cr_line_received.connect(self._log_file.write_cr)
@@ -405,6 +422,79 @@ class AnalysisRunnerGUI(QMainWindow):
         )
         return RunLogFile(log_path, header)
 
+    # ------------------------------------------------------------------
+    # Status channel
+    # ------------------------------------------------------------------
+
+    def _on_output_line(self, line: str) -> None:
+        """Route one child-process line to the graph or to the console.
+
+        Sentinel lines are *consumed* here: they carry no information for a
+        human reader and would drown the console.  They still reach the run log
+        verbatim through the reader's other connection.
+        """
+        try:
+            event = parse_status_line(line)
+        except ValueError as exc:
+            # A malformed sentinel is a producer bug, and a dropped terminal
+            # status would leave a node stuck pending.  Report it loudly, mark
+            # the run as errored, and carry on consuming output: raising out of
+            # a Qt slot mid-run would destroy the very console backlog needed
+            # to diagnose it.
+            self._status_channel_broken = True
+            self._console.append_line(f"!! MALFORMED STATUS EVENT: {exc}")
+            return
+        if event is None:
+            self._console.append_line(line)
+            return
+        self._apply_event(event)
+
+    def _apply_event(self, event: object) -> None:
+        """Reflect one decoded execution event in the UI."""
+        if isinstance(event, TaskStarted):
+            self._task_panel.set_task_status(event.name, TaskStatus.RUNNING)
+            return
+        if isinstance(event, TaskFinished):
+            self._task_panel.set_task_status(event.name, event.status)
+            return
+        if isinstance(event, RunFinished):
+            self._run_finished = event
+            return
+        if isinstance(event, ConsoleLine):
+            self._console.append_line(event.text)
+            return
+        raise TypeError(f"unhandled DAG event: {event!r}")
+
+    # ------------------------------------------------------------------
+    # Run outcome
+    # ------------------------------------------------------------------
+
+    def _outcome_message(self, retcode: int) -> str:
+        """Status-bar wording for a finished run.
+
+        The run's own ``RunFinished`` event is authoritative because it names
+        the failed tasks; the exit code is the fallback for a run that died
+        before reporting one (a crash, a kill, an older child script).
+        """
+        event = self._run_finished
+        if event is None:
+            label = "Finished" if retcode == 0 else "Failed"
+            return f"{label} (exit code {retcode})"
+        if event.aborted:
+            return "Aborted"
+        if event.failed:
+            return f"Failed — {len(event.failed)} task(s) failed"
+        return "Finished"
+
+    def _write_failure_summary(self) -> None:
+        """Name the failed tasks in the console, once, at the end of a run."""
+        event = self._run_finished
+        if event is None or not event.failed:
+            return
+        self._console.append_line(
+            f"!! {len(event.failed)} task(s) failed: " + ", ".join(event.failed)
+        )
+
     def _poll_process(self) -> None:
         if self._process is None:
             return
@@ -422,10 +512,13 @@ class AnalysisRunnerGUI(QMainWindow):
             self._log_file.close()
             self._log_file = None
         if self._aborting:
-            self.statusBar().showMessage(f"Aborted — log: {log_path}")
+            outcome = "Aborted"
         else:
-            label = "Finished" if retcode == 0 else "Failed"
-            self.statusBar().showMessage(f"{label} (exit code {retcode}) — log: {log_path}")
+            self._write_failure_summary()
+            outcome = self._outcome_message(retcode)
+        if self._status_channel_broken:
+            outcome += " (status channel error)"
+        self.statusBar().showMessage(f"{outcome} — log: {log_path}")
         self._run_button.setEnabled(True)
         self._process = None
 

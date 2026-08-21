@@ -28,6 +28,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from analysis.pipeline.execution_events import TaskStatus
 from utils.pipeline.dag_config_model import DagConfigModel
 
 _NODE_H = 90
@@ -64,6 +65,39 @@ _COLOR_BORDER_DISABLED = QColor("#888888")
 _COLOR_SELECTION = QColor("#ff8800")
 _COLOR_EDGE = QColor("#555555")
 
+_STATUS_GLYPH_BOX = 20   # side of the square the status glyph is centred in
+_STATUS_GLYPH_INSET = 22  # from rect.right(); the category badge keeps 12
+
+#: How each run status repaints a node, as
+#: ``(fill | None, border | None, border_width, dim, glyph)``.
+#:
+#: ``fill``/``border`` of ``None`` mean "keep the node's own category colour",
+#: which is how ``PENDING`` leaves an untouched graph looking exactly as it did
+#: before this feature existed.  Status is an *overlay*: it never replaces the
+#: category badge (drawn at ``rect.right() - 12``) nor the selection stroke,
+#: which stay on their own visual channels.
+#:
+#: ``BYPASSED`` is violet and **undimmed** on purpose.  A bypassed task ran
+#: nothing, yet it is accounted for — it unlocks its dependents — so it must
+#: read as neither "done" (green) nor "skipped" (dimmed amber).  Reusing either
+#: would let a run report claim work that never happened.
+_STATUS_OVERLAY: dict[TaskStatus, tuple[QColor | None, QColor | None, float, bool, str]] = {
+    TaskStatus.PENDING:              (None, None, 1.5, False, ""),
+    TaskStatus.RUNNING:              (None, QColor("#1565c0"), 3.0, False, "▶"),
+    TaskStatus.COMPLETED:            (None, QColor("#2e7d32"), 2.5, False, "✓"),
+    TaskStatus.BYPASSED:             (QColor("#e3e0f0"), QColor("#5c4b99"), 2.0, False, "»"),
+    TaskStatus.FAILED:               (None, QColor("#c62828"), 2.5, False, "✗"),
+    TaskStatus.SKIPPED_DISABLED:     (QColor("#f0e0c0"), QColor("#aa6600"), 1.5, True, "–"),
+    TaskStatus.SKIPPED_DEP:          (QColor("#f0e0c0"), QColor("#aa6600"), 1.5, True, "–"),
+    TaskStatus.SKIPPED_GUARD:        (QColor("#ffe0a0"), QColor("#aa6600"), 2.0, True, "!"),
+    TaskStatus.SKIPPED_UNREGISTERED: (QColor("#e0e0e0"), QColor("#666666"), 1.5, True, "?"),
+    TaskStatus.ABORTED:              (QColor("#f0d0d0"), QColor("#888888"), 1.5, True, "⊘"),
+}
+
+#: Widest status border (``RUNNING``), used to grow the item's bounding rect so
+#: a 3 px stroke is not clipped at the node's edge.
+_MAX_STATUS_BORDER_W = max(width for _, _, width, _, _ in _STATUS_OVERLAY.values())
+
 
 class DagTaskNode(QGraphicsRectItem):
     """Graph node representing one DAG task."""
@@ -90,6 +124,7 @@ class DagTaskNode(QGraphicsRectItem):
         self._task_name = task_name
         self._category = category
         self._updating = False
+        self._status = TaskStatus.PENDING
 
         self.signals = DagTaskNode._Signals()
 
@@ -157,20 +192,52 @@ class DagTaskNode(QGraphicsRectItem):
         self.setPen(QPen(border, 1.5))
 
     # ------------------------------------------------------------------
+    # Run status
+    # ------------------------------------------------------------------
+
+    def set_status(self, status: TaskStatus) -> None:
+        """Repaint this node for *status* — the run's view of the task.
+
+        The status is transient run state: it is never written to the model and
+        never to the layout sidecar.
+        """
+        if status not in _STATUS_OVERLAY:
+            raise KeyError(
+                f"no overlay defined for status {status!r}; "
+                f"known: {sorted(member.name for member in _STATUS_OVERLAY)}"
+            )
+        if status is self._status:
+            return
+        self._status = status
+        self.update()
+
+    @property
+    def status(self) -> TaskStatus:
+        """The run status this node currently paints."""
+        return self._status
+
+    # ------------------------------------------------------------------
     # Painting
     # ------------------------------------------------------------------
 
     def paint(self, painter: QPainter, option, widget=None) -> None:
         painter.setRenderHint(QPainter.Antialiasing)
-        if not self._enabled:
-            painter.setOpacity(0.55)
-        rect = self.rect()
+        fill, border, border_w, dim_status, glyph = _STATUS_OVERLAY[self._status]
 
+        # A node with no status yet keeps the pre-run appearance entirely:
+        # category (or disabled) fill and border, dimmed while disabled.
+        neutral = fill is None and border is None
+        brush = self.brush() if fill is None else QBrush(fill)
+        pen = self.pen() if border is None else QPen(border, border_w)
+        if dim_status or (neutral and not self._enabled):
+            painter.setOpacity(0.55)
+
+        rect = self.rect()
         path = QPainterPath()
         path.addRoundedRect(rect, _CORNER_RADIUS, _CORNER_RADIUS)
 
-        painter.fillPath(path, self.brush())
-        painter.strokePath(path, self.pen())
+        painter.fillPath(path, brush)
+        painter.strokePath(path, pen)
 
         if option.state & QStyle.State_Selected:
             sel_pen = QPen(_COLOR_SELECTION, 2.0)
@@ -178,10 +245,34 @@ class DagTaskNode(QGraphicsRectItem):
 
         badge_color = _CATEGORY_BORDER_COLORS.get(self._category, _CATEGORY_BORDER_COLORS["none"])
         painter.fillRect(QRectF(rect.right() - 12, rect.top() + 2, 10, 10), badge_color)
+
+        if glyph:
+            # Full opacity even on a dimmed node: the status is the one thing
+            # the user is scanning the graph for.
+            painter.setOpacity(1.0)
+            glyph_font = QFont()
+            glyph_font.setBold(True)
+            glyph_font.setPointSize(_LABEL_FONT_SIZE)
+            painter.setFont(glyph_font)
+            painter.setPen(QPen(border if border is not None else badge_color))
+            painter.drawText(
+                QRectF(
+                    rect.right() - _STATUS_GLYPH_INSET,
+                    rect.top() + 2,
+                    _STATUS_GLYPH_BOX,
+                    _STATUS_GLYPH_BOX,
+                ),
+                Qt.AlignCenter,
+                glyph,
+            )
+
         painter.setOpacity(1.0)
 
     def boundingRect(self) -> QRectF:
-        return self.rect().adjusted(-2, -2, 2, 2)
+        # Half of the widest status border falls outside the rect; round up so
+        # the RUNNING stroke is never clipped.
+        margin = math.ceil(_MAX_STATUS_BORDER_W / 2.0) + 1
+        return self.rect().adjusted(-margin, -margin, margin, margin)
 
     # ------------------------------------------------------------------
     # Mouse events

@@ -400,22 +400,22 @@ unaware of it, exactly as `enabled` is today.
 ### Phase 2: GUI status channel and live node rendering
 **Goal:** The DAG graph becomes the run report.
 
-- [ ] 2.1 — Add `status_channel.parse_status_line`.
-- [ ] 2.2 — `DagTaskNode`: add `self._status`, `set_status()`, a `_STATUS_OVERLAY` table
+- [x] 2.1 — Add `status_channel.parse_status_line`.
+- [x] 2.2 — `DagTaskNode`: add `self._status`, `set_status()`, a `_STATUS_OVERLAY` table
       keyed by `TaskStatus` giving `(fill|None, border, width, dim, glyph)`, and paint it —
       keeping the existing category badge and the selection stroke on separate visual
       channels (status glyph at `rect.right() - 22`, category badge stays at `- 12`).
       Widen `boundingRect` for the 3px `RUNNING` border.
-- [ ] 2.3 — `DagGraphView`: add `set_task_status(name, status)` (forgiving `.get`, no-op on
+- [x] 2.3 — `DagGraphView`: add `set_task_status(name, status)` (forgiving `.get`, no-op on
       unknown) and `clear_task_statuses()`. `populate()` resets statuses, since it rebuilds
       `_nodes`. Statuses must never touch `_save_layout`.
-- [ ] 2.4 — `TaskPanel`: pass-through `set_task_status` / `clear_task_statuses` to the graph;
+- [x] 2.4 — `TaskPanel`: pass-through `set_task_status` / `clear_task_statuses` to the graph;
       show the status as a new read-only column in the table view.
-- [ ] 2.5 — `runner_window`: connect `reader.line_received` to a `_on_output_line` slot that
+- [x] 2.5 — `runner_window`: connect `reader.line_received` to a `_on_output_line` slot that
       calls the parser first — sentinel lines route to the graph and are withheld from the
       console; everything else goes to the console as today. Clear statuses at run start.
       Handle the malformed-sentinel `ValueError` per the policy above.
-- [ ] 2.6 — `_poll_process`: derive the status-bar message from the `RunFinished` event when
+- [x] 2.6 — `_poll_process`: derive the status-bar message from the `RunFinished` event when
       one was seen, falling back to the exit code. Report `Failed — N task(s) failed` and
       name them in the console summary.
 
@@ -571,16 +571,16 @@ guarded by `pytest.importorskip("PyQt5")`.
       raises, or an `open` guard, for the duration of a bypass-only run).
 
 `tests/test_status_channel.py`
-- [ ] An ordinary console line returns `None`.
-- [ ] A line that merely contains the prefix mid-string returns `None` (prefix must anchor).
-- [ ] A valid sentinel returns the event with fields intact.
-- [ ] A malformed sentinel raises `ValueError`.
-- [ ] End-to-end: `encode_event` output parses back to an equal event — pins the two modules together.
+- [x] An ordinary console line returns `None`.
+- [x] A line that merely contains the prefix mid-string returns `None` (prefix must anchor).
+- [x] A valid sentinel returns the event with fields intact.
+- [x] A malformed sentinel raises `ValueError`.
+- [x] End-to-end: `encode_event` output parses back to an equal event — pins the two modules together.
 
 `tests/test_dag_status_overlay.py`
-- [ ] `_STATUS_OVERLAY` covers every `TaskStatus` member (reporting missing names, not a bare False).
-- [ ] It has no keys outside `TaskStatus`.
-- [ ] `BYPASSED` is visually distinct from `COMPLETED` in fill, border and glyph, and is undimmed.
+- [x] `_STATUS_OVERLAY` covers every `TaskStatus` member (reporting missing names, not a bare False).
+- [x] It has no keys outside `TaskStatus`.
+- [x] `BYPASSED` is visually distinct from `COMPLETED` in fill, border and glyph, and is undimmed.
 
 `tests/test_process_tree.py`
 - [ ] `popen_group_kwargs()` returns the platform-correct key.
@@ -610,7 +610,7 @@ guarded by `pytest.importorskip("PyQt5")`.
       dependency gating, a bypassed node unlocking its dependent, a failed node cascading,
       and the returned `RunOutcome.exit_code`. This is the first end-to-end test of the
       driver the repo has ever had.
-- [ ] A "Qt-free" test: import each of `execution_events`, `dag_plan`, `dag_execution`,
+- [x] A "Qt-free" test: import each of `execution_events`, `dag_plan`, `dag_execution`,
       `status_channel` with `PyQt5` removed from `sys.modules` and assert it is still absent
       afterwards.
 
