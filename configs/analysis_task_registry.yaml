@@ -1,0 +1,344 @@
+# Analysis task registry — canonical display metadata for DAG task ids.
+#
+# One owner for the human-facing wording of every task that appears in a
+# workflow DAG. Read by ``src/analysis/pipeline/task_registry.py`` and shown by
+# AnalysisRunnerGUI's task detail panel.
+#
+# Scope: DISPLAY METADATA ONLY.
+#   - ``label``       short Title Case name shown to a human.
+#   - ``description`` one or two sentences: what the task reads, what it writes.
+# Both keys are REQUIRED and must be non-empty; an entry that omits or empties
+# either one raises at load. Unknown keys are rejected, so this file cannot
+# quietly grow a second meaning.
+#
+# This file does NOT own:
+#   - where a task writes            -> src/analysis/pipeline/output_dirs.py
+#   - how a task is wired or gated   -> configs/analyse_workflow_*_dag.yaml
+#
+# Every task id in every live DAG config must appear here exactly once;
+# ``tests/test_task_registry.py`` asserts it, so adding a DAG node without its
+# wording fails in CI rather than at run time.
+
+# ---- Processing DAG ----
+
+touch_summarize_blocks:
+  label: Summarize Blocks
+  description: >-
+    Reads every aggregated session CSV and writes one combined
+    session_block_summary.csv with a row per block giving its block ID, trial
+    count and trial ID list. Has no upstream dependencies.
+
+touch_prepare_sessions:
+  label: Prepare Sessions
+  description: >-
+    Stage 1 of the pipeline. Reads the merged session CSVs, synthesises block
+    IDs and cubic-interpolates NaN gaps in the touch columns, writing a cleaned
+    <session>_prepared.csv into 4_analysed/touch_prepare_sessions.
+
+spatial_map_single_touch:
+  label: Map Single-Touch RFs
+  description: >-
+    Reads the prepared session CSV plus the per-vertex contact-depth-field
+    parquet sidecars and accumulates depth-weighted IFF (or spike) values on
+    each forearm vertex for every single touch. Writes sparse vertex-value
+    pairs per touch as single_touch_rf_maps NPZ files.
+
+touch_compute_series:
+  label: Compute Series Transforms
+  description: >-
+    Stage 2a. Reads the prepared CSVs and adds series-level columns such as hand
+    position, velocity, acceleration, pressure and mechanics-of-solids, writing
+    <session>_series_augmented.csv into 4_analysed/touch_compute_series.
+
+spatial_set_camera:
+  label: Set RF Camera
+  description: >-
+    Interactive GUI that reads the series-augmented CSVs and lets the researcher
+    orient the 3D forearm camera per session. Saves rf_camera_settings.json,
+    which every downstream RF rendering and projection task requires.
+
+spatial_map_baseline:
+  label: Baseline RF Map
+  description: >-
+    Simple per-session RF mapping. Emits a raw spike-position CSV and a forearm
+    heatmap rendered with the saved camera settings and cylindrical-unwrap
+    projection into 4_analysed/spatial_map_baseline.
+
+spatial_configure_slim_uv:
+  label: Configure SLIM UV
+  description: >-
+    Interactive PyQt5/PyVista GUI, one window per session, for picking the mesh
+    method, cleaning steps, iteration count and max edge length and previewing
+    the result. Saves a per-session slim_uv_config.yaml consumed by the SLIM
+    precompute task.
+
+spatial_precompute_slim_uv:
+  label: Precompute SLIM UV
+  description: >-
+    Loads the forearm PLY and the single-touch RF NPZ, runs SLIM flattening with
+    the UV origin placed at the IFF-weighted RF centroid, and caches
+    <session>_slim_uv.npz next to the mesh for downstream 2D RF work.
+
+spatial_configure_stroke_axis:
+  label: Configure Stroke Axis
+  description: >-
+    Interactive 2D-UV GUI showing each stroke motion direction as arrows
+    coloured by its proximal or distal label, letting the researcher swap labels
+    and draw an editable stroke axis. Saves one stroke_axis JSON per session for
+    the response-field builder to consume.
+
+spatial_build_response_fields:
+  label: Build Response Fields
+  description: >-
+    Combines the single-touch RF NPZ, the SLIM UV cache and the merged CSV/PLY
+    into parameter-free per-session, per-gesture raw heatmaps, unique-touch
+    counts, touch counts and raw SLIM mesh. Writes one response_fields NPZ per
+    session, shared by contour tuning and boundary extraction.
+
+spatial_extract_boundary__radial:
+  label: "Boundary: Radial"
+  description: >-
+    Runs the radial foot-of-mountain (Hessian lambda-max) boundary detector over
+    the shared response fields, rendering per-session 2D RF heatmap PNGs and
+    writing its contour NPZ into its own radial subfolder. Can regenerate
+    contours from the tuned per-session, per-gesture JSONs when use_tuned_params
+    is enabled.
+
+spatial_extract_boundary__gradient:
+  label: "Boundary: Gradient"
+  description: >-
+    Runs the gradient-magnitude ridge boundary detector, tracing the contour on a
+    NaN-aware Gaussian-smoothed field via radial ray profiles. Writes per-session
+    heatmap PNGs and a contour NPZ into its own gradient subfolder.
+
+spatial_extract_boundary__inflection:
+  label: "Boundary: Inflection"
+  description: >-
+    Runs the Laplacian zero-crossing (inflection) boundary detector on the shared
+    response fields after NaN-aware Gaussian pre-smoothing. Writes per-session
+    heatmap PNGs and a contour NPZ into its own inflection subfolder.
+
+spatial_extract_boundaries:
+  label: Boundary Extraction Barrier
+  description: >-
+    Fan-in barrier that performs no extraction of its own. It exists so
+    downstream consumers can depend on a single node that runs once all enabled
+    boundary-method nodes have finished, and it verifies each enabled method left
+    its per-session run sentinel behind.
+
+spatial_tune_rf_contours:
+  label: Tune RF Contours
+  description: >-
+    Interactive PyQt5/PyVista GUI for tuning the radial contour-detection
+    parameters separately for each session and gesture subset, previewing the
+    raw, smoothed and lambda-max fields with a live contour. Saves one
+    contour_params JSON per session and gesture combination.
+
+spatial_compare_boundaries:
+  label: Compare Boundaries
+  description: >-
+    Aggregates the per-session boundary NPZ files across sessions into
+    session_rf_boundary_summary.csv and renders UV contour overlays, per-gesture
+    metric panels and session-by-gesture heatmap PNGs.
+
+spatial_compare_proximal_distal:
+  label: Proximal vs Distal
+  description: >-
+    Paired contrast of RF properties between proximal and distal strokes, read
+    from the per-session boundary NPZ files. Computes boundary-metric deltas,
+    contour overlap (IoU/Dice), heatmap correlation and centroid-shift
+    decomposition, and renders the matching overlay, triptych and strip-chart
+    figures.
+
+spatial_compare_tap_stroke:
+  label: Tap vs Stroke
+  description: >-
+    Paired contrast of RF properties between tap and stroke gestures, read from
+    the per-session boundary NPZ files. Produces the same family of outputs as
+    the proximal-distal comparison, namely metric deltas, contour overlap,
+    heatmap correlation, shift decomposition figures and a summary CSV.
+
+spatial_extract_rf_profiles:
+  label: Extract RF Profiles
+  description: >-
+    Extracts 1D cross-section profiles and boundary crossings from the
+    interpolated RF heatmap grids in the per-session boundary NPZ files. Writes
+    per-gesture CSVs plus profile-strip and representative-profile PNGs.
+
+stimulus_extract_features:
+  label: Extract Touch Features
+  description: >-
+    Stage 2b. Auto-discovers the numeric columns of each series-augmented CSV and
+    applies the enabled aggregation families (max, mean, min, median, std, range,
+    skewness, mean during or before IFF, spike count), writing one touch summary
+    CSV per session and feature family.
+
+stimulus_render_radar:
+  label: Render Feature Radar
+  description: >-
+    Reads the per-session touch feature CSVs and renders radar plots of the
+    configured feature groups, one PNG per gesture type plus a composite, into
+    the radar output folder.
+
+stimulus_compare_sessions:
+  label: Compare Sessions
+  description: >-
+    Pools the per-session touch feature CSVs and renders cross-session box and
+    strip comparison figures, one PNG per feature per gesture type, into
+    4_analysed/stimulus_compare_sessions.
+
+stimulus_response_tuning:
+  label: Response Tuning Curves
+  description: >-
+    Bins each selected touch feature and computes the requested response metric
+    per bin, rendering per-session tuning-curve PNGs and cross-session overlays
+    faceted by gesture subset, with the configured fit models drawn on top.
+
+stimulus_response_instruction_tuning:
+  label: Instruction Tuning Charts
+  description: >-
+    Groups touches by the designed metadata instruction levels (contact area,
+    speed, force, gesture type), computes mean IFF per category, and renders
+    per-session bar charts plus cross-session overlay dot plots.
+
+spatial_tuning_rf_metrics:
+  label: RF Metric Tuning
+  description: >-
+    Bins touches by velocity, depth or contact area, computes a population RF
+    heatmap per bin, extracts its boundary, and renders scatter-plus-fit figures
+    for RF area, circularity and PCA shape metrics, including cross-session
+    overlays coloured by neuron type.
+
+cross_map_feature_grid:
+  label: Map Feature Grid
+  description: >-
+    Sweeps an N-dimensional grid over the configured touch features, filters the
+    touches falling in each cell, and averages their single-touch RF maps into
+    one population RF NPZ per grid, optionally split per gesture type.
+
+cross_extract_grid_metrics:
+  label: Extract Grid Metrics
+  description: >-
+    Reduces the population RF grid NPZ files to scalar per-cell descriptors
+    covering IFF intensity, topography, distribution and shape, and writes them
+    as CSVs under the grid metrics folder.
+
+cross_render_grid_metrics:
+  label: Render Grid Metrics
+  description: >-
+    Reads the population RF grid metric CSVs and renders one heatmap PNG per
+    selected metric per session and gesture type into a metric-organised output
+    folder.
+
+cross_render_sessions:
+  label: Session Comparison Heatmaps
+  description: >-
+    Builds a 1D feature-space population RF grid, computes the chosen RF metric,
+    and renders one PNG per gesture type with sessions on the Y axis and feature
+    bins on the X axis.
+
+stimulus_cluster_touches:
+  label: Cluster Touches
+  description: >-
+    Pools the per-session feature CSVs per cluster group and applies the enabled
+    clustering methods (binning, cartesian binning, k-means, DBSCAN,
+    hierarchical, GMM, type-stratified) with the configured reduction and
+    evaluation settings, writing a clustered pooled touch summary CSV per group
+    and clusterer.
+
+stimulus_compare_clusters:
+  label: Compare Clusters
+  description: >-
+    Discovers the clustered CSVs on disk and runs the configured statistical
+    comparisons (bias, precision, distribution) of measurements across strata,
+    writing per-strategy result JSONs and a dispersion-weighted synthesis
+    report.
+
+stimulus_analyse_efficacy:
+  label: Analyse AP Efficacy
+  description: >-
+    Collects the touch summary CSVs written by feature extraction and generates
+    batch_ap_efficacy_matrix.csv, a matrix of action-potential efficacy, under
+    4_analysed/stimulus_analyse_efficacy.
+
+cross_extract_cluster_rf:
+  label: Extract Cluster RF
+  description: >-
+    First step of the clustered-RF pipeline. Loads the clustered touch CSVs,
+    counts spikes per contact point, and writes intermediate extraction
+    artifacts with an extraction_summary.json sentinel per cluster group and
+    clusterer.
+
+cross_compute_cluster_metrics:
+  label: Cluster RF Metrics
+  description: >-
+    Loads the cluster RF extraction artifacts and computes per-cluster RF metrics
+    (centroid, convex hull area, Gaussian fit) using the configured projection,
+    writing rf_metrics.json and rf_metrics_summary.csv.
+
+cross_render_cluster_rf:
+  label: Render Cluster RF
+  description: >-
+    Rendering-only step of the clustered-RF pipeline. Loads the cluster RF
+    extraction artifacts and renders per-session 2D RF heatmap PNGs using the
+    configured projection and disjoint mask distance.
+
+# ---- Viewers DAG ----
+
+explore_precompute_caches:
+  label: Precompute Explorer Caches
+  description: >-
+    Support task rather than a GUI. Runs the RF Feature-Space Explorer data
+    loader for all sessions in a thread pool so the explorer opens instantly on
+    a cache hit; sessions with a fresh NPZ sidecar are skipped automatically.
+
+explore_preparation:
+  label: Preparation Viewer
+  description: >-
+    Interactive GUI for inspecting the output of the preparation stage. Reads the
+    prepared session CSVs and shows per-touch time series (contact depth, area,
+    location, neural data) alongside a 3D forearm view of the contact centroid.
+    Writes no files.
+
+explore_feature_space:
+  label: Feature Space Explorer
+  description: >-
+    Interactive GUI for sweeping the touch feature space and watching the
+    corresponding RF heatmap update in real time. Reads the series-augmented CSVs
+    and the warmed explorer caches; writes no files.
+
+explore_touch_playback:
+  label: Touch Playback Explorer
+  description: >-
+    Interactive GUI that animates individual touch events frame by frame on the
+    3D forearm model with an accumulating depth-weighted IFF heatmap, applying
+    the same weighting the single-touch RF stage writes to disk. Writes no files.
+
+explore_single_touch_rf:
+  label: Single-Touch RF Explorer
+  description: >-
+    Interactive GUI with cascading session, block, trial and touch dropdowns that
+    renders the precomputed per-touch RF map from the single-touch RF NPZ on the
+    3D forearm model. Writes no files.
+
+explore_touch_population:
+  label: Touch Population Explorer
+  description: >-
+    Interactive GUI pairing a per-touch scatter (one dot per touch, configurable
+    feature axes) with a 3D forearm heatmap that a draggable selection rectangle
+    and gesture filters update live, in spike-density, mean-IFF or cumulative-IFF
+    mode. Writes no files.
+
+explore_rf_gallery:
+  label: RF Cluster Gallery
+  description: >-
+    Interactive gallery GUI of clustered RF heatmaps with a thumbnail sidebar and
+    a 3D PyVista view. Discovers the processed cluster groups and clusterers on
+    disk and opens one viewer per selected group. Writes no files.
+
+explore_rf_surface:
+  label: RF Surface Viewer
+  description: >-
+    Interactive 3D surface GUI where height encodes mean IFF intensity over the
+    RF. Loads the per-session population response fields NPZ produced by boundary
+    extraction, with session and gesture type selectable. Writes no files.

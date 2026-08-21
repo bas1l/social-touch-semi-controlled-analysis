@@ -482,26 +482,33 @@ unaware of it, exactly as `enabled` is today.
 ### Phase 5: Task registry and GUI polish
 **Goal:** Task descriptions come from one owner; the graph handles like the reference.
 
-- [ ] 5.1 — Add `configs/analysis_task_registry.yaml` mapping canonical task id →
+- [x] 5.1 — Add `configs/analysis_task_registry.yaml` mapping canonical task id →
       `{label, description}` for all tasks across both live DAGs.
-- [ ] 5.2 — Add `task_registry.py` with an `lru_cache`d loader (the reference re-parses on
+- [x] 5.2 — Add `task_registry.py` with an `lru_cache`d loader (the reference re-parses on
       every call — do not copy that), a frozen `TaskMeta`, and `get_task_meta(id)` raising
       `KeyError` naming the registry file on an unregistered id.
-- [ ] 5.3 — `TaskDetailPanel`: pin a read-only, mouse-selectable description label under the
+- [x] 5.3 — `TaskDetailPanel`: pin a read-only, mouse-selectable description label under the
       header in `__init__`, so it survives the clear loop and the option-less early return.
       Source it from the registry.
-- [ ] 5.4 — Grid-snap dragging: shared `GRID_SIZE = 20`, snap in `itemChange`
+- [x] 5.4 — Grid-snap dragging: shared `GRID_SIZE = 20`, snap in `itemChange`
       (`ItemPositionChange`, returning the corrected point), and a matching faint background
       grid drawn in `DagGraphView.drawBackground` with a zero-width cosmetic pen, batched
       `drawLines`, over the exposed rect only.
-- [ ] 5.5 — Click-vs-drag: a 4-unit Manhattan threshold in scene coordinates; emit
+- [x] 5.5 — Click-vs-drag: a 4-unit Manhattan threshold in scene coordinates; emit
       `node_clicked` on release only when undragged, latching `_dragged` once tripped.
       Today `node_clicked` fires on press, so nudging a node steals focus to the detail panel.
-- [ ] 5.6 — Add the `_in_node_moved` re-entrancy guard in `_on_node_moved`; the reference
+- [x] 5.6 — Add the `_in_node_moved` re-entrancy guard in `_on_node_moved`; the reference
       shipped this as a fix for a startup `RecursionError` when `_load_layout` sets positions.
-- [ ] 5.7 — Declare `min_inputs`/`max_inputs` on the tasks that need them (candidates
-      identified during implementation; none is mandatory to ship the mechanism).
-- [ ] 5.8 — Replace `DagGraphView._load_layout`'s `saved.get("nodes", {})` with a loud
+- [ ] 5.7 — **Deferred.** Declare `min_inputs`/`max_inputs` on the tasks that need them
+      (candidates identified during implementation; none is mandatory to ship the
+      mechanism). Deferred at implementation time: the only way to declare a guard is to
+      edit `configs/analyse_workflow_processing_dag.yaml`, which was being edited
+      concurrently in another working session. The guard *mechanism* ships with Phase 1
+      (task 1.7, optional keys in the plan parser) and is exercised by
+      `tests/test_dag_plan.py` / `tests/test_dag_execution.py`, so nothing is blocked by
+      leaving every task unguarded; declaring guards is a config-only follow-up that can
+      land at any time without touching code.
+- [x] 5.8 — Replace `DagGraphView._load_layout`'s `saved.get("nodes", {})` with a loud
       failure on a sidecar that has no `"nodes"` mapping. That silent default is what turned
       the flat-to-nested schema change into invisible loss of hand-placed node positions:
       the GUI auto-laid-out every launch and overwrote the file on the first drag. A layout
@@ -509,11 +516,34 @@ unaware of it, exactly as `enabled` is today.
       auto-layout. (Repairing the data was Phase 0; this closes the hole that hid it.)
 
 **Files Modified:**
-- `configs/analysis_task_registry.yaml` — new.
+- `configs/analysis_task_registry.yaml` — new; 43 entries (35 processing + 8 viewers).
 - `src/analysis/pipeline/task_registry.py` — new.
+- `src/analysis/pipeline/__init__.py` — export `TaskMeta` / `get_task_meta` / `load_registry`,
+  matching how Phase 1 exported its new modules.
+- `src/utils/pipeline/dag_config_model.py` — **removed** the dead `get_task_description`.
+  It read a top-level `description` key that no DAG config declares, so it could only ever
+  return `None`; with the registry owning descriptions it had no possible caller, and a
+  sentinel-returning accessor for a key that does not exist is exactly the silent
+  degradation the fail-fast policy forbids. No call sites existed.
 - `src/utils/gui/analysis_runner_gui/task_detail_panel.py` — description label.
 - `src/utils/gui/analysis_runner_gui/dag_graph_items.py` — grid snap, drag threshold.
 - `src/utils/gui/analysis_runner_gui/dag_graph_view.py` — background grid, re-entrancy guard, loud layout-load failure.
+
+**Implementation notes:**
+- The registry file location is derived from `task_registry.__file__` (repo root +
+  `configs/`), so it resolves regardless of the process working directory; `load_registry`
+  takes the path as an argument (`lru_cache`d per path) so tests can point it at a fixture.
+- Task 5.4's snap runs in `itemChange` unconditionally, which means it also applies to the
+  positions `_load_layout` restores — so the first save after a launch rewrites the sidecar
+  with grid-aligned coordinates (a shift of at most half a grid cell per node). This
+  contradicts the Rollback Plan's claim that "grid snap changes node coordinates on the next
+  drag only"; the task text is authoritative and the rollback note is inaccurate on that
+  detail. Nothing else about the sidecar changes.
+- `TaskDetailPanel.show_task` lets the registry's `KeyError` propagate for an unregistered
+  task rather than substituting a placeholder. The conformance test in
+  `tests/test_task_registry.py` is the guard: it reads the DAG configs out of
+  `configs/analysis_runner_gui.yaml`, so a workflow added to the GUI is checked without
+  editing the test.
 
 **Dependencies:** Phase 2
 
@@ -596,9 +626,9 @@ guarded by `pytest.importorskip("PyQt5")`.
 - [x] Mutations set `dirty`.
 
 `tests/test_task_registry.py`
-- [ ] Every task id in both live DAG configs resolves in the registry.
-- [ ] An unregistered id raises `KeyError` naming the registry file.
-- [ ] A registry entry with an empty `description` raises at load.
+- [x] Every task id in both live DAG configs resolves in the registry.
+- [x] An unregistered id raises `KeyError` naming the registry file.
+- [x] A registry entry with an empty `description` raises at load.
 
 ### Integration Tests
 

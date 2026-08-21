@@ -304,9 +304,6 @@ class DagConfigModel:
         task["depends_on"] = seq
         self._dirty = True
 
-    def get_task_description(self, task_name: str) -> str | None:
-        return self._get_task(task_name).get("description")
-
     # ------------------------------------------------------------------
     # Cluster groups — CRUD for stimulus_cluster_touches groups and downstream refs
     # ------------------------------------------------------------------

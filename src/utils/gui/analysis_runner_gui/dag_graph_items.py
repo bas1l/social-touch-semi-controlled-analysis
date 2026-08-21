@@ -65,6 +65,37 @@ _COLOR_BORDER_DISABLED = QColor("#888888")
 _COLOR_SELECTION = QColor("#ff8800")
 _COLOR_EDGE = QColor("#555555")
 
+#: Scene-space pitch a dragged node snaps to.  Owned here, next to the item that
+#: does the snapping, and imported by :mod:`dag_graph_view` to paint the matching
+#: background grid — one constant, so the visible grid and the snap can never
+#: drift apart.
+GRID_SIZE = 20
+
+#: Scene-space Manhattan distance a press must exceed before it counts as a drag
+#: rather than a click.  Small enough that a deliberate nudge still moves the
+#: node, large enough that the hand tremor in a click does not.
+DRAG_THRESHOLD = 4
+
+
+def snap_coordinate(value: float) -> float:
+    """Round one scene-space coordinate to the nearest :data:`GRID_SIZE` multiple."""
+    return round(value / GRID_SIZE) * GRID_SIZE
+
+
+def snap_to_grid(point: QPointF) -> QPointF:
+    """Return *point* rounded to the nearest grid intersection."""
+    return QPointF(snap_coordinate(point.x()), snap_coordinate(point.y()))
+
+
+def exceeds_drag_threshold(delta: QPointF) -> bool:
+    """Return True when *delta* (scene space) is far enough to count as a drag.
+
+    Strictly greater than :data:`DRAG_THRESHOLD`: a movement of exactly the
+    threshold is still a click.
+    """
+    return delta.manhattanLength() > DRAG_THRESHOLD
+
+
 _STATUS_GLYPH_BOX = 20   # side of the square the status glyph is centred in
 _STATUS_GLYPH_INSET = 22  # from rect.right(); the category badge keeps 12
 
@@ -134,6 +165,11 @@ class DagTaskNode(QGraphicsRectItem):
         self._category = category
         self._updating = False
         self._status = TaskStatus.PENDING
+        # Click-vs-drag tracking: the scene-space press origin, and a latch that
+        # stays set for the rest of the gesture once the threshold is tripped —
+        # so a drag that wanders away and returns to its origin is still a drag.
+        self._press_scene_pos: QPointF | None = None
+        self._dragged = False
 
         self.signals = DagTaskNode._Signals()
 
@@ -320,10 +356,31 @@ class DagTaskNode(QGraphicsRectItem):
     # ------------------------------------------------------------------
 
     def mousePressEvent(self, event) -> None:
+        self._press_scene_pos = event.scenePos()
+        self._dragged = False
         super().mousePressEvent(event)
-        self.signals.node_clicked.emit(self._task_name)
+
+    def mouseMoveEvent(self, event) -> None:
+        super().mouseMoveEvent(event)
+        if self._press_scene_pos is None or self._dragged:
+            return
+        if exceeds_drag_threshold(event.scenePos() - self._press_scene_pos):
+            self._dragged = True
+
+    def mouseReleaseEvent(self, event) -> None:
+        super().mouseReleaseEvent(event)
+        # Selecting a task is a *click*, not a press: emitting on press made
+        # every nudge of a node steal focus to the detail panel mid-drag.
+        undragged = self._press_scene_pos is not None and not self._dragged
+        self._press_scene_pos = None
+        if undragged:
+            self.signals.node_clicked.emit(self._task_name)
 
     def itemChange(self, change, value):
+        if change == QGraphicsItem.ItemPositionChange:
+            # Intercept the move before it commits so the node lands on the grid
+            # the view paints; the corrected point is what Qt then applies.
+            return super().itemChange(change, snap_to_grid(value))
         if change == QGraphicsItem.ItemPositionHasChanged:
             self.signals.position_changed.emit(self._task_name, value.x(), value.y())
         return super().itemChange(change, value)

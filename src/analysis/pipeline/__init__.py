@@ -22,6 +22,7 @@ from .execution_events import (
 )
 from .dag_plan import DagPlan, DagTask
 from .dag_execution import RunOutcome, execute_dag, format_run_summary
+from .task_registry import TaskMeta, get_task_meta, load_registry
 from .stage_runner import run_pipeline_stages
 from .shared_constants import (
     GESTURE_TYPES,
@@ -54,6 +55,9 @@ __all__ = [
     "RunOutcome",
     "execute_dag",
     "format_run_summary",
+    "TaskMeta",
+    "get_task_meta",
+    "load_registry",
     "GESTURE_TYPES",
     "TOUCH_ID_COLS",
     "TOUCH_ID_COLS_WITH_SESSION",
