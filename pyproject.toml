@@ -30,6 +30,7 @@ dependencies = [
     "ruamel.yaml>=0.18",
     "PyYAML>=6.0",
     "openpyxl",
+    "pyarrow>=15",
     "tqdm",
     "Pillow",
 ]

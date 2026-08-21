@@ -7,6 +7,19 @@ from .rf_data_loader import (
     parse_contact_points,
     load_grouped_spatial_data,
 )
+from .contact_depth_field_io import (
+    COORDINATE_SPACES,
+    VERTEX_ID_COLUMN,
+    CoordinateSpaceError,
+    DepthFieldSchemaError,
+    ReferencePlyMismatchError,
+    DepthField,
+    load_depth_field,
+    penetration_mm,
+    depth_field_path_for_csv,
+    forearm_ply_path_for_sidecar,
+    validate_depth_field_schema,
+)
 from .rf_extraction_io import (
     RF_CAMERA_SETTINGS_FILENAME,
     load_neuron_contacts,
@@ -77,6 +90,18 @@ __all__ = [
     "resolve_forearm_ply",
     "parse_contact_points",
     "load_grouped_spatial_data",
+    # contact_depth_field_io
+    "COORDINATE_SPACES",
+    "VERTEX_ID_COLUMN",
+    "CoordinateSpaceError",
+    "DepthFieldSchemaError",
+    "ReferencePlyMismatchError",
+    "DepthField",
+    "load_depth_field",
+    "penetration_mm",
+    "depth_field_path_for_csv",
+    "forearm_ply_path_for_sidecar",
+    "validate_depth_field_schema",
     # rf_extraction_io
     "RF_CAMERA_SETTINGS_FILENAME",
     "load_neuron_contacts",

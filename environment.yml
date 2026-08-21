@@ -46,6 +46,7 @@ dependencies:
 
       # --- Data & Serialization ---
       - openpyxl
+      - pyarrow>=15
       - PyYAML>=6.0
       - ruamel.yaml>=0.18
 
