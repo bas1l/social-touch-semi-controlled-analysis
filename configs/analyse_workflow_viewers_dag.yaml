@@ -78,7 +78,6 @@ tasks:
       # in the processing DAG config.
       contact_depth_field:
         blocks_stage_dir: blocks_rf_centered
-        block_csv_stem_suffix: _pca-xyz
     depends_on: []
 
   # Single-Touch RF Explorer: per-touch RF heatmap viewer on the 3D forearm model.

@@ -164,7 +164,7 @@ class TestProcessingDagConfig:
         data = _load_round_trip(PROCESSING_DAG)
         block = data["tasks"][STAGE]["options"]["contact_depth_field"]
         assert block["blocks_stage_dir"] == "blocks_rf_centered"
-        assert block["block_csv_stem_suffix"] == "_pca-xyz"
+        assert "block_csv_stem_suffix" not in block
         text = PROCESSING_DAG.read_text(encoding="utf-8")
         assert "Where the per-vertex contact-depth-field parquet sidecars live" in text
 
@@ -402,7 +402,6 @@ def rf_run(tmp_path, monkeypatch):
             preparation_dir=preparation_dir,
             contact_depth_field={
                 "blocks_stage_dir": "blocks_rf_centered",
-                "block_csv_stem_suffix": "_pca-xyz",
             },
         )
         sentinel = output_dir / session_id / "single_touch_rf_summary.json"

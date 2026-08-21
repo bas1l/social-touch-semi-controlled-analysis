@@ -283,36 +283,31 @@ class _BlockVertexSource:
 def _load_block_vertex_source(
     depth_blocks_dir: Path,
     source_block_file: str,
-    block_csv_stem_suffix: str,
     session_id: str,
     forearm_ply_path: Path,
 ) -> _BlockVertexSource:
     """Resolve and load the depth-field sidecar for one block.
 
-    The path is composed from three things and nothing else: *depth_blocks_dir* and
-    *block_csv_stem_suffix* come from config, and *source_block_file* comes from the
-    CSV's own ``source_block_file`` column. This module composes no path fragment
-    from repo knowledge and hardcodes no directory or stage name. The
-    CSV-name -> parquet-name rule lives in ``depth_field_path_for_csv`` and is not
-    reimplemented here.
+    The path is composed from two things and nothing else: *depth_blocks_dir* comes
+    from config, and *source_block_file* comes from the CSV's own
+    ``source_block_file`` column. This module composes no path fragment from repo
+    knowledge, hardcodes no directory or stage name, and performs no stem surgery --
+    the ``source_block_file`` basename already carries whatever suffix its producing
+    stage gave it. The CSV-name -> parquet-name rule lives in
+    ``depth_field_path_for_csv`` and is not reimplemented here.
 
     The coordinate space is read from the parquet **metadata**, never inferred from
     the directory name, and asserted against :data:`TERMINAL_RF_CENTERED_SPACES`.
     """
-    stage_stem = f"{Path(source_block_file).stem}{block_csv_stem_suffix}"
-    stage_csv = Path(depth_blocks_dir) / f"{stage_stem}.csv"
+    stage_csv = Path(depth_blocks_dir) / Path(source_block_file).name
     sidecar_path = depth_field_path_for_csv(stage_csv)
     if not sidecar_path.exists():
         raise FileNotFoundError(
             f"_load_block_vertex_source: depth-field sidecar not found: {sidecar_path}"
             f" | blocks dir (config): {depth_blocks_dir}"
-            f" | source_block_file (CSV column): {source_block_file}"
-            f" | stem suffix (config): {block_csv_stem_suffix!r}."
-            f" The PCA calibration stage renames the block stem from '_merged_data' "
-            f"to '_merged_data_pca-xyz', so the configured stem suffix must match the "
-            f"stage the blocks directory points at. A missing file means the artifact "
-            f"was never produced; zero rows would mean 'no contact' and is a "
-            f"different thing entirely."
+            f" | source_block_file (CSV column): {source_block_file}."
+            f" A missing file means the artifact was never produced; zero rows would "
+            f"mean 'no contact' and is a different thing entirely."
         )
 
     # Read the declared space from the file, then assert it against the closed set of
@@ -955,7 +950,6 @@ def load_playback_data(
     forearm_ply_path: Path,
     *,
     depth_blocks_dir: Path,
-    block_csv_stem_suffix: str,
     session_id: str,
 ) -> PlaybackData:
     """Load per-touch data at 1kHz frame rate from *series_csv_path* + *forearm_ply_path*.
@@ -987,10 +981,6 @@ def load_playback_data(
         sidecars, already composed by the caller from the session merged root and the
         configured blocks-stage subdirectory. This module composes no path fragment
         from repo knowledge and hardcodes no stage name.
-    block_csv_stem_suffix:
-        Suffix the stage appends to the block stem, from config (the PCA calibration
-        stage renames ``..._merged_data`` to ``..._merged_data_pca-xyz``). Applied to
-        the ``source_block_file`` basename before the sidecar naming rule.
     session_id:
         Session identifier, passed through to the depth-field loader for its
         diagnostics.
@@ -1114,7 +1104,6 @@ def load_playback_data(
             block_source = _load_block_vertex_source(
                 depth_blocks_dir=depth_blocks_dir,
                 source_block_file=source_block_file,
-                block_csv_stem_suffix=block_csv_stem_suffix,
                 session_id=session_id,
                 forearm_ply_path=forearm_ply_path,
             )

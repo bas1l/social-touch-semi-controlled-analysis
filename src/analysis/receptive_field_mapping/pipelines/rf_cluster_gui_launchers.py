@@ -146,7 +146,7 @@ def launch_touch_playback_explorer(
         session — the same format used throughout the analysis pipeline.
     contact_depth_field:
         Options block naming the blocks stage subdirectory holding the
-        contact-depth-field parquet sidecars and the stem suffix that stage uses.
+        contact-depth-field parquet sidecars.
         Required: each contact point's vertex identity is read off those sidecars,
         so the viewer draws the same assignment the pipeline writes to disk.
     depth_weight_alpha:
@@ -164,9 +164,7 @@ def launch_touch_playback_explorer(
     from analysis.receptive_field_mapping.gui import TouchPlaybackExplorer
     from PyQt5.QtWidgets import QApplication
 
-    blocks_stage_dir, block_csv_stem_suffix = _require_depth_field_config(
-        contact_depth_field
-    )
+    blocks_stage_dir = _require_depth_field_config(contact_depth_field)
 
     session_specs = _resolve_explorer_session_paths(input_items)
     n = len(session_specs)
@@ -188,7 +186,6 @@ def launch_touch_playback_explorer(
             series_csv,
             forearm_ply,
             depth_blocks_dir=depth_blocks_dir_by_session[session_id],
-            block_csv_stem_suffix=block_csv_stem_suffix,
             session_id=session_id,
         )
 

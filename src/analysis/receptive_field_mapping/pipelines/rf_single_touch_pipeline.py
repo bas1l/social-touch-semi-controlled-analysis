@@ -223,17 +223,17 @@ def _compute_touch_rf(
     )
 
 
-# Config keys that say where a session's contact-depth-field sidecars live. Both are
+# Config key that says where a session's contact-depth-field sidecars live. It is
 # required: contact points take their vertex identity from those sidecars, so there is
-# no run without them and no default that could quietly pick the wrong stage.
+# no run without it and no default that could quietly pick the wrong stage. The sidecar
+# basename is derived from the CSV's own ``source_block_file`` column and nothing else.
 _BLOCKS_STAGE_DIR_KEY = "blocks_stage_dir"
-_BLOCK_CSV_STEM_SUFFIX_KEY = "block_csv_stem_suffix"
 
 
-def _require_depth_field_config(contact_depth_field: Optional[dict]) -> Tuple[str, str]:
-    """Validate the ``contact_depth_field`` option block and return its two values.
+def _require_depth_field_config(contact_depth_field: Optional[dict]) -> str:
+    """Validate the ``contact_depth_field`` option block and return its value.
 
-    Raises ``ValueError`` when the block is absent or either key is missing. There is
+    Raises ``ValueError`` when the block is absent or the key is missing. There is
     deliberately no default: guessing a blocks stage would silently decide which
     vertices every contact point is credited to.
     """
@@ -242,23 +242,19 @@ def _require_depth_field_config(contact_depth_field: Optional[dict]) -> Tuple[st
             "run_single_touch_rf_mapping: 'contact_depth_field' options block is "
             f"required, got {contact_depth_field!r}. Add it under "
             "tasks.spatial_map_single_touch.options in the processing DAG config with "
-            f"the keys {_BLOCKS_STAGE_DIR_KEY!r} and {_BLOCK_CSV_STEM_SUFFIX_KEY!r}."
+            f"the key {_BLOCKS_STAGE_DIR_KEY!r}."
         )
-    missing = [
-        key for key in (_BLOCKS_STAGE_DIR_KEY, _BLOCK_CSV_STEM_SUFFIX_KEY)
-        if key not in contact_depth_field
-    ]
-    if missing:
+    if _BLOCKS_STAGE_DIR_KEY not in contact_depth_field:
         raise ValueError(
-            f"run_single_touch_rf_mapping: 'contact_depth_field' is missing key(s) "
-            f"{missing}. Present keys: {sorted(contact_depth_field)}."
+            f"run_single_touch_rf_mapping: 'contact_depth_field' is missing key "
+            f"{_BLOCKS_STAGE_DIR_KEY!r}. Present keys: {sorted(contact_depth_field)}."
         )
     blocks_stage_dir = str(contact_depth_field[_BLOCKS_STAGE_DIR_KEY])
     if not blocks_stage_dir:
         raise ValueError(
             f"run_single_touch_rf_mapping: {_BLOCKS_STAGE_DIR_KEY!r} is empty."
         )
-    return blocks_stage_dir, str(contact_depth_field[_BLOCK_CSV_STEM_SUFFIX_KEY])
+    return blocks_stage_dir
 
 
 def run_single_touch_rf_mapping(
@@ -304,8 +300,8 @@ def run_single_touch_rf_mapping(
         since prepared CSVs are a hard dependency.
     contact_depth_field:
         Options block naming the blocks stage subdirectory holding the depth-field
-        parquet sidecars and the stem suffix that stage uses. Required — contact
-        points take their vertex identity from those sidecars.
+        parquet sidecars. Required — contact points take their vertex identity from
+        those sidecars.
 
     Returns
     -------
@@ -323,9 +319,7 @@ def run_single_touch_rf_mapping(
             "this task depends on touch_prepare_sessions output."
         )
 
-    blocks_stage_dir, block_csv_stem_suffix = _require_depth_field_config(
-        contact_depth_field
-    )
+    blocks_stage_dir = _require_depth_field_config(contact_depth_field)
 
     preparation_dir = Path(preparation_dir)
     if not preparation_dir.exists():
@@ -386,7 +380,6 @@ def run_single_touch_rf_mapping(
             series_csv_path=prepared_csv,
             forearm_ply_path=forearm_ply,
             depth_blocks_dir=depth_blocks_dir,
-            block_csv_stem_suffix=block_csv_stem_suffix,
             session_id=session_id,
         )
 
@@ -472,7 +465,6 @@ def run_single_touch_rf_mapping(
                     # than being absorbed.
                     'contact_depth_field': {
                         'blocks_dir': str(depth_blocks_dir),
-                        'block_csv_stem_suffix': block_csv_stem_suffix,
                         'blocks': [
                             {
                                 'source_block_file': pv.source_block_file,

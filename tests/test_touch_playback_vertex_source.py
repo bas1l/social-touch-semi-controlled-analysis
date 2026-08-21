@@ -35,6 +35,7 @@ from analysis.pipeline.shared_constants import (  # noqa: E402
 from analysis.receptive_field_mapping.data.contact_depth_field_io import (  # noqa: E402
     VERTEX_ID_COLUMN,
     _EXPECTED_DTYPES,
+    depth_field_path_for_csv,
 )
 from analysis.receptive_field_mapping.data.touch_playback_data import (  # noqa: E402
     TouchEvent,
@@ -47,9 +48,15 @@ from analysis.receptive_field_mapping.data.rf_data_loader import (  # noqa: E402
 )
 
 SESSION = "2022-06-15_ST14-02"
-BLOCK_FILE = f"{SESSION}_semicontrolled_block-order-01_merged_data.csv"
-STEM_SUFFIX = "_pca-xyz"
+# The real ``source_block_file`` CSV column already carries the producing stage's
+# suffix -- the loader appends nothing to it.
+BLOCK_FILE = f"{SESSION}_semicontrolled_block-order-01_merged_data_pca-xyz.csv"
 BLOCKS_STAGE_DIR = "blocks_rf_centered"
+# The one sidecar basename BLOCK_FILE may ever derive to. Spelled out literally so a
+# regression in the derivation shows up as a name mismatch, not as a rule restated.
+EXPECTED_SIDECAR_NAME = (
+    f"{SESSION}_semicontrolled_block-order-01_contact_depth_field_pca-xyz.parquet"
+)
 N_FOREARM_VERTICES = 40
 
 
@@ -125,9 +132,7 @@ def _write_sidecar(
     )
     table = pa.Table.from_arrays(arrays, schema=schema)
 
-    stem = f"{Path(block_file).stem}{STEM_SUFFIX}".replace(
-        "_merged_data", "_contact_depth_field"
-    )
+    stem = Path(block_file).stem.replace("_merged_data", "_contact_depth_field")
     sidecar_path = blocks_dir / f"{stem}.parquet"
     pq.write_table(table, sidecar_path)
     return sidecar_path
@@ -173,7 +178,6 @@ def _load(tmp_path: Path, csv_path: Path, ply_path: Path, blocks_dir: Path):
         csv_path,
         ply_path,
         depth_blocks_dir=blocks_dir,
-        block_csv_stem_suffix=STEM_SUFFIX,
         session_id=SESSION,
     )
 
@@ -195,6 +199,44 @@ def env(tmp_path: Path):
         "forearm_vertices": verts,
         "tmp_path": tmp_path,
     }
+
+
+# ---------------------------------------------------------------------------
+# Sidecar name derivation
+# ---------------------------------------------------------------------------
+
+class TestSidecarNameComesFromSourceBlockFileAlone:
+    """``source_block_file`` already carries its stage suffix; nothing is appended.
+
+    A configurable stem suffix used to be concatenated onto this basename before the
+    naming rule ran, on the false premise that the column held the pre-PCA name. It
+    held the post-PCA name, so the suffix was applied twice and every real run died on
+    ``..._contact_depth_field_pca-xyz_pca-xyz.parquet``. These tests pin the single
+    correct derivation so that knob cannot come back.
+    """
+
+    def test_derived_name_matches_the_sidecar_on_disk(self):
+        assert depth_field_path_for_csv(Path(BLOCK_FILE)).name == EXPECTED_SIDECAR_NAME
+        assert "_pca-xyz_pca-xyz" not in EXPECTED_SIDECAR_NAME
+
+    def test_loader_resolves_exactly_that_file(self, env):
+        _write_sidecar(env["blocks_dir"], frame_index=[100], vertex_id=[7])
+        _write_series_csv(
+            env["csv_path"], [{"cell": _cell([0.0]), "frame_index": 100}]
+        )
+        data = _load(env["tmp_path"], env["csv_path"], env["ply_path"], env["blocks_dir"])
+        resolved = [Path(pv.sidecar_path) for pv in data.depth_field_provenance]
+        assert resolved == [env["blocks_dir"] / EXPECTED_SIDECAR_NAME]
+
+    def test_missing_sidecar_names_the_undoubled_path(self, env):
+        _write_series_csv(
+            env["csv_path"], [{"cell": _cell([0.0]), "frame_index": 1}]
+        )
+        with pytest.raises(FileNotFoundError) as exc:
+            _load(env["tmp_path"], env["csv_path"], env["ply_path"], env["blocks_dir"])
+        message = str(exc.value)
+        assert EXPECTED_SIDECAR_NAME in message
+        assert "_pca-xyz_pca-xyz" not in message
 
 
 # ---------------------------------------------------------------------------

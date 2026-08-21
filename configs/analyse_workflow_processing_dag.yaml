@@ -67,14 +67,14 @@ tasks:
       # Where the per-vertex contact-depth-field parquet sidecars live. Contact
       # points take their vertex identity from these sidecars, joined on frame_index.
       # The session merged root is the directory of the aggregated session CSV the DAG
-      # already resolved, so it is not repeated here; these two keys say which stage
-      # subdirectory under it to read, and what suffix that stage appends to the block
-      # stem (PCA calibration renames '_merged_data' to '_merged_data_pca-xyz').
+      # already resolved, so it is not repeated here; this key says which stage
+      # subdirectory under it to read. The sidecar basename is derived from the CSV's
+      # own source_block_file column, which already carries its producing stage's
+      # suffix -- nothing is appended to it here.
       # vertex_id exists only from 'blocks_projected' onward -- pointing this at an
       # earlier stage raises rather than falling back to nearest-vertex snapping.
       contact_depth_field:
         blocks_stage_dir: blocks_rf_centered
-        block_csv_stem_suffix: _pca-xyz
     depends_on: [touch_prepare_sessions]
 
   # Stage 2a (Series Transforms): Per-session kinematics, pressure, and MoS computation.

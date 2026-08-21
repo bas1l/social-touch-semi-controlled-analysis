@@ -46,6 +46,7 @@ from analysis.receptive_field_mapping.data.touch_playback_data import (  # noqa:
 )
 
 from test_touch_playback_vertex_source import (  # noqa: E402
+    BLOCK_FILE,
     _cell,
     _load,
     _write_sidecar,
@@ -585,7 +586,7 @@ class TestNanDepthRaises:
         assert "[4]" in message                  # vertex_id
         assert "[1]" in message                  # position within the frame
         assert ".parquet" in message             # file
-        assert "_merged_data.csv" in message     # the block it came from
+        assert BLOCK_FILE in message             # the block it came from
 
     def test_zero_depth_is_not_absent(self, env):
         # A grazing contact measured at exactly 0.0 mm is a real measurement and must

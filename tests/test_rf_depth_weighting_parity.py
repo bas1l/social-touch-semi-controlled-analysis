@@ -351,7 +351,6 @@ def rf_stage(tmp_path, monkeypatch):
             preparation_dir=preparation_dir,
             contact_depth_field={
                 "blocks_stage_dir": "blocks_rf_centered",
-                "block_csv_stem_suffix": "_pca-xyz",
             },
         )
         if legacy:
