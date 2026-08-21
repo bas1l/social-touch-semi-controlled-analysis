@@ -91,6 +91,9 @@ leaves grandchildren alive.
     accounts for the checkbox row.
 11. Headless pytest coverage of dependency gating, bypass, guards, failure isolation,
     abort, exit-code derivation, and event encode/decode round-trip.
+12. Relocating the per-task options editor out of the centre column and into a tabbed
+    right-hand column, so the DAG graph gets the full height of the centre column.
+    (Added 2026-08-21, after Phases 0-5 shipped — see Phase 6.)
 
 ### Out of Scope
 
@@ -236,6 +239,7 @@ concretely. Guide `05`'s DIP is why the core depends only on the event abstracti
 | `utils/gui/analysis_runner_gui/process_tree.py` (new) | Create a process-group-isolated child; kill a whole tree | `Popen` → `None`; kwargs for `Popen` | Qt, the DAG, task semantics |
 | `dag_graph_items.py` / `dag_graph_view.py` (modified) | Paint a node for a given `TaskStatus`; expose `set_task_status` / `clear_task_statuses` | `(name, TaskStatus)` → repaint | How the status was transported; subprocess; YAML |
 | `runner_window.py` (modified) | Wire the parser into the reader signal; own the confirm modal, the run summary, and abort | signals → widget calls | Ladder semantics, event encoding |
+| `task_panel.py` (Phase 6) | Present the DAG as graph or table and report which task is selected | model → `task_selected(str)` | Where task options are rendered, or that a detail panel exists at all |
 
 ```
 src/analysis/pipeline/
@@ -549,6 +553,42 @@ unaware of it, exactly as `enabled` is today.
 
 ---
 
+### Phase 6: Move task options into a tabbed right column
+**Goal:** The DAG graph gets the full height of the centre column; per-task options move to
+a tab in the right-hand column, matching the reference GUI's shape.
+
+**Added after Phases 0-5 shipped.** The original plan was scoped to behaviour — status
+reporting, bypass, abort, guards — and said nothing about window layout. This closes that
+gap. Today `TaskPanel` holds a vertical splitter with the graph/table stack on top and
+`TaskDetailPanel` below at stretch 2:5, so the options editor is given *more* height than
+the graph it belongs to (`task_panel.py:84-113`). The reference GUI instead puts options in
+a `QTabWidget` in the right column and lets the graph own the centre.
+
+- [ ] 6.1 — `TaskPanel`: remove the inner vertical splitter. The centre column becomes the
+      view-toggle bar plus the `QStackedWidget` (graph / table) only, and `TaskPanel` no
+      longer constructs or owns a `TaskDetailPanel`.
+- [ ] 6.2 — `runner_window`: replace the bare `SessionConfigSelector` third column with a
+      `QTabWidget` carrying a *Sessions* tab (the existing selector, unchanged) and a *Task
+      Options* tab (the `TaskDetailPanel`, now owned here). Re-tune the three-column stretch
+      factors so the graph gains the width the reference gives it.
+- [ ] 6.3 — Replace `TaskPanel`'s direct `self._detail.show_task(model, name)` calls with a
+      `task_selected(str)` signal that `runner_window` connects to the detail panel. This is
+      the contract that keeps the centre column ignorant of where options are rendered.
+- [ ] 6.4 — Rewire `TaskDetailPanel.task_changed` to `runner_window._mark_dirty` from its new
+      parent; `TaskPanel.task_changed` keeps bubbling only its own graph/table edits.
+- [ ] 6.5 — Raise the *Task Options* tab automatically when a node or table row is selected,
+      so a graph click never leaves the user looking at the Sessions tree.
+- [ ] 6.6 — Confirm the Status column, the Bypass checkbox and the live status painting from
+      Phases 2 and 4 all still work across the new column boundary.
+
+**Files Modified:**
+- `src/utils/gui/analysis_runner_gui/task_panel.py` — drop the inner splitter and the detail panel; add `task_selected`.
+- `src/utils/gui/analysis_runner_gui/runner_window.py` — tabbed right column, detail-panel ownership, signal rewiring, stretch factors.
+
+**Dependencies:** Phases 2 and 4 (the Status column and Bypass checkbox live in the widgets being moved)
+
+---
+
 ## Testing Plan
 
 All new tests are headless. No `QApplication` is constructed anywhere, matching the existing
@@ -630,6 +670,12 @@ guarded by `pytest.importorskip("PyQt5")`.
 - [x] An unregistered id raises `KeyError` naming the registry file.
 - [x] A registry entry with an empty `description` raises at load.
 
+`tests/test_task_panel_contract.py` (Phase 6)
+- [ ] `task_panel` does not import `task_detail_panel` — the import-graph assertion that
+      enforces the Phase 6 contract, since widget placement itself cannot be asserted
+      headlessly.
+- [ ] `TaskPanel` declares a `task_selected` signal.
+
 ### Integration Tests
 
 - [ ] `tests/test_rf_boundary_dag_wiring.py` gains: every task in every DAG config declares
@@ -645,6 +691,14 @@ guarded by `pytest.importorskip("PyQt5")`.
       afterwards.
 
 ### Manual Verification
+
+Phase 6 is layout work and is verified by eye — the repo constructs no `QApplication` in
+tests, so there is no headless assertion for widget placement:
+- [ ] The right column shows *Sessions* and *Task Options* tabs; the graph fills the centre
+      column's height.
+- [ ] Clicking a node raises the *Task Options* tab and shows that task's options.
+- [ ] Editing an option still marks the window title dirty, and Save still writes it.
+- [ ] The Status column, Bypass checkbox and live status colouring still behave.
 
 - [ ] Launch the GUI, run the processing DAG, and watch nodes transition
       pending → running → completed live.
@@ -735,6 +789,7 @@ guarded by `pytest.importorskip("PyQt5")`.
 | Phase 3 — process-tree kill | ~0.5 day | Phase 2 |
 | Phase 4 — bypass end to end | ~1 day | Phases 1, 2 |
 | Phase 5 — registry and polish | ~1 day | Phase 2 |
+| Phase 6 — tabbed right column | ~0.5 day | Phases 2, 4 |
 
 ---
 
