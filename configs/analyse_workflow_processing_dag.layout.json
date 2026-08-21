@@ -1,142 +1,151 @@
 {
-  "touch_summarize_blocks": [
-    444.1320469866695,
-    -1.9082193589101024
-  ],
-  "touch_prepare_sessions": [
-    564.0968828260906,
-    173.7401867289753
-  ],
-  "spatial_map_single_touch": [
-    1462.397362122439,
-    349.97128050236927
-  ],
-  "touch_compute_series": [
-    1057.9227453177552,
-    98.09076006071624
-  ],
-  "spatial_set_camera": [
-    1523.0565920703507,
-    -322.4103681009643
-  ],
-  "spatial_map_baseline": [
-    2206.7716569885984,
-    435.478763687294
-  ],
-  "spatial_configure_slim_uv": [
-    1834.5564184626028,
-    937.0408620970044
-  ],
-  "spatial_precompute_slim_uv": [
-    2206.890096637645,
-    923.3637279550749
-  ],
-  "spatial_configure_stroke_axis": [
-    2489.5588778977844,
-    766.6847504009927
-  ],
-  "spatial_build_response_fields": [
-    2741.461130352176,
-    931.6545361817942
-  ],
-  "spatial_extract_boundary__radial": [
-    3120.0,
-    720.0
-  ],
-  "spatial_extract_boundary__gradient": [
-    3120.0,
-    940.0
-  ],
-  "spatial_extract_boundary__inflection": [
-    3120.0,
-    1160.0
-  ],
-  "spatial_extract_boundaries": [
-    3320.091581287308,
-    934.2498938041674
-  ],
-  "spatial_tune_rf_contours": [
-    3006.2742602611866,
-    758.7031305792067
-  ],
-  "spatial_compare_boundaries": [
-    3641.076608813556,
-    696.0756564441582
-  ],
-  "spatial_compare_proximal_distal": [
-    3561.966827328123,
-    1197.1013763750002
-  ],
-  "spatial_compare_tap_stroke": [
-    3567.7454282123063,
-    1040.5618525697012
-  ],
-  "spatial_extract_rf_profiles": [
-    3647.949343515622,
-    881.9228457500001
-  ],
-  "stimulus_extract_features": [
-    1466.4651289972085,
-    98.96554240088636
-  ],
-  "stimulus_render_radar": [
-    2110.80742647688,
-    231.16738129179237
-  ],
-  "stimulus_compare_sessions": [
-    2106.9304903114144,
-    332.7712320404891
-  ],
-  "stimulus_response_tuning": [
-    2168.195369022047,
-    548.2619569803205
-  ],
-  "stimulus_response_instruction_tuning": [
-    2059.3940531179696,
-    664.5717418819229
-  ],
-  "spatial_tuning_rf_metrics": [
-    3396.831209249999,
-    539.1101072968751
-  ],
-  "cross_map_feature_grid": [
-    1908.4365314129127,
-    -173.8326722133159
-  ],
-  "cross_extract_grid_metrics": [
-    2261.3818598567755,
-    -383.1298441636627
-  ],
-  "cross_render_grid_metrics": [
-    2605.3423484042787,
-    -383.62084872312005
-  ],
-  "cross_render_sessions": [
-    1897.0171635842476,
-    -469.6903878988431
-  ],
-  "stimulus_cluster_touches": [
-    2081.61357134852,
-    24.443255213016194
-  ],
-  "stimulus_compare_clusters": [
-    2459.985673702577,
-    66.22841845742056
-  ],
-  "stimulus_analyse_efficacy": [
-    2071.1029119890727,
-    134.3969473089491
-  ],
-  "cross_extract_cluster_rf": [
-    2517.213844388901,
-    -193.1353078620217
-  ],
-  "cross_compute_cluster_metrics": [
-    2975.197218895196,
-    -189.40804742255992
-  ],
-  "cross_render_cluster_rf": [
-    3043.074459983213,
-    -311.9933830775803
-  ]
+  "nodes": {
+    "touch_summarize_blocks": [
+      0.0,
+      62.99999999999999
+    ],
+    "touch_prepare_sessions": [
+      669.2160991125929,
+      1269.2650735671525
+    ],
+    "spatial_map_single_touch": [
+      2806.563246686882,
+      1294.2160335629294
+    ],
+    "touch_compute_series": [
+      952.3197667176448,
+      1086.9729924514613
+    ],
+    "spatial_set_camera": [
+      1375.3562767400265,
+      870.5643233964975
+    ],
+    "spatial_map_baseline": [
+      761.4599999999999,
+      525.0
+    ],
+    "spatial_configure_slim_uv": [
+      5752.674990318927,
+      280.83473187477847
+    ],
+    "spatial_precompute_slim_uv": [
+      6061.848552413785,
+      330.04806891844
+    ],
+    "spatial_configure_stroke_axis": [
+      1303.724309834005,
+      1163.9429285653805
+    ],
+    "spatial_build_response_fields": [
+      6775.859999999999,
+      833.0
+    ],
+    "spatial_extract_boundary__radial": [
+      6521.759999999999,
+      1141.0
+    ],
+    "spatial_extract_boundary__gradient": [
+      7176.959999999999,
+      1141.0
+    ],
+    "spatial_extract_boundary__inflection": [
+      3726.8028208849128,
+      1226.2430364778045
+    ],
+    "spatial_extract_boundaries": [
+      6411.859999999999,
+      1295.0
+    ],
+    "spatial_tune_rf_contours": [
+      6322.959999999999,
+      986.9999999999999
+    ],
+    "spatial_compare_boundaries": [
+      5953.359999999999,
+      1449.0
+    ],
+    "spatial_compare_proximal_distal": [
+      6411.859999999999,
+      1449.0
+    ],
+    "spatial_compare_tap_stroke": [
+      6868.259999999999,
+      1449.0
+    ],
+    "spatial_extract_rf_profiles": [
+      7284.759999999999,
+      1449.0
+    ],
+    "stimulus_extract_features": [
+      1345.755207138966,
+      1043.5841622313822
+    ],
+    "stimulus_render_radar": [
+      2359.21,
+      525.0
+    ],
+    "stimulus_compare_sessions": [
+      3143.21,
+      525.0
+    ],
+    "stimulus_response_tuning": [
+      3556.91,
+      525.0
+    ],
+    "stimulus_response_instruction_tuning": [
+      4034.31,
+      525.0
+    ],
+    "spatial_tuning_rf_metrics": [
+      4913.51,
+      1449.0
+    ],
+    "cross_map_feature_grid": [
+      2518.020932093381,
+      1023.3011414974263
+    ],
+    "cross_extract_grid_metrics": [
+      3287.69867135313,
+      800.6318500963112
+    ],
+    "cross_render_grid_metrics": [
+      3598.0691212587585,
+      1165.4478422634372
+    ],
+    "cross_render_sessions": [
+      5379.71,
+      525.0
+    ],
+    "stimulus_cluster_touches": [
+      2735.11,
+      525.0
+    ],
+    "stimulus_compare_clusters": [
+      2239.7083051006202,
+      642.4465129222074
+    ],
+    "stimulus_analyse_efficacy": [
+      4510.3099999999995,
+      525.0
+    ],
+    "cross_extract_cluster_rf": [
+      2933.21,
+      679.0
+    ],
+    "cross_compute_cluster_metrics": [
+      1836.1247957608598,
+      784.2620172296099
+    ],
+    "cross_render_cluster_rf": [
+      2356.41,
+      833.0
+    ]
+  },
+  "view": {
+    "scale": 0.41035756638148524,
+    "center": [
+      2095.73325912677,
+      1233.0709640908672
+    ]
+  }
 }

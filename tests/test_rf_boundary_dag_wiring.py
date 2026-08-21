@@ -66,6 +66,22 @@ def _load_layout() -> dict:
         return json.load(f)
 
 
+def _layout_nodes() -> dict:
+    """Task name -> ``[x, y]`` from the layout sidecar.
+
+    The sidecar written by ``DagGraphView._save_layout`` is
+    ``{"nodes": {task: [x, y]}, "view": {...}}``; coordinates live under
+    ``"nodes"`` and nowhere else, so the document itself is never keyed by
+    task name.
+    """
+    if "nodes" not in _LAYOUT:
+        raise KeyError(
+            f"{_LAYOUT_JSON} declares no 'nodes' mapping. Expected the schema written "
+            'by DagGraphView._save_layout: {"nodes": {task: [x, y]}, "view": {...}}'
+        )
+    return _LAYOUT["nodes"]
+
+
 _TASKS = _load_tasks()
 _LAYOUT = _load_layout()
 _METHODS = list(boundary_registry.all_methods())
@@ -127,8 +143,9 @@ def test_method_node_options_cover_schema_and_shared(method):
 @pytest.mark.parametrize("method", _METHODS, ids=_METHOD_IDS)
 def test_method_node_has_layout(method):
     node = _node_name(method.name)
-    assert node in _LAYOUT, f"layout.json missing coordinate for {node}"
-    coord = _LAYOUT[node]
+    nodes = _layout_nodes()
+    assert node in nodes, f"layout.json missing coordinate for {node}"
+    coord = nodes[node]
     assert isinstance(coord, list) and len(coord) == 2, f"{node} layout must be [x, y]"
 
 
@@ -157,7 +174,9 @@ def test_barrier_carries_no_method_specific_options():
 
 
 def test_barrier_has_layout():
-    assert _BARRIER_NODE in _LAYOUT, "layout.json missing coordinate for the barrier node"
+    assert _BARRIER_NODE in _layout_nodes(), (
+        "layout.json missing coordinate for the barrier node"
+    )
 
 
 def test_downstream_consumers_still_depend_on_barrier_only():
