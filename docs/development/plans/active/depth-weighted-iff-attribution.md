@@ -59,6 +59,8 @@ the viewer windows draw a different map from the one written to disk.
 7. Thread `depth_weight_alpha` from YAML to the estimator as a **required** argument, recorded in
    run provenance.
 8. Ship one diagnostic that can falsify the whole premise (per-vertex weight variation).
+9. Source `vertex_id` from the depth sidecar instead of re-deriving it by KDTree, so the depth join
+   is exact by construction rather than approximate.
 
 ### Out of Scope
 
@@ -69,8 +71,10 @@ the viewer windows draw a different map from the one written to disk.
 - **Weighting the `max` map.** `np.maximum.at` has no meaningful weighted analogue.
 - **Cross-touch weighting** in `rf_population_heatmap.py` (deeper touches outranking shallower
   ones). The shared helper is introduced there; only per-frame weighting is applied.
-- **Fixing the two KDTree vertex-snapping sites** (`rf_explorer_data.py:345`,
-  `touch_population_data.py:686`). Known-bad, tracked separately.
+- **Fixing the two *remaining* KDTree vertex-snapping sites** (`rf_explorer_data.py:345`,
+  `touch_population_data.py:686`). Known-bad, tracked separately. The **third** site,
+  `touch_playback_data.py:521,568`, is *not* out of scope — Phase 2.5 deletes it, because the whole
+  depth join depended on it.
 - **`rf_cluster_pipeline.py:181-190`** float-coordinate-tuple aggregation. Needs a `vertex_id`
   before weighting can reach it.
 - **The `touch_analytics` clustering finding** (brainstorm section 2). Independent, unresolved,
@@ -82,7 +86,11 @@ the viewer windows draw a different map from the one written to disk.
 ## Success Criteria
 
 - [ ] With `depth_weight_alpha = 0.0`, `single_touch_rf_maps_mean.npz` is **byte-identical** to the
-      pre-change output on the same inputs.
+      baseline **re-pinned in Phase 2.5** on the same inputs. This proves one thing and only one
+      thing: the weighting machinery is a genuine no-op at `alpha = 0`, because the same code path
+      runs with `weights = ones`. It **no longer claims** the maps match what the pipeline produced
+      before this branch — Phase 2.5 replaces KDTree vertex snapping with the sidecar's own
+      `vertex_id`, which moves credit between vertices deliberately.
 - [ ] Hand-computed weighted mean over the 7-vertex / 3-frame fixture matches the implementation to
       `rtol=1e-12`, including v6 (always shallow) and v7 (always deep) both returning approximately
       their unweighted values.
@@ -116,6 +124,17 @@ the viewer windows draw a different map from the one written to disk.
   to dim or mask thin-evidence vertices. It never modifies the estimate itself.
 - **no behaviour change (Phase 2)**: for every one of the nine call sites, output arrays are
   `np.array_equal` to their pre-refactor values on the pinned fixtures.
+- **ordered correspondence**: within a single `frame_index`, the k-th point listed in that frame's
+  CSV `contact_points` cell is the k-th parquet row carrying that `frame_index`. The parent repo
+  states `frame_index` is the only exact join key the two artifacts share, and enforces this
+  correspondence after every stage with `assert_row_counts_agree_with_csv`. Both `vertex_id` and
+  `signed_depth_mm` are read off that one row; there is no vertex matching step.
+- **ordered correspondence is not row-position joining**: pairing parquet row *i* with CSV row *i*
+  across a whole file is unsafe and the contract warns against it — the CSV is at nerve rate with a
+  variable number of points per frame, the parquet is at frame rate. The documented, enforced
+  contract is narrower: locate the frame by `frame_index` **value**, *then* index by position
+  **inside** that frame. These are different operations. Anyone who "generalises" the second into
+  the first breaks the join silently, which is why the distinction is written down here.
 
 ---
 
@@ -175,7 +194,9 @@ each contact patch in the real data, this feature produces today's map at every 
 | Weight the `max` map too | Consistency | A weighted maximum has no meaning; weighting changes its units | Rejected |
 | Weight the pipeline only, leave 9 copies | Smallest diff | Viewer windows would draw the v2-peaked map while saved files hold the v3-peaked one — the one failure mode that actively misleads, and this feature is judged by eye | Rejected |
 | Choose alpha by visual sharpness | Cheap | Sharpness improves under *any* concentration of credit, correct or not | Rejected (brainstorm section 4) |
-| Recover `vertex_id` by KDTree | Avoids threading depth through the cache | Contract forbids it; measured 29 mm off-surface at touch boundaries | Rejected (data contract) |
+| Recover `vertex_id` by KDTree | Avoids threading depth through the cache | Contract forbids it; measured 29 mm off-surface at touch boundaries. **A third KDTree site existed at `touch_playback_data.py:521,568`** — not either of the two listed as out of scope, and the one the entire depth design depended on. It is **deleted**, not reconciled, in Phase 2.5 | Rejected (data contract) |
+| **Join on `frame_index` value + ordered position within that frame** | Exact by construction: row k of a frame *is* point k of that frame's `contact_points` cell, so `vertex_id` and `signed_depth_mm` come off a single row with no matching step and no tolerance. The parent repo declares `frame_index` the only exact join key the two artifacts share and enforces the per-frame row-count agreement after every stage (`assert_row_counts_agree_with_csv`) | Requires `frame_index` to survive to the CSV — it is dropped at `preparation_pipeline.py:32` — and requires this repo to re-assert the per-frame count itself | **Chosen** |
+| Match `vertex_id` between the KDTree assignment and the sidecar, as a cross-check | Would look like a safety net | The KDTree assigns a *different* vertex from the one the sidecar recorded — that discrepancy **is** the 29 mm error, not a symptom of some other bug. A check that cannot pass is not a check: it would either be disabled or would block every session | Rejected |
 
 ### Architecture & Module Contracts
 
@@ -184,7 +205,7 @@ each contact patch in the real data, this feature produces today's map at every 
 | `contact_depth_field_io.py` (exists) | Read + validate parquet sidecars, join reference PLY | `csv_path, expect_space, session_id` -> `DepthField` | IFF, receptive fields, alpha, weighting |
 | `vertex_weights.py` (**new**) | Turn per-frame depths into per-frame weights | `depth_mm: (K,), alpha: float` -> `w: (K,) in [0,1]` | IFF, vertices, frames, accumulation, files |
 | `vertex_accumulator.py` (**new**) | The one weighted per-vertex reduction | `(vertex_idx, values, weights, n_vertices)` -> `(value_sum, value_max, weight_sum, weight_sq_sum)` | alpha, depth, mm, parquet, GUI, files |
-| `touch_playback_data.py` (changed) | Carry per-contact-point depth onto `TouchEvent` and its cache | CSV + sidecar -> `TouchEvent.frame_depths` | alpha, weighting, IFF semantics |
+| `touch_playback_data.py` (changed) | Resolve the block sidecar from `source_block_file`, read `vertex_id` **and** depth off the frame's rows, carry both onto `TouchEvent` and its cache | CSV (with `frame_index`, `source_block_file`) + sidecar -> `TouchEvent.frame_vertex_indices` + `.frame_depths` | alpha, weighting, IFF semantics, and *how* a stage directory is named or produced — see the boundary note below |
 | `rf_single_touch_pipeline.py` (changed) | Orchestrate per-touch RF computation | `TouchEvent, alpha` -> mean/max pairs + confidence | parquet layout, PLY, YAML |
 
 ```
@@ -197,6 +218,26 @@ The thing that varies is the **weight function**, not the aggregation. Hiding `d
 one small function keeps the accumulator ignorant of alpha entirely, and makes an alternative
 weighting (saturating, thresholded) an addition rather than an edit.
 
+#### Boundary cost of Phase 2.5, stated plainly
+
+Phase 2.5 makes `touch_playback_data.py` — a data-*loading* module — aware that there is a merged
+data root and a blocks stage subdirectory. That is a real new coupling between a loader and upstream
+stage layout, and the table above must not pretend the boundary is intact. The smallest honest
+contract, rather than a fictional one:
+
+- `touch_playback_data.py` receives the merged root and the stage subdirectory name **from config**,
+  and the block filename **from the `source_block_file` column**. It composes no path fragment from
+  repo knowledge and hardcodes neither string.
+- `depth_field_path_for_csv()` (already built, Phase 1) owns the CSV-name -> parquet-name rule. No
+  second implementation of that rule is written anywhere.
+- `coordinate_space` is **read from parquet metadata**, never inferred from the directory name. The
+  config says where to look; the file says what it is. That split is what holds the coupling to
+  *location* and stops it becoming a coupling to *meaning*.
+
+The alternative — a dedicated resolver module mapping `(session, block) -> parquet path` — is **not**
+built. It would have exactly one caller and would move the same two config keys one file further
+away without removing the coupling.
+
 ### Known hazards this design must survive
 
 1. **The cache dedup is depth-unsafe.** `_save_playback_cache` deduplicates contact-point groups by
@@ -205,11 +246,13 @@ weighting (saturating, thresholded) an addition rather than an edit.
    contact-point string** — two frames with identical contact coordinates can carry different
    penetration depths. Depth arrays must therefore be stored **per contact-frame**, not per unique
    group, or one frame's depth is silently broadcast across every frame sharing that group.
-2. **There is no frame index to join on.** The playback loader never reads one; CSV rows are already
-   at nerve rate (~1 kHz) and the 30 Hz Kinect structure survives only as *runs of identical
-   `contact_points` text*. Attaching 30 Hz depth to 1 kHz rows requires either adding a frame column
-   to `_REQUIRED_COLUMNS` (lines 22-30) or reconstructing runs by the same string-identity
-   mechanism. **The join must be on frame_index *value*, never row position.**
+2. **`frame_index` exists, but it is deleted upstream.** It is listed in `_DROP_COLUMNS`
+   (`src/analysis/touch_analytics/preparation_pipeline.py:32`), applied at `:164` immediately before
+   `to_csv` at `:165` — so the playback loader never sees it, and the 30 Hz Kinect structure
+   survives in the CSV only as *runs of identical `contact_points` text*. Phase 2.5 restores the
+   column, which invalidates `_prepared.csv` and `_series_augmented.csv`; a full pipeline re-run is
+   planned and that cost is accepted. **The join is on `frame_index` *value*, then ordered position
+   inside that frame — never whole-file row position** (see *ordered correspondence*, Definitions).
 3. **A pre-existing implicit weighting already exists.** Contact geometry is forward-filled *up* to
    the nerve rate (`:481-483`) while IFF is never averaged down, so each Kinect frame is credited
    about 33 times, weighted by how long it was held. Depth weights multiply on top of this. Not
@@ -226,6 +269,25 @@ weighting (saturating, thresholded) an addition rather than an edit.
 7. **Zero is not absent.** `depth = 0.0` (grazing) and `depth = missing` (no sidecar row) are
    different facts that both become `w = 0` at `alpha > 0`. The fail-fast check must happen at the
    loader boundary, where they are still separable.
+8. **`parse_contact_points` must not silently drop a malformed triplet.** The parent repo's parser
+   keeps a point only `if len(parts) == 3` and supplies **no `else`** — a malformed triplet vanishes
+   without a word. That behaviour is exactly why `assert_row_counts_agree_with_csv` exists upstream.
+   On this side, one dropped point shifts every subsequent point of that frame onto the **wrong**
+   sidecar row, producing a plausible-looking map that is wrong. This repo's parser must raise on
+   any triplet it cannot parse; task 2.5.6's per-frame count assertion is the second line of
+   defence, not the first.
+9. **Two block-id spellings exist and are never converted.** `block-order02` comes from the video
+   stem and is used through preprocessing; `block-order-02` is used from merging onward. The parent
+   repo uses each verbatim in its own domain and converts between them nowhere. `block_order_id` in
+   the aggregated CSV is parsed with `block-order-(\d+)` and is a **zero-padded string** (`"02"`),
+   or `None` when the regex misses. Never `int()` it, never reformat it, and never synthesise a
+   parquet filename from it — pass `source_block_file` to `depth_field_path_for_csv()`.
+10. **`vertex_id` exists only from the projection stage onward.** `blocks_projected/`,
+    `blocks_pca_calibrated/` and `blocks_rf_centered/` carry it (schema version 2);
+    `blocks_filtered/`, `blocks_registered/` and `blocks_deduped/` do **not** (schema version 1).
+    Pointing the stage-subdirectory config at a pre-projection stage yields a parquet with no
+    `vertex_id` column at all. The loader must raise on the missing column and name the stage in the
+    message, not surface a downstream `KeyError`.
 
 ---
 
@@ -319,27 +381,106 @@ exists.
 
 **Dependencies:** None (can run parallel to Phase 1).
 
-### Phase 3: Carry depth to the estimator
-**Goal:** Per-contact-point penetration depth reaches `_compute_touch_rf`, correctly aligned.
+### Phase 2.5: Source vertex identity from the sidecar
 
-- [ ] 3.1 — Add `frame_depths: list  # (K_i,) float64` to `TouchEvent` (`:49-59`), aligned with
-      `frame_vertex_indices`.
-- [ ] 3.2 — Load the sidecar via `load_depth_field(...)` and join by `vertex_id` and `frame_index`
-      **value**. Raise on a contacted vertex with no depth row — never `.get(vertex_id, 0.0)`.
-- [ ] 3.3 — Assert `(frame_index, vertex_id)` uniqueness per frame; raise on violation.
-- [ ] 3.4 — Expand 30 Hz depth to nerve rate by the same run mechanism as the vertices, and apply
-      the identical `ffill` as `:481-483` or depth desynchronises from the points.
-- [ ] 3.5 — Store depth **per contact-frame**, not per dedup group (hazard 1). Bump
-      `_CACHE_SCHEMA_VERSION` 3 to 4 (`:20`), add keys to `required_keys` (`:243-250`), unpack them,
-      add shape checks in the `:288-352` block, pass to the constructor at `:367`.
-- [ ] 3.6 — Reject NaN depth at the loader boundary with file/frame/vertex context.
+**Goal:** Retire the third KDTree vertex re-derivation and make the sidecar reachable, so that the
+depth join is exact by construction. Phase 3 as originally written rested on a wrong premise — that
+a `vertex_id` computed on this side could be matched against the sidecar's. It cannot: the sidecar's
+`vertex_id` **is** the answer, and it arrives on the same row as the depth. The join therefore moves
+here, and Phase 3 keeps only the transport.
+
+The join is `frame_index` **value**, then **ordered position within that frame** — the k-th parsed
+contact point of a frame is the k-th parquet row carrying that `frame_index`. This is the parent
+repo's documented contract (`frame_index` is the only exact join key the two artifacts share) and it
+is enforced there after every stage by `assert_row_counts_agree_with_csv`. It is **not** a licence to
+join rows to rows by position across a whole file; see *ordered correspondence* in Definitions.
+
+- [ ] 2.5.1 — Restore `frame_index`: remove it from `_DROP_COLUMNS`
+      (`src/analysis/touch_analytics/preparation_pipeline.py:32`; the drop is applied at `:164`,
+      immediately before `to_csv` at `:165`). Verify the column survives into `_prepared.csv` and
+      `_series_augmented.csv`. Both artifacts are invalidated by this change; a full pipeline re-run
+      is planned and that cost is accepted.
+- [ ] 2.5.2 — Add `frame_index` to `_REQUIRED_COLUMNS` (`touch_playback_data.py:22-30`) and
+      forward-fill it **inside the same `groupby([...]).ffill()` statement** that already fills
+      `contact_points` (`:481-483`) — not in a second statement alongside it. One statement makes
+      desynchronisation of the frame index from the contact points structurally impossible rather
+      than merely tested for.
+- [ ] 2.5.3 — Add sidecar-location config: the **merged-data root** and the **blocks stage
+      subdirectory** name (`blocks_rf_centered`). These are the only genuinely new config keys.
+      Resolve the block parquet by feeding the aggregated CSV's `source_block_file` column — a
+      basename, e.g. `ST13-03_semicontrolled_block-order-02_merged_data.csv` — to the already-built
+      `depth_field_path_for_csv()`. **No new artifact is produced and there is no session-level
+      sidecar**: the parent repo emits these per block only, deliberately. Do not synthesise the
+      filename from `block_order_id` (hazard 9).
+- [ ] 2.5.4 — Read `coordinate_space` from the parquet metadata and **assert** it is one of the
+      three documented terminal values a `blocks_rf_centered/*.parquet` can legitimately carry:
+      `rf_centered` (the normal case), `pca_calibrated` (the RF shift was identity, so the stage was
+      a byte-identical passthrough), or `kinect_space_1` (the block had no ICP snapshot). Record
+      which value was found in run provenance. **This is not a fallback.** Depth weighting consumes
+      exactly two things — depth magnitude and vertex identity — and neither is spatial, so the
+      operation is genuinely space-agnostic. The trap `contact_depth_field_io.py` closes is
+      *inferring* the space from a folder name; reading it from metadata and asserting it against a
+      closed set is the opposite of that, and recording it means a surprising value shows up in the
+      run record instead of being absorbed.
+- [ ] 2.5.5 — Delete the KDTree vertex assignment at `touch_playback_data.py:521,568` and take
+      `vertex_id` off the sidecar row instead: locate the frame by `frame_index` **value**, then
+      take the k-th row of that frame for the k-th parsed contact point. The KDTree is **removed,
+      not reconciled** — matching its output against the sidecar's `vertex_id` is a check that
+      cannot pass (Alternatives Considered).
+- [ ] 2.5.6 — Hard per-frame count assertion: the number of parsed contact points for a
+      `frame_index` **must equal** the number of sidecar rows carrying that `frame_index`. Raise
+      with the parquet path, the `frame_index`, and both counts on any mismatch. This assertion is
+      the entire reason ordered correspondence is safe; without it a single dropped triplet
+      (hazard 8) shifts every later point in the frame onto the wrong row. It mirrors the parent
+      repo's `assert_row_counts_agree_with_csv`.
+- [ ] 2.5.7 — Re-pin the Phase 2 characterization baseline against the new vertex assignment, and
+      **record the magnitude of the resulting map change**: the per-vertex `|delta|` distribution
+      and how many contact points changed vertex identity at all. The old baseline is not preserved
+      and must not be — the point of this phase is that the previous assignment was wrong. Success
+      Criterion 1 and task 6.1 are both restated against this re-pinned baseline.
 
 **Files Modified:**
-- `src/analysis/receptive_field_mapping/data/touch_playback_data.py` — `:20`, `:22-30`, `:49-59`,
-  `:120-137`, `:243-250`, `:288-352`, `:367`, `:481-483`, `:540-591`
+- `src/analysis/touch_analytics/preparation_pipeline.py` — `:32`
+- `src/analysis/receptive_field_mapping/data/touch_playback_data.py` — `:22-30`, `:481-483`,
+  `:521`, `:568`
+- `configs/analyse_workflow_processing_dag.yaml` (and `configs/analyse_workflow_dag.yaml` if it
+  exposes the same stage) — merged root + blocks stage subdirectory. **ruamel.yaml round-trip only.**
+- `tests/rf_accumulator_fixtures.py` — baseline re-pinned
+- `tests/test_touch_playback_vertex_source.py` — new
+
+**Dependencies:** Phases 1, 2.
+
+### Phase 3: Carry depth to the estimator
+**Goal:** Transport per-contact-point penetration depth from the sidecar row that Phase 2.5 has
+already located, through the cache, to `_compute_touch_rf`. **The join moved to Phase 2.5.** Depth
+comes off the *same row* as `vertex_id`, so this phase contains no sidecar lookup, no `frame_index`
+matching and no alignment step — those tasks were deleted from here, not shrunk. What remains is
+storage and validation.
+
+- [ ] 3.1 — Add `frame_depths: list  # (K_i,) float64` to `TouchEvent` (`:49-59`), aligned with
+      `frame_vertex_indices`. Both are built from the same sidecar rows, in the same order, in the
+      same loop.
+- [ ] 3.2 — Read `signed_depth_mm` off the rows already located in 2.5.5. There is no second join
+      and no `.get(vertex_id, ...)` anywhere.
+- [ ] 3.3 — Assert `(frame_index, vertex_id)` uniqueness per frame and raise on violation
+      (hazard 4). **Assert, do not reduce** — the cancellation that makes duplicates harmless today
+      only holds while every weight is 1.
+- [ ] 3.4 — Store depth **per contact-frame**, not per dedup group. Hazard 1 is unchanged by the
+      corrected join and is still the most dangerous item in this plan: two frames with identical
+      `contact_points` text can carry different depths, and `_save_playback_cache` dedups groups by
+      `id()` of the vertex array (`:131`). Bump `_CACHE_SCHEMA_VERSION` 3 to 4 (`:20`), add the keys
+      to `required_keys` (`:243-250`) **in the same change** (hazard 5), unpack them, add shape
+      checks in the `:288-352` block, pass to the constructor at `:367`.
+- [ ] 3.5 — Reject NaN depth at the loader boundary with file/frame/vertex context. Zero is not
+      absent (hazard 7); a *missing* row is now impossible by construction because 2.5.6 asserts the
+      per-frame counts agree, so NaN is the only remaining form of absence and it raises.
+
+**Files Modified:**
+- `src/analysis/receptive_field_mapping/data/touch_playback_data.py` — `:20`, `:49-59`,
+  `:120-137`, `:243-250`, `:288-352`, `:367`, `:540-591`
 - `tests/test_touch_playback_depth.py` — new
 
-**Dependencies:** Phase 1.
+**Dependencies:** Phases 1, 2.5.
 
 ### Phase 4: Apply the weighting
 **Goal:** The estimator becomes a weighted mean, with every degenerate case raising.
@@ -393,9 +534,11 @@ exists.
 **Goal:** The baseline is proven and the premise is tested against real data.
 
 - [ ] 6.1 — Parity test: `depth_weight_alpha = 0.0` produces output **byte-identical** to the
-      Phase 2 pinned baseline. Model on `tests/test_rf_response_fields_parity.py`
-      (`_assert_exactly_equal`, `:220`), with a docstring stating why exact equality is the right
-      invariant.
+      baseline **re-pinned in Phase 2.5** — not to the pre-branch output. Model on
+      `tests/test_rf_response_fields_parity.py` (`_assert_exactly_equal`, `:220`), with a docstring
+      stating both halves of the claim: it **proves** the weighting machinery is an exact no-op at
+      `alpha = 0`, because the same code path runs with `weights = ones`; it says **nothing** about
+      agreement with maps produced before the Phase 2.5 vertex fix, which changed them on purpose.
 - [ ] 6.2 — Explicitly cover clamped grazing vertices at `alpha=0`: `max(d,0)` is `0.0`, and
       `0.0 ** 0 == 1.0`, so they must still receive weight 1.
 - [ ] 6.3 — Diagnostic script: for one session, report the distribution of **per-vertex weight
@@ -434,7 +577,11 @@ exists.
 ### Integration Tests
 - [ ] The full 7-vertex / 3-frame fixture end to end: peak moves from v2 to v3; v1 and v5 unchanged;
       **v6 (always shallow) and v7 (always deep) both within 1e-9 of their unweighted values.**
-- [ ] `alpha=0` byte-identical to the Phase 2 baseline through the whole pipeline.
+- [ ] `alpha=0` byte-identical to the **Phase 2.5 re-pinned** baseline through the whole pipeline.
+- [ ] Vertex identity comes from the sidecar: a synthetic frame whose sidecar `vertex_id` differs
+      from the nearest-vertex answer resolves to the **sidecar's** value.
+- [ ] `frame_index` and `contact_points` are filled by one `ffill` statement and cannot drift: a
+      fixture with gaps in both columns yields matched, non-null pairs on every row.
 - [ ] Cache round-trip: write v4, read back, depth arrays match per **frame** — specifically a case
       where two frames share a `contact_points` string but carry different depths (hazard 1).
 - [ ] A v3 cache on disk is rejected loudly, not silently recomputed into a depth-free result.
@@ -452,9 +599,16 @@ exists.
       weight cancels).
 - [ ] All-identical depths across a patch gives weights all 1.0 and output identical to today.
 - [ ] Duplicate `(frame_index, vertex_id)` in a frame raises (assert, do not reduce).
-- [ ] Contacted vertex with no depth row in the sidecar raises with file/frame/vertex context.
-- [ ] A session whose sidecar is absent entirely gives a distinct error from "vertex missing from
-      sidecar".
+- [ ] A frame whose parsed contact-point count differs from its sidecar row count raises with the
+      parquet path, the `frame_index`, and both counts (2.5.6).
+- [ ] A malformed contact-point triplet raises in `parse_contact_points` rather than being dropped
+      (hazard 8).
+- [ ] A block sidecar whose `coordinate_space` is `pca_calibrated` or `kinect_space_1` loads and is
+      recorded in provenance; a fourth, undocumented value raises (2.5.4).
+- [ ] A parquet from a pre-projection stage (no `vertex_id` column) raises naming the stage
+      (hazard 10).
+- [ ] A session whose block sidecar is absent entirely gives a distinct error from a per-frame count
+      mismatch.
 
 ---
 
@@ -471,7 +625,13 @@ exists.
       RF-centered space" — false for 7 of 11 sessions) and the contradiction between
       `gui/preparation_viewer_data.py:62` and `shared_constants.py:61`, both touched by this work.
 - [ ] Update `docs/data-contracts/contact-depth-field.md` with the consumer contract now that one
-      exists.
+      exists: the join is `frame_index` **value** plus ordered position *within* that frame;
+      whole-file row-position joining is forbidden, and why; the per-frame count assertion is
+      mandatory; and the three `coordinate_space` values a terminal `blocks_rf_centered/` file may
+      legitimately carry.
+- [ ] Record in the ADR why the KDTree vertex re-derivation at `touch_playback_data.py:521,568` was
+      **deleted** rather than reconciled against the sidecar, so the "cross-check" is not
+      reintroduced later as an improvement.
 
 ---
 
@@ -483,6 +643,10 @@ exists.
    weighting is abandoned.
 2. **Data considerations:** the playback cache goes v3 to v4. Rolling back requires **deleting** v4
    caches — v3 code must not read a v4 file. No source data is modified; sidecars are read-only.
+   Separately, Phase 2.5 restores `frame_index` upstream, which invalidates every `_prepared.csv`
+   and `_series_augmented.csv`; those must be regenerated, and reverting Phase 2.5 re-drops the
+   column and invalidates them a second time. Do not revert 2.5 to "get the old maps back" — the
+   old maps were built on the wrong vertex assignment.
    Output `.npz` files gain keys, so downstream readers (`touch_population_data.py:905`,
    `single_touch_rf_explorer.py:99`, `rf_population_grid_pipeline.py`) must tolerate the additions
    or be updated in the same commit.
@@ -497,13 +661,16 @@ exists.
 | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|
 | Cache dedup silently broadcasts one frame's depth across a group (hazard 1) | **High** | **High** | Store depth per contact-frame, not per group. Dedicated test with two frames sharing a `contact_points` string but differing depths |
-| Depth misaligns from contact points through the ffill / run expansion | Med | **High** | Join on `frame_index` **value**, never row position; apply the identical ffill; assert per-frame length equality against `frame_vertex_indices` |
+| Depth misaligns from contact points through the ffill / run expansion | Med | **High** | Join on `frame_index` **value**, then ordered position *within* the frame — never whole-file row position; fill `frame_index` in the **same** `ffill` statement as `contact_points` (2.5.2); assert per-frame count equality against the sidecar (2.5.6) |
+| `parse_contact_points` drops a malformed triplet and shifts the rest of the frame onto the wrong sidecar rows (hazard 8) | Low | **High** | Parser raises rather than skipping; 2.5.6's per-frame count assertion catches any survivor before it reaches a map |
+| A terminal `blocks_rf_centered/` parquet carries `pca_calibrated` or `kinect_space_1` and a strict `expect_space` check blocks the run | **High** | Med | 2.5.4 asserts membership in the three documented terminal values and records which was found; weighting reads only depth magnitude and vertex identity, neither of which is spatial |
+| Restoring `frame_index` invalidates every `_prepared.csv` / `_series_augmented.csv` | **Certain** | Low | Accepted: a full pipeline re-run is already planned. Recorded here so the cost is not rediscovered mid-implementation |
 | `alpha=0` is not byte-identical due to float summation order | **High** | Med | Same code path with `weights=ones`, same reduction call. If still unequal, downgrade to a **stated** tolerance and amend the plan — never silently switch to `approx` |
 | Depth is near-uniform across patches, so the feature does nothing | Med | Med | Phase 6.3 diagnostic measures this directly and can falsify the premise cheaply |
 | Change is dominated by the ~33x frame re-emission rather than spatial structure (hazard 3) | Med | **High** | Phase 6.4 predicts centre-vs-periphery; a uniform shift is the failure signature and halts the work |
 | Merging nine untested call sites regresses a GUI view | Med | Med | Characterization tests written **before** the merge (2.1); merge is behaviour-neutral by construction |
 | `sum(w)` near zero amplifies noise on a barely-grazed vertex | Med | Med | Explicit raise on `sum(w) == 0`; `n_eff` emitted so thin evidence is visible rather than rendered as an ordinary value |
-| Upstream nearest-vertex assignment is approximate, and weighting amplifies mis-assignment | Med | Med | Document that per-vertex attribution remains approximate at the nearest-neighbour tolerance. Not fixed here — the two KDTree sites are out of scope |
+| Upstream nearest-vertex assignment is approximate, and weighting amplifies mis-assignment | Med | Med | **Fixed for the playback path** in 2.5.5: `vertex_id` comes off the sidecar row, so attribution there is exact rather than nearest-neighbour. The two *other* KDTree sites (`rf_explorer_data.py:345`, `touch_population_data.py:686`) remain out of scope and still approximate; 2.5.7 records how far the corrected map moved |
 | New GUI option breaks the task detail panel render | Low | Low | 5.4 adds the key to `_OPTION_GROUP_OF`; manual verification covers it |
 
 ---
@@ -514,13 +681,16 @@ exists.
 |---|---|---|
 | 1 — Land the loader | Small (already built) | None |
 | 2 — Merge nine accumulators | **Large** (9 sites, 0 existing tests) | None |
-| 3 — Carry depth to the estimator | **Large** (cache schema + alignment) | Phase 1 |
+| 2.5 — Source vertex identity from the sidecar | **Large** (upstream column restore, join rewrite, baseline re-pin) | Phases 1, 2 |
+| 3 — Carry depth to the estimator | Medium (cache schema only — the join moved to 2.5) | Phases 1, 2.5 |
 | 4 — Apply the weighting | Small (the maths is three lines) | Phases 2, 3 |
 | 5 — Config, provenance, GUI | Small | Phase 4 |
 | 6 — Prove it, then break it | Medium | Phase 5 |
 
 The weighting itself is the smallest phase in the plan. The cost is the plumbing and the fact that
-nothing here was ever tested.
+nothing here was ever tested. Phase 2.5 is new cost, not moved cost: it fixes a wrong vertex
+assignment that the original Phase 3 assumed away, and it changes the output maps on its own, before
+any weighting exists.
 
 ---
 
