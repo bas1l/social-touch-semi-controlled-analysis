@@ -7,21 +7,34 @@ using the same pattern as the Touch Playback Explorer, and saves two sparse
 mean IFF) and ``single_touch_rf_maps_max.npz`` (per-vertex max IFF). Both
 accumulators run in a single pass for efficiency.
 
+The **mean is depth-weighted**: each contact point is credited in proportion to
+how fully it was pressed relative to the deepest point of its own frame, raised
+to ``depth_weight_alpha``. The **max is not weighted**, because a weighted
+maximum has no meaning. ``depth_weight_alpha = 0`` reproduces the unweighted
+maps exactly, through the same code path with every weight equal to ``1.0``.
+Both ``.npz`` files also carry the confidence channel — per-vertex ``weight_sum``
+and Kish ``n_eff`` — which display code consumes and which never alters the
+estimate.
+
 Depends on: ``touch_prepare_sessions`` (reads ``<session>_prepared.csv``).
 """
 
 import json
 import logging
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, NamedTuple, Optional, Tuple
 
 import numpy as np
 
 from analysis.receptive_field_mapping.data.rf_data_loader import resolve_forearm_ply
+from analysis.receptive_field_mapping.data.contact_depth_field_io import (
+    penetration_from_signed_mm,
+)
 from analysis.receptive_field_mapping.data.vertex_accumulator import (
     accumulate_vertex_values_into,
     empty_accumulator,
 )
+from analysis.receptive_field_mapping.data.vertex_weights import vertex_weights
 from analysis.receptive_field_mapping.data.touch_playback_data import (
     PlaybackData,
     TouchEvent,
@@ -39,28 +52,57 @@ logger = logging.getLogger(__name__)
 _VALID_NEURON_MODES = NEURON_MODES  # re-exported for backward compatibility
 
 
+class TouchRFMaps(NamedTuple):
+    """One touch's per-vertex results: two estimates and their confidence channel.
+
+    All four lists cover the **same vertices, in the same order**, so they can be
+    zipped positionally. The confidence channel describes the evidence behind
+    ``mean_pairs``; it never modifies it.
+    """
+
+    mean_pairs: List[Tuple[int, float]]
+    max_pairs: List[Tuple[int, float]]
+    weight_sum_pairs: List[Tuple[int, float]]
+    n_eff_pairs: List[Tuple[int, float]]
+
+
 def _compute_touch_rf(
     touch: TouchEvent,
     n_vertices: int,
     neuron_mode: str,
-) -> Tuple[List[Tuple[int, float]], List[Tuple[int, float]]]:
-    """Compute mean and max RF maps for a single touch event.
+    depth_weight_alpha: float,
+) -> TouchRFMaps:
+    """Compute depth-weighted mean and unweighted max RF maps for one touch event.
 
-    Accumulates per-vertex neuron values through the shared reduction in
-    ``data.vertex_accumulator`` (sum for the mean, running max for the max),
-    and returns only vertices that were contacted at least once as
-    ``(vertex_idx, value)`` pairs.
+    The mean is a **weighted mean**::
 
-    Every contact point currently carries weight ``1.0``: a frame's neuron
-    value is credited in full to every vertex it touched, however deeply. The
-    weights are passed explicitly rather than assumed so that the reduction has
-    no notion of an "unweighted" default.
+        value[v] = sum_frames(w * neuron_value) / sum_frames(w)
 
-    ``touch.frame_vertex_indices`` now holds the ``vertex_id`` recorded by the
+    where ``w`` is how fully vertex ``v`` was pressed relative to the deepest
+    point of that same frame (see ``data.vertex_weights``). The denominator is
+    the **weight sum**, never the frame count: dividing by the count would leave
+    the weight in the answer as a scale factor and the number would stop being a
+    firing rate. A vertex touched three times at 100 Hz must report 100 Hz
+    whatever its weights were.
+
+    The max is **unweighted**, deliberately and permanently. A weighted maximum
+    has no meaning — scaling a sample by ``w`` does not make it "less of a
+    maximum", it makes it a different number in different units. The max map
+    answers "what is the strongest response ever seen at this vertex", which is
+    a statement about the observed values themselves. The mean map is weighted;
+    the max map is not; that inconsistency is intentional rather than an
+    oversight, which is why it is written here.
+
+    ``depth_weight_alpha = 0`` reproduces the unweighted behaviour **exactly**,
+    because every weight is then exactly ``1.0`` and this same code path runs.
+    There is no ``if alpha == 0`` branch: a branch would test the old code
+    instead of proving that the new code reduces to it.
+
+    ``touch.frame_vertex_indices`` holds the ``vertex_id`` recorded by the
     contact-depth-field sidecar for each contact point, not a nearest-vertex
-    answer computed here. Credit therefore lands on the vertex the producing
-    pipeline measured, which is a different vertex from the one the retired
-    KDTree picked at patch boundaries.
+    answer computed here, and ``touch.frame_depths`` holds ``signed_depth_mm``
+    off the same rows — negative = penetrating. The sign is flipped once, by
+    ``penetration_from_signed_mm``.
 
     Parameters
     ----------
@@ -70,12 +112,23 @@ def _compute_touch_rf(
         Total number of vertices in the forearm PLY mesh (for accumulator size).
     neuron_mode:
         ``"iff"`` → use ``frame_iff``; ``"spike"`` → use ``frame_spikes``.
+    depth_weight_alpha:
+        Depth-weighting exponent, **required** — there is no default at any
+        level, so an un-passed alpha is a ``TypeError`` rather than a silent
+        ``1.0``.
 
     Returns
     -------
-    Tuple of ``(mean_pairs, max_pairs)``, each a list of
-    ``(vertex_idx, value)`` pairs for all contacted vertices with valid data.
-    Vertices where all frames are NaN are excluded from both lists.
+    ``TouchRFMaps`` — mean, max, ``weight_sum`` and Kish ``n_eff`` as
+    ``(vertex_idx, value)`` pairs over the same vertices in the same order.
+    Vertices where all frames are NaN are excluded from all four lists.
+
+    Raises
+    ------
+    ValueError
+        A frame's depth array does not align with its vertex array; a frame is
+        entirely grazing (``d_max == 0``, raised by ``vertex_weights``); or a
+        contacted vertex ends with ``sum(w) == 0``.
     """
     accum = empty_accumulator(n_vertices)
 
@@ -90,44 +143,103 @@ def _compute_touch_rf(
             f"Expected one of {_VALID_NEURON_MODES}."
         )
 
+    touched: List[np.ndarray] = []
     for fi in range(n_frames):
         verts = touch.frame_vertex_indices[fi]
         if len(verts) == 0:
             continue
-        accumulate_vertex_values_into(
-            accum,
-            verts,
-            neuron_values[fi],
-            np.ones(len(verts), dtype=np.float64),
-        )
+        signed_depths = touch.frame_depths[fi]
+        if len(signed_depths) != len(verts):
+            raise ValueError(
+                f"_compute_touch_rf: touch {_touch_label(touch)} frame {fi} has "
+                f"{len(verts)} contact points but {len(signed_depths)} depths. "
+                f"Both are read off the same sidecar rows in the same loop, so a "
+                f"mismatch means the two channels have desynchronised upstream."
+            )
+        try:
+            weights = vertex_weights(
+                penetration_from_signed_mm(signed_depths), depth_weight_alpha
+            )
+        except ValueError as exc:
+            raise ValueError(
+                f"_compute_touch_rf: touch {_touch_label(touch)} frame {fi} "
+                f"(vertices {np.asarray(verts).tolist()}): {exc}"
+            ) from exc
+        # ``neuron_values[fi]`` is a scalar — a frame has exactly one
+        # instantaneous firing frequency however many vertices it touched. The
+        # accumulator broadcasts it across the frame and multiplies by the
+        # per-point weights, so the credited product is a ``(K_i,)`` array.
+        accumulate_vertex_values_into(accum, verts, neuron_values[fi], weights)
+        touched.append(np.asarray(verts))
 
     val_sum = accum.value_sum
     val_max = accum.value_max
-    contact_count = accum.weight_sum
+    weight_sum = accum.weight_sum
+    weight_sq_sum = accum.weight_sq_sum
 
-    contacted_mask = contact_count > 0
-    if not contacted_mask.any():
-        return [], []
+    if not touched:
+        return TouchRFMaps([], [], [], [])
 
-    contacted_indices = np.where(contacted_mask)[0]
-    mean_values = val_sum[contacted_indices] / contact_count[contacted_indices]
+    # The contacted set comes from the vertex lists, not from ``weight_sum > 0``.
+    # Those two agree at alpha = 0 but part company above it: a vertex that was
+    # genuinely contacted, but only ever grazingly, accumulates zero total weight.
+    # That is a 0/0 in the estimator and it must raise rather than reach the map
+    # as NaN — and it must be distinguishable from a vertex that was simply never
+    # touched, which is not an error at all.
+    contacted_indices = np.unique(np.concatenate(touched))
+
+    starved = contacted_indices[weight_sum[contacted_indices] <= 0.0]
+    if starved.size:
+        raise ValueError(
+            f"_compute_touch_rf: touch {_touch_label(touch)}: vertex/vertices "
+            f"{starved.tolist()[:10]} were contacted but accumulated a total "
+            f"weight of 0 at depth_weight_alpha={depth_weight_alpha!r}, so their "
+            f"weighted mean is 0/0. Every frame that touched them was grazing. "
+            f"There is no fallback to the unweighted mean: that would silently "
+            f"mix two different estimators in one map."
+        )
+
+    mean_values = val_sum[contacted_indices] / weight_sum[contacted_indices]
     max_values = val_max[contacted_indices]
+    weight_sum_values = weight_sum[contacted_indices]
+    # Kish effective sample size. Well defined wherever ``weight_sum > 0``,
+    # because a positive weight has a positive square. Flat weights give
+    # ``n_eff`` equal to the number of contributing frames however small those
+    # weights are — being shallow costs no evidence, only being *inconsistently*
+    # shallow does.
+    n_eff_values = (weight_sum_values * weight_sum_values) / weight_sq_sum[contacted_indices]
 
     # Drop vertices whose mean is NaN. NaN propagates through ``np.add.at`` once
     # any frame's ``neuron_values`` is NaN (e.g. unit not held during the touch
     # window — see ST13-03 blocks 5–8). Keeping NaN pairs would yield invisible
     # heatmaps but a non-zero vertex count, masking the "no neural data" state.
     # The same NaN mask is applied to max values: if mean is NaN then all frames
-    # at that vertex were NaN, so max is also meaningless.
+    # at that vertex were NaN, so max is also meaningless. The confidence channel
+    # is masked with it too, so all four lists stay vertex-aligned.
     valid = ~np.isnan(mean_values)
     if not valid.any():
-        return [], []
+        return TouchRFMaps([], [], [], [])
     contacted_indices = contacted_indices[valid]
     mean_values = mean_values[valid]
     max_values = max_values[valid]
-    mean_pairs = [(int(idx), float(val)) for idx, val in zip(contacted_indices, mean_values)]
-    max_pairs = [(int(idx), float(val)) for idx, val in zip(contacted_indices, max_values)]
-    return mean_pairs, max_pairs
+    weight_sum_values = weight_sum_values[valid]
+    n_eff_values = n_eff_values[valid]
+    return TouchRFMaps(
+        mean_pairs=[(int(i), float(v)) for i, v in zip(contacted_indices, mean_values)],
+        max_pairs=[(int(i), float(v)) for i, v in zip(contacted_indices, max_values)],
+        weight_sum_pairs=[
+            (int(i), float(v)) for i, v in zip(contacted_indices, weight_sum_values)
+        ],
+        n_eff_pairs=[(int(i), float(v)) for i, v in zip(contacted_indices, n_eff_values)],
+    )
+
+
+def _touch_label(touch: TouchEvent) -> str:
+    """Identify a touch in an error message: block / trial / single-touch id."""
+    return (
+        f"block={touch.block_order_id!r} trial={touch.trial_id!r} "
+        f"single_touch={touch.single_touch_id!r}"
+    )
 
 
 # Config keys that say where a session's contact-depth-field sidecars live. Both are
@@ -171,6 +283,7 @@ def _require_depth_field_config(contact_depth_field: Optional[dict]) -> Tuple[st
 def run_single_touch_rf_mapping(
     input_items: List[Tuple[Path, Path]],
     output_dir: Path,
+    depth_weight_alpha: float,
     force: bool = False,
     neuron_mode: str = "iff",
     preparation_dir: Optional[Path] = None,
@@ -194,6 +307,11 @@ def run_single_touch_rf_mapping(
     output_dir:
         Root output directory.  Session results go under
         ``output_dir / <session_id> /``.
+    depth_weight_alpha:
+        Depth-weighting exponent handed to ``vertex_weights``.  **Required and
+        positional** — no level of this call chain supplies a default, so an
+        un-passed alpha is a ``TypeError`` rather than a silently-assumed value.
+        ``0.0`` reproduces the unweighted maps exactly.
     force:
         If ``True``, reprocess even if outputs are up-to-date.
     neuron_mode:
@@ -297,6 +415,8 @@ def run_single_touch_rf_mapping(
         touch_id_map: dict = {}
         rf_data_mean: dict = {}
         rf_data_max: dict = {}
+        rf_weight_sum: dict = {}
+        rf_n_eff: dict = {}
         incremental_id = 0
         total_touches = 0
 
@@ -305,9 +425,13 @@ def run_single_touch_rf_mapping(
                 for touch in playback.touches_by_block_trial[(block_id, trial_id)]:
                     key = (touch.block_order_id, touch.trial_id, touch.single_touch_id)
                     touch_id_map[key] = incremental_id
-                    mean_pairs, max_pairs = _compute_touch_rf(touch, n_vertices, neuron_mode)
-                    rf_data_mean[incremental_id] = mean_pairs
-                    rf_data_max[incremental_id] = max_pairs
+                    maps = _compute_touch_rf(
+                        touch, n_vertices, neuron_mode, depth_weight_alpha
+                    )
+                    rf_data_mean[incremental_id] = maps.mean_pairs
+                    rf_data_max[incremental_id] = maps.max_pairs
+                    rf_weight_sum[incremental_id] = maps.weight_sum_pairs
+                    rf_n_eff[incremental_id] = maps.n_eff_pairs
                     incremental_id += 1
                     total_touches += 1
 
@@ -320,11 +444,20 @@ def run_single_touch_rf_mapping(
         session_out.mkdir(parents=True, exist_ok=True)
         for iff_metric, rf_data in (('mean', rf_data_mean), ('max', rf_data_max)):
             npz_path = session_out / single_touch_npz_filename(iff_metric)
+            # ``rf_weight_sum`` / ``rf_n_eff`` are the confidence channel: they
+            # describe the evidence behind each estimate and never modify it.
+            # They are vertex-aligned with this file's own ``rf_data``, so a
+            # viewer can dim thin-evidence vertices on whichever map it draws.
+            # ``depth_weight_alpha`` travels with them because a weight sum is
+            # uninterpretable without the exponent that produced it.
             np.savez(
                 npz_path,
                 touch_id_map=touch_id_map,
                 rf_data=rf_data,
                 neuron_mode=neuron_mode,
+                rf_weight_sum=rf_weight_sum,
+                rf_n_eff=rf_n_eff,
+                depth_weight_alpha=depth_weight_alpha,
             )
             print(f"[Single-Touch RF] {session_id}: saved -> {npz_path.name}")
         produced.append(mean_npz_path)

@@ -444,7 +444,33 @@ def penetration_mm(frames: pd.DataFrame) -> np.ndarray:
             f"penetration_mm: frames has no {SIGNED_DEPTH_COLUMN!r} column; got "
             f"{list(frames.columns)}"
         )
-    return -frames[SIGNED_DEPTH_COLUMN].to_numpy()
+    return penetration_from_signed_mm(frames[SIGNED_DEPTH_COLUMN].to_numpy())
+
+
+def penetration_from_signed_mm(signed_depth_mm: np.ndarray) -> np.ndarray:
+    """Return the positive penetration magnitude of an already-extracted column.
+
+    Same conversion as :func:`penetration_mm`, for callers that hold the signed
+    values as a plain array rather than as a ``DataFrame`` — the per-frame depth
+    arrays on ``TouchEvent.frame_depths``, which the depth-weighting estimator walks
+    one frame at a time and which never become a ``DataFrame``.
+
+    This exists so that the negation is written **once** in the codebase. Wrapping
+    each frame's array in a throwaway ``DataFrame`` just to reach
+    :func:`penetration_mm` would be the alternative, and spelling ``-x`` a second
+    time in the consumer would be the other; the first is wasteful in a hot loop and
+    the second is how a sign convention drifts. :func:`penetration_mm` delegates
+    here, so there is exactly one ``-`` and both entry points cannot disagree.
+
+    Raises ``ValueError`` when *signed_depth_mm* is not a real-valued array.
+    """
+    signed = np.asarray(signed_depth_mm)
+    if signed.dtype.kind not in ("f", "i", "u"):
+        raise ValueError(
+            f"penetration_from_signed_mm: expected a real-valued array of signed "
+            f"millimetres, got dtype {signed.dtype}."
+        )
+    return -signed.astype(np.float64, copy=False)
 
 
 # ---------------------------------------------------------------------------

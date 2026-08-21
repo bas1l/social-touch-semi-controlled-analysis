@@ -223,7 +223,9 @@ class TestSite1SingleTouchPipeline:
     @pytest.mark.parametrize("neuron_mode", ["iff", "spike"])
     def test_matches_pre_merge(self, name, make_touch, n_verts, neuron_mode):
         touch = make_touch()
-        got_mean, got_max = _compute_touch_rf(touch, n_verts, neuron_mode)
+        # alpha = 0 is the baseline: every weight is exactly 1.0 and the
+        # weighted code path must reproduce the pre-merge arrays byte for byte.
+        got_mean, got_max, _, _ = _compute_touch_rf(touch, n_verts, neuron_mode, 0.0)
         want_mean, want_max = _legacy_compute_touch_rf(touch, n_verts, neuron_mode)
         _assert_exactly_equal(f"{name}/{neuron_mode} mean_pairs", got_mean, want_mean)
         _assert_exactly_equal(f"{name}/{neuron_mode} max_pairs", got_max, want_max)
@@ -236,9 +238,12 @@ class TestSite1SingleTouchPipeline:
         peak is the whole reason depth weighting is being added, so it is
         pinned here as the thing the change is expected to move.
         """
-        mean_pairs, _ = _compute_touch_rf(
-            fixtures.worked_example_touch(), fixtures.WORKED_EXAMPLE_N_VERTICES, "iff"
-        )
+        mean_pairs = _compute_touch_rf(
+            fixtures.worked_example_touch(),
+            fixtures.WORKED_EXAMPLE_N_VERTICES,
+            "iff",
+            0.0,
+        ).mean_pairs
         got = dict(mean_pairs)
         assert got[0] == 50.0                      # v1, one frame at 50 Hz
         assert got[1] == 75.0                      # v2, flank -> today's peak

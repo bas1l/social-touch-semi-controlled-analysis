@@ -614,7 +614,8 @@ class TestMagnitudeOfTheVertexReassignment:
         touch = data.touches_by_block_trial[("1", 1)][0]
         n_vertices = len(data.session_data.forearm_vertices)
 
-        new_mean, _ = _compute_touch_rf(touch, n_vertices, "iff")
+        # alpha = 0 — this test is about vertex identity, not weighting.
+        new_mean = _compute_touch_rf(touch, n_vertices, "iff", 0.0).mean_pairs
         new_vertices = sorted(idx for idx, _ in new_mean)
         assert new_vertices == [20, 21, 22]
 
@@ -638,7 +639,7 @@ class TestMagnitudeOfTheVertexReassignment:
             frame_spikes=touch.frame_spikes,
             frame_iff=touch.frame_iff,
         )
-        old_mean, _ = _compute_touch_rf(old_touch, n_vertices, "iff")
+        old_mean = _compute_touch_rf(old_touch, n_vertices, "iff", 0.0).mean_pairs
         old_vertices = sorted(idx for idx, _ in old_mean)
         assert old_vertices == [0, 1, 2]
 

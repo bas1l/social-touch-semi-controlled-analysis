@@ -434,6 +434,8 @@ def spatial_map_single_touch_flow(
     neuron_mode: str = "iff",
     preparation_dir: Optional[Path] = None,
     contact_depth_field: Optional[dict] = None,
+    *,
+    depth_weight_alpha: float,
 ) -> List[Path]:
     """Per-touch RF mapping: accumulate per-vertex neuron values for every single touch.
 
@@ -441,6 +443,11 @@ def spatial_map_single_touch_flow(
     ``load_playback_data()``, accumulates IFF or spike values per forearm vertex
     for each touch event, and saves results as a sparse ``.npz`` file.
     Output: ``4_analysed/spatial_map_single_touch/<session_id>/``
+
+    ``depth_weight_alpha`` is **keyword-only and required**: it is the exponent of
+    the per-contact-point depth weighting and there is no default at any level of
+    the call chain, so a missing value is a ``TypeError`` here rather than a
+    silently-assumed ``1.0`` inside the estimator.
     """
     print(f"[Batch Analysis] Running single-touch RF mapping for {len(input_items)} item(s)...")
     if not input_items:
@@ -453,6 +460,7 @@ def spatial_map_single_touch_flow(
         neuron_mode=neuron_mode,
         preparation_dir=preparation_dir,
         contact_depth_field=contact_depth_field,
+        depth_weight_alpha=depth_weight_alpha,
     )
 
 

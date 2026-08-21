@@ -102,7 +102,7 @@ the viewer windows draw a different map from the one written to disk.
 - [ ] `weight_sum` and `n_eff` are emitted per vertex and present in the saved artifacts.
 - [ ] `depth_weight_alpha` appears in `single_touch_rf_summary.json`, so a config change invalidates
       the stage and two runs are distinguishable on disk.
-- [ ] Calling the estimator without `alpha` raises `TypeError`. There is no default value anywhere.
+- [x] Calling the estimator without `alpha` raises `TypeError`. There is no default value anywhere.
 - [ ] The diagnostic reports per-vertex weight variation for one session and states whether the
       feature can have any effect at all on that data.
 
@@ -610,27 +610,125 @@ storage and validation.
 **Dependencies:** Phases 1, 2.5.
 
 ### Phase 4: Apply the weighting
+**Started:** 2026-08-21
+**Completed:** 2026-08-21
+
 **Goal:** The estimator becomes a weighted mean, with every degenerate case raising.
 
-- [ ] 4.1 — Create `data/vertex_weights.py`:
-      `vertex_weights(depth_mm: np.ndarray, alpha: float) -> np.ndarray`. Clamp negatives
+- [x] 4.1 — Create `data/vertex_weights.py`:
+      `vertex_weights(penetration_mm: np.ndarray, alpha: float) -> np.ndarray`. Clamp negatives
       (grazing) to 0, divide by the frame max, then raise to `alpha`. **Normalise before the
       exponent.** `alpha` is positional and required.
-- [ ] 4.2 — Guard `d_max == 0` with an explicit raise. Do **not** rely on `NaN ** 0 == 1.0`.
-- [ ] 4.3 — Rename `contact_count` to `weight_sum` in `_compute_touch_rf` (`:66`, `:87-92`).
-- [ ] 4.4 — Pass real weights into the shared accumulator. `neuron_values[fi]` is currently a
+- [x] 4.2 — Guard `d_max == 0` with an explicit raise. Do **not** rely on `NaN ** 0 == 1.0`.
+- [x] 4.3 — Rename `contact_count` to `weight_sum` in `_compute_touch_rf` (`:66`, `:87-92`).
+- [x] 4.4 — Pass real weights into the shared accumulator. `neuron_values[fi]` is currently a
       **scalar** broadcast over the frame's vertices; with weights it becomes a `(K_i,)` array.
-- [ ] 4.5 — Guard `sum(w) == 0` per vertex with an explicit policy and raise. Never `0/0 -> NaN`
+- [x] 4.5 — Guard `sum(w) == 0` per vertex with an explicit policy and raise. Never `0/0 -> NaN`
       into the map, and never fall back to the uniform mean.
-- [ ] 4.6 — Leave `val_max` unweighted; document why in the docstring.
-- [ ] 4.7 — Emit `weight_sum` and `n_eff = (sum w)^2 / sum(w^2)` per vertex into the returned
+- [x] 4.6 — Leave `val_max` unweighted; document why in the docstring.
+- [x] 4.7 — Emit `weight_sum` and `n_eff = (sum w)^2 / sum(w^2)` per vertex into the returned
       structure and the saved `.npz`.
+
+**Implementation notes (2026-08-21)**
+
+- **The argument is named `penetration_mm`, not `depth_mm`.** The plan wrote `depth_mm`,
+  which does not say which sign convention it wants — and the sign is the single thing a
+  depth-weighting bug is most likely to get wrong. The parameter name now states it:
+  positive means pressed *into* the skin. Feeding the stored `signed_depth_mm` straight
+  in makes every point clamp to zero and trips the `d_max == 0` guard, so the mistake is
+  an exception rather than a map with the peak on the shallowest vertex
+  (`TestSignConvention::test_forgetting_the_negation_would_be_caught_not_absorbed`).
+- **`penetration_from_signed_mm()` added to `contact_depth_field_io.py`** — outside the
+  file list this phase declared, and deliberately so. `penetration_mm(frames)` takes a
+  `DataFrame`; `TouchEvent.frame_depths` is a plain array walked one frame at a time in a
+  hot loop. The two alternatives were wrapping every frame in a throwaway `DataFrame`
+  (wasteful) or spelling the negation a second time in the estimator (which is how a sign
+  convention drifts). Instead `penetration_mm` now delegates to the new array-level
+  function, so there is still **exactly one negation in the codebase** and the two entry
+  points cannot disagree. Output is bit-identical: the column is already float64.
+- **`_compute_touch_rf` returns a `TouchRFMaps` NamedTuple**, not a 2-tuple —
+  `(mean_pairs, max_pairs, weight_sum_pairs, n_eff_pairs)`, all four covering the same
+  vertices in the same order, including through the NaN-mean filter. Seven existing call
+  sites were updated to unpack it and to pass an explicit `alpha`
+  (`tests/test_vertex_accumulator.py` x3, `tests/test_touch_playback_vertex_source.py` x2,
+  `scripts/diagnose_vertex_reassignment.py` x2 — all `0.0`, because those tests pin the
+  *reduction* and the *vertex assignment*, neither of which may move under weighting).
+  That the Phase 2 characterization tests still pass by `np.array_equal` while running the
+  weighted code path is Success Criterion 1's claim, arriving early for the pipeline site.
+- **The contacted set is taken from the vertex lists, not from `weight_sum > 0`.** Those
+  two agree at `alpha = 0` and part company above it, and 4.5 depends on the difference:
+  *never contacted* and *contacted but weightless* both leave `weight_sum == 0`, and only
+  the second is an error. Reading the contacted set off `np.unique(concatenate(...))`
+  keeps them separable and is identical to `np.where(weight_sum > 0)[0]` at `alpha = 0`,
+  so parity is unaffected.
+- **`alpha < 0` raises.** Not asked for by the plan, but a negative exponent inverts the
+  meaning of the weight (it would credit the *shallowest* contact most) and sends a
+  clamped grazing point to infinity. Alpha must also be finite and a real number; `bool`
+  is rejected.
+- **No `if alpha == 0` branch, asserted on the source text.**
+  `TestNoAlphaZeroBranch::test_the_source_contains_no_alpha_equality_branch` greps
+  `inspect.getsource`. That is a structural claim no numeric test can make — a branch
+  returning ones is numerically indistinguishable from the arithmetic that produces them —
+  and it is what keeps the Phase 6 parity test from becoming vacuous.
+- **The plan's worked-example table is right about the weights and wrong about one mean.**
+  Reproduced on the committed fixture depths at `alpha = 1`:
+
+  | vertex | today | plan says | actual | n_eff |
+  |---|---|---|---|---|
+  | v1 | 50.000 | 50.0 | 50.000 | 1.000 |
+  | v2 | **75.000 <- old peak** | 65.9 | 65.986 | 1.770 |
+  | v3 | 63.333 | 73.5 | **73.438 <- new peak** | 2.584 |
+  | v4 | 70.000 | 57.1 | 57.143 | 1.690 |
+  | v5 | 40.000 | 40.0 | 40.000 | 1.000 |
+  | v6 always shallow | 63.333 | 65.8 | **65.278** | 2.959 |
+  | v7 always deep | 63.333 | 63.3 | 63.214 | 2.999 |
+
+  The peak moves from v2 to v3 as claimed, and six of seven values match the plan to its
+  own rounding. **v6 is 65.278, not 65.8.** The plan's figure does not follow from the
+  plan's own weight table: `(0.13*50 + 0.13*100 + 0.10*40) / 0.36 = 65.2778`. That the
+  weights themselves are correct is confirmed independently by `n_eff`, which comes out at
+  2.959 — the 2.96 the plan quotes for v6. The stale number is the mean, not the weight.
+- **The Testing Plan's "v6 and v7 both within 1e-9 of their unweighted values" is not
+  achievable and was not implemented as written.** Both vertices are unweighted at
+  63.333; weighted, v6 is 65.278 (1.94 Hz away) and v7 is 63.214 (0.12 Hz away). 1e-9
+  would require the weights to be *exactly* flat, which the fixture's depths are not — and
+  if they were, the test would prove nothing. The claim that is actually true, and is what
+  the test asserts, is the *contrast*: v6 and v7 move by 1.94 and 0.12 Hz while v3 moves by
+  10.10 Hz, factors of 5 and 80. Every value is additionally pinned to its hand-computed
+  closed form at `rtol=1e-12`. Success Criterion 2's wording ("approximately their
+  unweighted values") is the accurate one; the Testing Plan line should be read against it.
+- **`depth_weight_alpha` is required at every level and has no default anywhere**, so the
+  DAG stage cannot run until 5.2 registers the parameter. `spatial_map_single_touch_flow`
+  takes it as **keyword-only and required** — a caller-side change made here rather than in
+  Phase 5, because leaving the flow calling a now-required argument without it would have
+  been dead code the moment it was written. Nothing in `configs/` was touched.
+- **`.npz` gains three keys**, in both the mean and the max file: `rf_weight_sum`,
+  `rf_n_eff` (vertex-aligned with that file's own `rf_data`) and `depth_weight_alpha`
+  (a weight sum is uninterpretable without the exponent that produced it). Recording alpha
+  in `single_touch_rf_summary.json`, which is what makes a config change *invalidate* the
+  stage, is 5.5 and was left there.
+- **`scripts/generate_rf_single_touch_detail.py` was not updated and is now stale.** It
+  re-implements the mean branch of `_compute_touch_rf` inline (`:128`, sum / count / mean)
+  rather than calling it, so its figures show the **unweighted** map. It was not one of the
+  nine call sites Phase 2 merged, and wiring it needs an `alpha` source it does not have
+  until Phase 5. It must either take `--depth-weight-alpha` in Phase 5 or delegate to
+  `_compute_touch_rf`; until then its output disagrees with the saved `.npz`, which is
+  exactly the failure mode the nine-site merge existed to prevent.
 
 **Files Modified:**
 - `src/analysis/receptive_field_mapping/data/vertex_weights.py` — new
-- `src/analysis/receptive_field_mapping/pipelines/rf_single_touch_pipeline.py` — `:38-42`, `:64-66`,
-  `:79-109`, `:224`, `:239-244`
-- `tests/test_vertex_weights.py` — new
+- `src/analysis/receptive_field_mapping/data/contact_depth_field_io.py` —
+  `penetration_from_signed_mm()`; `penetration_mm()` delegates to it
+- `src/analysis/receptive_field_mapping/data/__init__.py` — re-exports
+- `src/analysis/receptive_field_mapping/pipelines/rf_single_touch_pipeline.py` —
+  `TouchRFMaps`, `_touch_label`, weighted `_compute_touch_rf`, `depth_weight_alpha`
+  threaded through `run_single_touch_rf_mapping`, three new `.npz` keys
+- `scripts/analysis_workflow_processing.py` — `depth_weight_alpha` keyword-only on
+  `spatial_map_single_touch_flow` (caller pass-through only; no config)
+- `scripts/diagnose_vertex_reassignment.py` — explicit `alpha=0.0`, new return type
+- `tests/test_vertex_weights.py` — new, 122 tests
+- `tests/test_vertex_accumulator.py`, `tests/test_touch_playback_vertex_source.py` —
+  explicit `alpha=0.0`, new return type
 
 **Dependencies:** Phases 2, 3.
 
@@ -688,22 +786,27 @@ storage and validation.
 ## Testing Plan
 
 ### Unit Tests
-- [ ] `vertex_weights`: `alpha=0` gives all ones, including for clamped grazing vertices.
-- [ ] `vertex_weights`: `alpha=1` on depths `0.2, 0.8, 1.5, 0.7, 0.1` gives
+- [x] `vertex_weights`: `alpha=0` gives all ones, including for clamped grazing vertices.
+- [x] `vertex_weights`: `alpha=1` on depths `0.2, 0.8, 1.5, 0.7, 0.1` gives
       `0.13, 0.53, 1.0, 0.47, 0.07`.
-- [ ] `vertex_weights`: deepest vertex always receives exactly `1.0`, every alpha.
-- [ ] `vertex_weights`: scale invariance — doubling every depth leaves weights unchanged.
-- [ ] `vertex_weights`: `d_max == 0` raises; NaN depth raises. Neither returns a value.
-- [ ] `vertex_weights`: negative (grazing) depths clamp to 0 and never subtract from `sum(w)`.
-- [ ] Accumulator: hand-computed weighted mean, not a self-comparison — a wrong weighting still
+- [x] `vertex_weights`: deepest vertex always receives exactly `1.0`, every alpha.
+- [x] `vertex_weights`: scale invariance — doubling every depth leaves weights unchanged.
+- [x] `vertex_weights`: `d_max == 0` raises; NaN depth raises. Neither returns a value.
+- [x] `vertex_weights`: negative (grazing) depths clamp to 0 and never subtract from `sum(w)`.
+- [x] Accumulator: hand-computed weighted mean, not a self-comparison — a wrong weighting still
       returns a plausible Hz value.
-- [ ] Accumulator: `sum(w) == 0` for a vertex raises.
-- [ ] `n_eff`: flat weights give `n_eff` approximately `N`; one dominant frame gives `n_eff`
+- [x] Accumulator: `sum(w) == 0` for a vertex raises.
+- [x] `n_eff`: flat weights give `n_eff` approximately `N`; one dominant frame gives `n_eff`
       approximately 1.
 
 ### Integration Tests
-- [ ] The full 7-vertex / 3-frame fixture end to end: peak moves from v2 to v3; v1 and v5 unchanged;
-      **v6 (always shallow) and v7 (always deep) both within 1e-9 of their unweighted values.**
+- [x] The full 7-vertex / 3-frame fixture end to end: peak moves from v2 to v3; v1 and v5 unchanged;
+      v6 (always shallow) and v7 (always deep) both close to their unweighted values.
+      **Amended (Phase 4):** "within 1e-9" is not achievable and was not implemented as written —
+      v6 moves 1.94 Hz and v7 0.12 Hz, against v3's 10.10 Hz. The tested claim is the *contrast*
+      (factors of 5 and 80) plus every value pinned to its hand-computed closed form at
+      `rtol=1e-12`. Success Criterion 2's "approximately their unweighted values" is the
+      accurate wording.
 - [ ] `alpha=0` byte-identical to the **Phase 2.5 re-pinned** baseline through the whole pipeline.
 - [ ] Vertex identity comes from the sidecar: a synthetic frame whose sidecar `vertex_id` differs
       from the nearest-vertex answer resolves to the **sidecar's** value.
@@ -723,10 +826,10 @@ storage and validation.
       stage.
 
 ### Edge Cases
-- [ ] A frame where every vertex is grazing (`d_max = 0`) raises with frame context.
-- [ ] A vertex contacted in exactly one frame gives a value identical to today, any alpha (the
+- [x] A frame where every vertex is grazing (`d_max = 0`) raises with frame context.
+- [x] A vertex contacted in exactly one frame gives a value identical to today, any alpha (the
       weight cancels).
-- [ ] All-identical depths across a patch gives weights all 1.0 and output identical to today.
+- [x] All-identical depths across a patch gives weights all 1.0 and output identical to today.
 - [x] Duplicate `(frame_index, vertex_id)` in a frame raises (assert, do not reduce).
 - [ ] A frame whose parsed contact-point count differs from its sidecar row count raises with the
       parquet path, the `frame_index`, and both counts (2.5.6).

@@ -136,8 +136,15 @@ def main() -> None:
                     changed_here += int(np.count_nonzero(new_idx != old_idx))
                 n_points_changed += changed_here
 
-                new_mean, _ = _compute_touch_rf(touch, n_vertices, args.neuron_mode)
-                old_mean, _ = _compute_touch_rf(old_touch, n_vertices, args.neuron_mode)
+                # alpha = 0: this script measures the *vertex reassignment* and
+                # nothing else, so the estimator must stay the unweighted one.
+                # Any depth weighting here would mix two effects in one number.
+                new_mean = _compute_touch_rf(
+                    touch, n_vertices, args.neuron_mode, 0.0
+                ).mean_pairs
+                old_mean = _compute_touch_rf(
+                    old_touch, n_vertices, args.neuron_mode, 0.0
+                ).mean_pairs
                 new_dense = _dense(new_mean, n_vertices)
                 old_dense = _dense(old_mean, n_vertices)
 

@@ -18,6 +18,7 @@ from .contact_depth_field_io import (
     DepthField,
     load_depth_field,
     penetration_mm,
+    penetration_from_signed_mm,
     declared_coordinate_space,
     depth_field_path_for_csv,
     forearm_ply_path_for_sidecar,
@@ -29,6 +30,7 @@ from .vertex_accumulator import (
     accumulate_vertex_values,
     accumulate_vertex_values_into,
 )
+from .vertex_weights import vertex_weights
 from .rf_extraction_io import (
     RF_CAMERA_SETTINGS_FILENAME,
     load_neuron_contacts,
@@ -111,6 +113,7 @@ __all__ = [
     "DepthField",
     "load_depth_field",
     "penetration_mm",
+    "penetration_from_signed_mm",
     "declared_coordinate_space",
     "depth_field_path_for_csv",
     "forearm_ply_path_for_sidecar",
@@ -120,6 +123,8 @@ __all__ = [
     "empty_accumulator",
     "accumulate_vertex_values",
     "accumulate_vertex_values_into",
+    # vertex_weights
+    "vertex_weights",
     # rf_extraction_io
     "RF_CAMERA_SETTINGS_FILENAME",
     "load_neuron_contacts",
