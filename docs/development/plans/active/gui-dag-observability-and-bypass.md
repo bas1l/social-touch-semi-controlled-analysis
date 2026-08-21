@@ -431,14 +431,14 @@ unaware of it, exactly as `enabled` is today.
 ### Phase 3: Abort with process-tree kill
 **Goal:** Aborting a run leaves nothing behind.
 
-- [ ] 3.1 — Add `process_tree.py`: `popen_group_kwargs()` returning
+- [x] 3.1 — Add `process_tree.py`: `popen_group_kwargs()` returning
       `{"creationflags": CREATE_NEW_PROCESS_GROUP}` on Windows and
       `{"start_new_session": True}` on POSIX; `kill_process_tree(proc, grace_seconds)` using
       `taskkill /F /T /PID` on Windows and `killpg(SIGTERM)` then `killpg(SIGKILL)` after the
       grace period on POSIX, with an early-out when `proc.poll()` is not None.
-- [ ] 3.2 — `_on_run` creates the child with `**popen_group_kwargs()`.
-- [ ] 3.3 — `_on_abort` calls `kill_process_tree`.
-- [ ] 3.4 — `closeEvent` uses the same path before the discard dialog, so a grandchild never
+- [x] 3.2 — `_on_run` creates the child with `**popen_group_kwargs()`.
+- [x] 3.3 — `_on_abort` calls `kill_process_tree`.
+- [x] 3.4 — `closeEvent` uses the same path before the discard dialog, so a grandchild never
       outlives the window.
 
 **Files Modified:**

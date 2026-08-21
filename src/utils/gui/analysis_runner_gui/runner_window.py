@@ -39,6 +39,10 @@ from utils.gui.analysis_runner_gui.kinect_directory_selector import SessionConfi
 from utils.gui.analysis_runner_gui.runner_config import WorkflowEntry
 from utils.gui.analysis_runner_gui.prefect_server_manager import PrefectServerManager
 from utils.gui.analysis_runner_gui.process_output_reader import ProcessOutputReader
+from utils.gui.analysis_runner_gui.process_tree import (
+    kill_process_tree,
+    popen_group_kwargs,
+)
 from utils.gui.analysis_runner_gui.run_log_file import RunLogFile
 from utils.gui.analysis_runner_gui.status_channel import parse_status_line
 from utils.gui.analysis_runner_gui.task_panel import TaskPanel
@@ -302,8 +306,10 @@ class AnalysisRunnerGUI(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802
         if self._process is not None:
+            # Kill the tree, not just the direct child: a Prefect flow
+            # subprocess must never outlive the window that started it.
             self._aborting = True
-            self._process.terminate()
+            kill_process_tree(self._process)
             self._process.wait()
             self._process = None
             if self._poll_timer is not None:
@@ -375,12 +381,16 @@ class AnalysisRunnerGUI(QMainWindow):
         self._console.clear()
         self._task_panel.clear_task_statuses()
         self._log_file = self._open_run_log(project_root, cmd)
+        # The child is put in its own process group / session so that aborting
+        # the run can address the whole tree — it spawns Prefect flow
+        # subprocesses that ``terminate()`` would leave orphaned.
         self._process = subprocess.Popen(
             cmd,
             cwd=str(project_root),
             env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
+            **popen_group_kwargs(),
         )
         self._reader = ProcessOutputReader(self._process)
         # Full lines go through the status-channel filter first; tqdm frames
@@ -523,13 +533,13 @@ class AnalysisRunnerGUI(QMainWindow):
         self._process = None
 
     def _on_abort(self) -> None:
-        """Terminate the running subprocess; let the poll timer handle cleanup."""
+        """Kill the run's whole process tree; let the poll timer handle cleanup."""
         if self._process is None:
             return
         self._aborting = True
         self._abort_button.setVisible(False)
         self.statusBar().showMessage("Aborting …")
-        self._process.terminate()
+        kill_process_tree(self._process)
 
     def _confirm_discard(self) -> bool:
         reply = QMessageBox.question(

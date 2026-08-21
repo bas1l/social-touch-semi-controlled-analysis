@@ -23,6 +23,9 @@ QT_FREE_MODULES = (
     # but must stay importable without Qt, so a run log can be replayed by a
     # headless tool.
     "utils.gui.analysis_runner_gui.status_channel",
+    # Process-group setup and tree kill: it lives beside the widgets but must
+    # stay a pure Popen/platform helper, with no widget or DAG knowledge.
+    "utils.gui.analysis_runner_gui.process_tree",
 )
 
 _PROBE = """
