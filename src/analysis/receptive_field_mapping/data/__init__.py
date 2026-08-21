@@ -75,6 +75,7 @@ from .touch_playback_data import (
     DepthFieldProvenance,
     PlaybackData,
     load_playback_data,
+    PLAYBACK_CACHE_SCHEMA_VERSION,
 )
 from .rf_explorer_data import (
     ExplorerSessionData,
@@ -167,6 +168,7 @@ __all__ = [
     "DepthFieldProvenance",
     "PlaybackData",
     "load_playback_data",
+    "PLAYBACK_CACHE_SCHEMA_VERSION",
     # rf_explorer_data
     "ExplorerSessionData",
     "ExplorerData",

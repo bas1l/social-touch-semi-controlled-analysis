@@ -322,11 +322,18 @@ field at v3. IFF was 50, 100, 40 Hz.
 
 | vertex        | today          | weighted        |
 |---------------|----------------|-----------------|
-| v1 one frame  | 50.0           | 50.0            |
-| v2 flank      | **75.0 <- peak** | 65.9          |
-| v3 RF centre  | 63.3           | **73.5 <- peak** |
-| v4 flank      | 70.0           | 57.1            |
-| v5 one frame  | 40.0           | 40.0            |
+| v1 one frame  | 50.0           | 50.00           |
+| v2 flank      | **75.0 <- peak** | 65.99         |
+| v3 RF centre  | 63.3           | **73.44 <- peak** |
+| v4 flank      | 70.0           | 57.14           |
+| v5 one frame  | 40.0           | 40.00           |
+
+Every weighted figure in this section is the value the committed fixture
+(`tests/rf_accumulator_fixtures.py`) produces, pinned by test at `rtol=1e-12`. Its depths were
+picked so the 2-dp weights quoted below are **exact**, not rounded — `0.39 / 3.00` is exactly
+`0.13` — which is why these numbers and the plan's now agree to the digit. An earlier draft
+computed the means from unrounded weights (v6's were `0.125, 0.13333, 0.100`, giving 65.81) and
+printed the weights rounded; both were internally right, and they are reconciled here.
 
 **Today's map puts the peak on the wrong vertex.** In the frame where the finger was on v3
 and the neuron fired 100 Hz, v2 and v4 were inside the contact patch and received that
@@ -337,9 +344,9 @@ moment. Weighting fixes it because v2 was pressed to only 47% of that frame's ma
 Two more vertices were added to the example: v6 always shallow (rim of the stroke),
 v7 always deep (midline of the stroke). **Neither one moved.**
 
-- v6 weights across frames: 0.13, 0.13, 0.10 — flat. Cancels out. 63.3 -> 65.8
-- v7 weights across frames: 0.92, 0.93, 0.95 — flat. Cancels out. 63.3 -> 63.3
-- v3 weights across frames: 0.42, 1.00, 0.50 — **varying.** 63.3 -> 73.5
+- v6 weights across frames: 0.13, 0.13, 0.10 — flat. Cancels out. 63.3 -> 65.28
+- v7 weights across frames: 0.92, 0.93, 0.95 — flat. Cancels out. 63.3 -> 63.21
+- v3 weights across frames: 0.42, 1.00, 0.50 — **varying.** 63.3 -> 73.44
 
 **Absolute depth level is irrelevant. Only frame-to-frame variation in a vertex's own depth
 does anything.** Effective sample size confirms it: v6 keeps n_eff = 2.96 out of 3 frames
@@ -356,9 +363,9 @@ to damp it. Three estimators were compared on the 7-vertex example:
 
 | vertex          | today | A: /sum(w) | B: /count | C: /(sum(w)+1) |
 |-----------------|-------|------------|-----------|----------------|
-| v3 true RF      | 63.3  | **73.5**   | 46.9      | **48.3**       |
-| v6 always shallow | 63.3 | 65.8      | **7.9**   | 17.4           |
-| v7 always deep  | 63.3  | 63.3       | **59.1**  | 46.6           |
+| v3 true RF      | 63.3  | **73.44**  | 47.00     | **48.29**      |
+| v6 always shallow | 63.3 | 65.28     | **7.83**  | 17.28          |
+| v7 always deep  | 63.3  | 63.21      | **59.00** | 46.58          |
 | peak lands on   | v2 X  | **v3 OK**  | **v7 X**  | **v3 OK**      |
 
 **B rejected.** Damping v6 and inflating v7 are the same operation — you cannot have one
@@ -367,7 +374,7 @@ experimenter chose to stroke and how the arm curves, **not because of the neuron
 stimulus geometry into the receptive field map, and its output is no longer in Hz.
 
 **C rejected for now.** Shrinkage works and keeps the peak on v3, but `k` is a tuning knob
-that can move the peak (v3 leads v7 only while k < 1.5 in this example). A parameter that
+that can move the peak (v3 leads v7 only while k < 1.53 in this example). A parameter that
 decides where the receptive field is must be chosen on principle, not fitted by eye. It also
 weakens the parity test, which would then need both alpha=0 and k=0.
 

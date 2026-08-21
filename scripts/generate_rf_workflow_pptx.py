@@ -235,8 +235,8 @@ def build():
     content_slide(
         prs, "STAGE 1 · REDUCE A SINGLE TOUCH", "One touch → a sparse map",
         "03_single_touch.png",
-        [("_compute_touch_rf accumulates IFF at touched vertices", 0),
-         ("Running mean (np.add.at) and max (np.maximum.at) per vertex", 0),
+        [("_compute_touch_rf accumulates depth-weighted IFF at touched vertices", 0),
+         ("Weighted mean (np.add.at) and unweighted max (np.maximum.at) per vertex", 0),
          ("Drops vertices where the neuron signal was NaN", 0),
          ("Output: a short list of (vertex, mean-IFF) pairs per touch", 0),
          ("Saved to single_touch_rf_maps_mean.npz / _max.npz", 1)],
@@ -256,9 +256,11 @@ def build():
     wide_slide(
         prs, "STAGE 1 · INSIDE ONE TOUCH", "Grouping & averaging (mean)",
         "03b_grouping_averaging.png",
-        "_compute_touch_rf: each vertex accumulates IFF over the frames that touch it, then Σ ÷ count.",
-        "Left: Σ IFF per vertex. Middle: how many of the 200 frames touched each vertex. "
-        "Right: mean = Σ / count — the 576-value sparse map. The bright core is where the "
+        "_compute_touch_rf: each vertex accumulates w·IFF over the frames that touch it, then Σ w·IFF ÷ Σ w.",
+        "Each contact point's weight w is how deeply it was pressed relative to the deepest "
+        "point of its own frame, raised to depth_weight_alpha. Left: Σ w·IFF per vertex. "
+        "Middle: Σ w — evidence, not a frame count (it reduces to the frame count at alpha = 0). "
+        "Right: mean = Σ w·IFF / Σ w — the 576-value sparse map. The bright core is where the "
         "high-IFF frame 5 landed.")
 
     # ---- 5d. Stage 1 · attributes ----

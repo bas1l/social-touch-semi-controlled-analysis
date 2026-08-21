@@ -1947,6 +1947,23 @@ def _build_pipeline_stages(dag_handler: DagConfigHandler, items_to_process) -> l
             and dag_handler.tasks[name].get("enabled", True)
         )
 
+    def _required_option(task_name: str, key: str):
+        """Return ``tasks.<task_name>.options.<key>`` or raise naming both.
+
+        ``get_task_options`` returns ``{}`` for an unknown task and ``.get(...)``
+        would turn a missing key into ``None``, which a required parameter must
+        never become: the estimator has no default for it, so the run would fail
+        much later with a ``TypeError`` that does not name the config key.
+        """
+        options = dag_handler.get_task_options(task_name)
+        if key not in options:
+            raise ValueError(
+                f"Config is missing required option 'tasks.{task_name}.options.{key}'. "
+                f"Present options: {sorted(options)}. There is no default for this "
+                f"value at any level of the call chain."
+            )
+        return options[key]
+
     database_path = items_to_process[0][1] if items_to_process else None
 
     def _preparation_dir() -> Optional[Path]:
@@ -1977,6 +1994,12 @@ def _build_pipeline_stages(dag_handler: DagConfigHandler, items_to_process) -> l
             "func": spatial_map_single_touch_flow,
             "params": lambda: {
                 "neuron_mode": dag_handler.get_task_options("spatial_map_single_touch").get("neuron_mode", "iff"),
+                # Required, no default: alpha decides how credit is distributed
+                # inside every contact patch, so a missing key must stop the run
+                # rather than pick a value on the researcher's behalf.
+                "depth_weight_alpha": float(
+                    _required_option("spatial_map_single_touch", "depth_weight_alpha")
+                ),
                 "preparation_dir": _preparation_dir(),
                 "contact_depth_field": dag_handler.get_task_options(
                     "spatial_map_single_touch"

@@ -34,7 +34,11 @@ logger = logging.getLogger(__name__)
 # instead of re-derived by nearest-vertex snapping, and the sidecar provenance is
 # stored alongside. A v3 cache holds KDTree-derived vertex indices, which are a
 # different (and wrong) answer, so it must not be reused.
-_CACHE_SCHEMA_VERSION = 5
+#
+# Public, not ``_``-prefixed: ``rf_single_touch_pipeline`` records it in
+# ``single_touch_rf_summary.json`` so a saved run states which cache layout its
+# vertex identities and depths came off.
+PLAYBACK_CACHE_SCHEMA_VERSION = 5
 
 _FRAME_INDEX_COL = "frame_index"
 _SOURCE_BLOCK_FILE_COL = "source_block_file"
@@ -572,7 +576,7 @@ def _save_playback_cache(
     try:
         np.savez_compressed(
             cache_path,
-            cache_schema_version=np.array(_CACHE_SCHEMA_VERSION, dtype=np.int64),
+            cache_schema_version=np.array(PLAYBACK_CACHE_SCHEMA_VERSION, dtype=np.int64),
             touch_keys=touch_keys,
             touch_block_ids=touch_block_ids,
             gesture_types=gesture_types,
@@ -631,7 +635,7 @@ def _load_playback_cache(
     npz = np.load(cache_path, allow_pickle=True)
 
     # Validate schema version.
-    if "cache_schema_version" not in npz or int(npz["cache_schema_version"]) != _CACHE_SCHEMA_VERSION:
+    if "cache_schema_version" not in npz or int(npz["cache_schema_version"]) != PLAYBACK_CACHE_SCHEMA_VERSION:
         logger.debug(
             "_load_playback_cache: schema version mismatch for %s — recomputing",
             series_csv_path.name,
@@ -646,7 +650,7 @@ def _load_playback_cache(
         "cp_unique_pts", "cp_unique_vtx", "cp_unique_offsets",
         "cp_frame_group", "cp_frame_touch", "cp_frame_fi",
         "forearm_vertices",
-        # Bumped in the same change as ``_CACHE_SCHEMA_VERSION`` — a version check that
+        # Bumped in the same change as ``PLAYBACK_CACHE_SCHEMA_VERSION`` — a version check that
         # passes while the payload is missing is exactly the failure this guards.
         "depth_provenance_block_files",
         "depth_provenance_sidecar_paths",

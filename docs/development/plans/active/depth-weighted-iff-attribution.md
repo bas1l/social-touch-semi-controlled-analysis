@@ -28,11 +28,17 @@ receptive field at v3, IFF of 50 / 100 / 40 Hz:
 
 | vertex | today | depth-weighted |
 |---|---|---|
-| v1 (one frame) | 50.0 | 50.0 |
-| v2 (flank) | **75.0 <- peak** | 65.9 |
-| v3 (**true RF centre**) | 63.3 | **73.5 <- peak** |
-| v4 (flank) | 70.0 | 57.1 |
-| v5 (one frame) | 40.0 | 40.0 |
+| v1 (one frame) | 50.0 | 50.00 |
+| v2 (flank) | **75.0 <- peak** | 65.99 |
+| v3 (**true RF centre**) | 63.3 | **73.44 <- peak** |
+| v4 (flank) | 70.0 | 57.14 |
+| v5 (one frame) | 40.0 | 40.00 |
+
+Every weighted figure in this document is the value produced by the committed fixture
+(`tests/rf_accumulator_fixtures.py`), whose depths were chosen so that the 2-dp weight tables
+below are the **exact** weights rather than rounded ones — `0.39 / 3.00` is exactly `0.13`. The
+plan and `docs/development/brainstorms/contact-depth-field-adoption.md` therefore quote the same
+numbers, and the tests pin them at `rtol=1e-12`.
 
 In the frame where the finger sat on v3 and the neuron fired at 100 Hz, v2 and v4 were inside the
 patch and received that 100 Hz at full credit — identical to v3. Today's map therefore peaks on v2.
@@ -100,8 +106,10 @@ the viewer windows draw a different map from the one written to disk.
 - [ ] `d_max == 0`, `sum(w) == 0`, and NaN depth each raise a typed error with file/frame/vertex
       context. No NaN reaches an output array.
 - [ ] `weight_sum` and `n_eff` are emitted per vertex and present in the saved artifacts.
-- [ ] `depth_weight_alpha` appears in `single_touch_rf_summary.json`, so a config change invalidates
-      the stage and two runs are distinguishable on disk.
+- [x] `depth_weight_alpha` appears in `single_touch_rf_summary.json`, so a config change invalidates
+      the stage and two runs are distinguishable on disk. The sentinel also carries
+      `playback_cache_schema_version` and, from Phase 2.5, each block's sidecar path and the
+      `coordinate_space` that file declared.
 - [x] Calling the estimator without `alpha` raises `TypeError`. There is no default value anywhere.
 - [ ] The diagnostic reports per-vertex weight variation for one session and states whether the
       feature can have any effect at all on that data.
@@ -171,9 +179,9 @@ Adding two archetypes to the worked example — v6 always shallow (stroke rim), 
 
 | vertex | weights across frames | today | weighted |
 |---|---|---|---|
-| v6 always shallow | `0.13, 0.13, 0.10` — flat | 63.3 | 65.8 |
-| v7 always deep | `0.92, 0.93, 0.95` — flat | 63.3 | 63.3 |
-| v3 RF centre | `0.42, 1.00, 0.50` — **varying** | 63.3 | **73.5** |
+| v6 always shallow | `0.13, 0.13, 0.10` — flat | 63.3 | 65.28 |
+| v7 always deep | `0.92, 0.93, 0.95` — flat | 63.3 | 63.21 |
+| v3 RF centre | `0.42, 1.00, 0.50` — **varying** | 63.3 | **73.44** |
 
 A roughly-constant weight cancels between numerator and denominator. **Absolute depth level is
 irrelevant; only frame-to-frame variation in a vertex's own depth does anything.** `n_eff` confirms
@@ -187,8 +195,8 @@ each contact patch in the real data, this feature produces today's map at every 
 | Approach | Pros | Cons | Decision |
 |---|---|---|---|
 | **A: `sum(w*IFF) / sum(w)`** | Stays in Hz; single-frame vertices provably invariant; peak lands on v3; no tuning knob | A chronically-shallow vertex reports a normal rate, which reads as wrong until the mechanism is understood | **Chosen** |
-| B: `sum(w*IFF) / N` | Damps always-shallow vertices strongly (v6: 63.3 to 7.9); `alpha=0` parity needs no extra condition | **Peak moves to v7, not v3.** Damping v6 and inflating v7 are the same operation. v7 is deep because of stroke geometry and arm curvature, not the neuron — so this imports stimulus geometry into the RF map. Output is no longer in Hz | Rejected |
-| C: `sum(w*IFF) / (sum(w) + k)` | Damps v6 (to 17.4) *and* keeps the peak on v3 | `k` is a tuning knob that can move the peak — v3 leads v7 only while `k < 1.5` on the worked example. A parameter that decides where the receptive field is must be chosen on principle. Weakens parity: needs both `alpha=0` and `k=0` | Rejected for now |
+| B: `sum(w*IFF) / N` | Damps always-shallow vertices strongly (v6: 63.3 to 7.83); `alpha=0` parity needs no extra condition | **Peak moves to v7, not v3.** Damping v6 and inflating v7 are the same operation. v7 is deep because of stroke geometry and arm curvature, not the neuron — so this imports stimulus geometry into the RF map. Output is no longer in Hz | Rejected |
+| C: `sum(w*IFF) / (sum(w) + k)` | Damps v6 (to 17.28 at `k = 1`) *and* keeps the peak on v3 | `k` is a tuning knob that can move the peak — v3 leads v7 only while `k < 1.53` on the worked example. A parameter that decides where the receptive field is must be chosen on principle. Weakens parity: needs both `alpha=0` and `k=0` | Rejected for now |
 | Sum-normalise: `d**a / sum(d**a)` | Each frame contributes equal total evidence at every alpha | At `alpha=0` gives `1/K`, not 1 — **destroys the baseline anchor**. Collapses a frame's contribution from `K` to `1`, a far more violent change than requested | Rejected |
 | Softmax `exp(d/T)` | Spans the same limits | `T` carries units of mm and needs retuning per session; normalised powers are scale-invariant | Rejected (brainstorm section 4) |
 | Weight the `max` map too | Consistency | A weighted maximum has no meaning; weighting changes its units | Rejected |
@@ -670,24 +678,38 @@ storage and validation.
   `inspect.getsource`. That is a structural claim no numeric test can make — a branch
   returning ones is numerically indistinguishable from the arithmetic that produces them —
   and it is what keeps the Phase 6 parity test from becoming vacuous.
-- **The plan's worked-example table is right about the weights and wrong about one mean.**
+- **The fixture and the plan's original table are both internally correct; they differ
+  because one rounds the weights first.** *(Diagnosis corrected in Phase 5 — the Phase 4
+  note recorded here previously called the plan's v6 figure "stale" and claimed it did not
+  follow from the plan's own weight table. That was wrong, and it was wrong in a way worth
+  writing down: it compared a number computed from exact weights against a weight table
+  printed to 2 dp.)*
+
+  The plan's per-vertex means were computed from the **exact** underlying weights. For v6
+  those are `0.125, 0.13333, 0.100`, giving `23.583 / 0.35833 = 65.81` — the figure the
+  plan quoted. `tests/rf_accumulator_fixtures.py` then chose depths that make the plan's
+  *displayed* 2-dp weight table exact instead: frame 0 is `0.90, 3.00, 1.26, 0.39, 2.76`
+  over `d_max = 3.00`, which is precisely `0.30, 1.00, 0.42, 0.13, 0.92`, and v6's three
+  weights are exactly `0.13, 0.13, 0.10`. On those weights the same estimator gives
+  `23.5 / 0.36 = 65.28`. Neither figure is an error; they are two different weight sets
+  agreeing to 2 dp. Phase 5 rewrites both documents onto the fixture's values so that the
+  numbers a reader sees are the numbers the test suite pins.
+
   Reproduced on the committed fixture depths at `alpha = 1`:
 
-  | vertex | today | plan says | actual | n_eff |
-  |---|---|---|---|---|
-  | v1 | 50.000 | 50.0 | 50.000 | 1.000 |
-  | v2 | **75.000 <- old peak** | 65.9 | 65.986 | 1.770 |
-  | v3 | 63.333 | 73.5 | **73.438 <- new peak** | 2.584 |
-  | v4 | 70.000 | 57.1 | 57.143 | 1.690 |
-  | v5 | 40.000 | 40.0 | 40.000 | 1.000 |
-  | v6 always shallow | 63.333 | 65.8 | **65.278** | 2.959 |
-  | v7 always deep | 63.333 | 63.3 | 63.214 | 2.999 |
+  | vertex | today | weighted | n_eff |
+  |---|---|---|---|
+  | v1 | 50.000 | 50.000 | 1.000 |
+  | v2 | **75.000 <- old peak** | 65.986 | 1.770 |
+  | v3 | 63.333 | **73.438 <- new peak** | 2.584 |
+  | v4 | 70.000 | 57.143 | 1.690 |
+  | v5 | 40.000 | 40.000 | 1.000 |
+  | v6 always shallow | 63.333 | 65.278 | 2.959 |
+  | v7 always deep | 63.333 | 63.214 | 2.999 |
 
-  The peak moves from v2 to v3 as claimed, and six of seven values match the plan to its
-  own rounding. **v6 is 65.278, not 65.8.** The plan's figure does not follow from the
-  plan's own weight table: `(0.13*50 + 0.13*100 + 0.10*40) / 0.36 = 65.2778`. That the
-  weights themselves are correct is confirmed independently by `n_eff`, which comes out at
-  2.959 — the 2.96 the plan quotes for v6. The stale number is the mean, not the weight.
+  The peak moves from v2 to v3 as claimed, and v6 / v7 still barely move. `n_eff` for v6
+  comes out at 2.959 — the 2.96 the plan quotes — which is the independent confirmation
+  that the weights, on either weight set, are the ones the design intends.
 - **The Testing Plan's "v6 and v7 both within 1e-9 of their unweighted values" is not
   achievable and was not implemented as written.** Both vertices are unweighted at
   63.333; weighted, v6 is 65.278 (1.94 Hz away) and v7 is 63.214 (0.12 Hz away). 1e-9
@@ -733,25 +755,109 @@ storage and validation.
 **Dependencies:** Phases 2, 3.
 
 ### Phase 5: Config, provenance, GUI option
+**Started:** 2026-08-21
+**Completed:** 2026-08-21
+
 **Goal:** `alpha` is configurable, required, and recorded.
 
-- [ ] 5.1 — Add `depth_weight_alpha: 1.0` under `options:` for `spatial_map_single_touch` in
+- [x] 5.1 — Add `depth_weight_alpha: 1.0` under `options:` for `spatial_map_single_touch` in
       `configs/analyse_workflow_processing_dag.yaml` (`:48-55`). **ruamel.yaml round-trip only.**
-- [ ] 5.2 — Add to the stage registry `params` lambda in `scripts/analysis_workflow_processing.py`
+- [x] 5.2 — Add to the stage registry `params` lambda in `scripts/analysis_workflow_processing.py`
       (`:1965-1972`), beside `neuron_mode`.
-- [ ] 5.3 — Thread through `spatial_map_single_touch_flow` (`:429-455`) into
+- [x] 5.3 — Thread through `spatial_map_single_touch_flow` (`:429-455`) into
       `run_single_touch_rf_mapping` (`:112-118`) into `_compute_touch_rf` (`:38-42`). **Required
       argument at every level — no default value anywhere.**
-- [ ] 5.4 — Add `depth_weight_alpha` to `_OPTION_GROUP_OF` in
+- [x] 5.4 — Add `depth_weight_alpha` to `_OPTION_GROUP_OF` in
       `src/utils/gui/analysis_runner_gui/task_detail_panel.py` (`:157-173`) —
       `spatial_map_single_touch` is in `_GROUPED_TASKS` (`:182`), so an ungrouped option **fails the
       render**.
-- [ ] 5.5 — Record `depth_weight_alpha`, the sidecar path, and the cache schema version in
+- [x] 5.5 — Record `depth_weight_alpha`, the sidecar path, and the cache schema version in
       `single_touch_rf_summary.json` (`:251-258`) so a config change invalidates the stage and two
       runs are distinguishable on disk.
-- [ ] 5.6 — Mirror into `configs/analyse_workflow_dag.yaml` if that DAG exposes the same stage.
+- [x] 5.6 — Mirror into `configs/analyse_workflow_dag.yaml` if that DAG exposes the same stage.
+      **Not applicable, and now asserted rather than remembered:** that file defines no
+      `spatial_map_single_touch` task, so there is nothing to mirror into.
+      `TestProcessingDagConfig::test_the_combined_reference_dag_does_not_define_this_stage`
+      fails the day that changes.
 
-**Files Modified:** the five paths above.
+**Implementation notes (2026-08-21)**
+
+- **Phase 4 had already threaded alpha to the flow; only the registry was missing.**
+  `spatial_map_single_touch_flow` -> `run_single_touch_rf_mapping` -> `_compute_touch_rf`
+  was complete and required at every hop before this phase started. 5.3 was therefore a
+  verification, not an edit, and it is now pinned two ways: a call test per level
+  (`TestMissingAlphaIsATypeError`) and a **signature** test per level
+  (`TestNoDefaultAnywhere`). The second exists because a default added later would make
+  the first quietly stop failing while still passing.
+- **The registry does not use `.get(key, fallback)`.** `neuron_mode` beside it does, which
+  is why `_required_option()` was added rather than following the neighbouring line:
+  `DagConfigHandler.get_task_options` returns `{}` for an unknown task, so `.get` would
+  turn a deleted config key into `None` and the run would die much later with a `TypeError`
+  that never names the key. `_required_option` raises naming
+  `tasks.spatial_map_single_touch.options.depth_weight_alpha` and listing what was present.
+- **`contact_depth_field` had to be grouped too, or the GUI still failed.** Phase 2.5 added
+  that nested block to the stage's options without adding it to `_OPTION_GROUP_OF`, and
+  `_insert_grouped` requires **every** non-`force_processing` option of a grouped task to
+  resolve a group — so the task detail panel raised on `spatial_map_single_touch` before
+  this phase, for a reason that had nothing to do with alpha. Both keys are now in the
+  `method` group, and the test iterates the *config's* option list rather than a hardcoded
+  one, so the next option added without a group fails here instead of in front of the user.
+  As a dict, `contact_depth_field` renders through the existing complex-value branch (a
+  clickable label opening the YAML editor); `depth_weight_alpha`, a float, renders as a
+  free-text `QLineEdit` cast by `_native_type`. The config value is written `1.0` and a test
+  asserts it parses as `float`, because an int there would make the panel reject `0.5`.
+- **`_CACHE_SCHEMA_VERSION` became `PLAYBACK_CACHE_SCHEMA_VERSION`.** 5.5 wants the cache
+  layout in the summary, and reaching across a module boundary for an underscore-prefixed
+  name to get it is how a private constant becomes public by accident. It is renamed once,
+  re-exported from `data/__init__.py`, and its comment says why it is public.
+  `touch_population_data.py` keeps its own private copy — different cache, not shared.
+- **The sidecar paths were already in the summary (Phase 2.5) and were extended, not
+  duplicated.** The `contact_depth_field.blocks` list keeps the per-block
+  `source_block_file` / `sidecar_path` / observed `coordinate_space` rows; `alpha` and the
+  cache version are new top-level keys beside them.
+- **`configs/analyse_workflow_dag.yaml` *does* define `explore_touch_playback`** (`:398`),
+  contradicting the Phase 2.5 note above, which said it did not. It is a reference config
+  that no code loads — nothing in the repo opens that filename — so the stale
+  `explore_touch_playback` block there is documentation drift rather than a broken run, and
+  it was left alone. Recorded so it is not rediscovered as a bug.
+
+**Additional work folded into this phase**
+
+- **`scripts/generate_rf_single_touch_detail.py` no longer disagrees with the `.npz`.**
+  Phase 4 flagged it: it kept an inline copy of the mean branch, so its `03b` figure drew
+  the **unweighted** map while the saved file held the weighted one — the exact failure the
+  nine-site merge existed to prevent. It now takes a **required** `--depth-weight-alpha` and
+  *calls* `_compute_touch_rf`, plotting what that returns. `Σ w·IFF` is recovered as
+  `mean × weight_sum` rather than accumulated again, so no arithmetic is duplicated: the
+  panels are `Σ w·IFF`, `Σ w`, and their ratio, which reduce to the old
+  `Σ IFF` / `count` / `mean` at `alpha = 0`. It imports `_compute_touch_rf` under its private
+  name, matching the precedent `scripts/diagnose_vertex_reassignment.py` set in Phase 2.5;
+  renaming the function to public would have touched ~50 lines across four test modules for
+  no behavioural gain, and was deliberately not done.
+- **`scripts/generate_rf_workflow_pptx.py` captions followed.** That deck embeds
+  `03b_grouping_averaging.png` and described the middle panel as "how many of the 200 frames
+  touched each vertex". It is `Σ w` now, so the caption says so — a slide describing the
+  figure incorrectly is the same class of error as the figure itself.
+- **The worked-example numbers in this plan and in the brainstorm were reconciled** onto the
+  fixture's exact values; see the corrected note under Phase 4.
+
+**Files Modified:**
+- `configs/analyse_workflow_processing_dag.yaml` — `depth_weight_alpha: 1.0` + comment
+  (ruamel round-trip; the diff is a clean 10-line insertion, no reflow)
+- `scripts/analysis_workflow_processing.py` — `_required_option()`, registry param
+- `src/analysis/receptive_field_mapping/pipelines/rf_single_touch_pipeline.py` —
+  `depth_weight_alpha` and `playback_cache_schema_version` in the sentinel
+- `src/analysis/receptive_field_mapping/data/touch_playback_data.py` — constant renamed public
+- `src/analysis/receptive_field_mapping/data/__init__.py` — re-export
+- `src/utils/gui/analysis_runner_gui/task_detail_panel.py` — `depth_weight_alpha` **and**
+  `contact_depth_field` in `_OPTION_GROUP_OF`
+- `scripts/generate_rf_single_touch_detail.py` — `--depth-weight-alpha`, delegates to
+  `_compute_touch_rf`
+- `scripts/generate_rf_workflow_pptx.py` — captions
+- `tests/test_touch_playback_depth.py`, `tests/test_touch_playback_vertex_source.py` —
+  constant rename
+- `tests/test_depth_weight_alpha_config.py` — new, 25 tests
+- `docs/development/brainstorms/contact-depth-field-adoption.md` — section 8 reconciled
 
 **Dependencies:** Phase 4.
 
@@ -820,7 +926,11 @@ storage and validation.
 
 ### Manual Verification
 - [ ] Launch the GUI (`scripts/launch_pipeline_gui.py`); confirm `depth_weight_alpha` renders in the
-      task detail panel and the stage runs.
+      task detail panel and the stage runs. **Partially covered automatically (Phase 5):**
+      `TestGuiOptionGrouping` resolves a group for every option key the config actually declares
+      for the stage, headlessly — the same call `_insert_grouped` makes, with no `QApplication`
+      constructed. That is the half that used to raise. Opening a real window and typing a value
+      into the field is still manual.
 - [ ] Open a viewer window and the saved map for the same touch; confirm they now agree.
 - [ ] Confirm `single_touch_rf_summary.json` carries alpha, and that changing alpha re-runs the
       stage.

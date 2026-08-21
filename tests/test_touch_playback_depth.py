@@ -39,7 +39,7 @@ from analysis.receptive_field_mapping.data.touch_playback_data import (  # noqa:
     PlaybackData,
     PlaybackSessionData,
     TouchEvent,
-    _CACHE_SCHEMA_VERSION,
+    PLAYBACK_CACHE_SCHEMA_VERSION,
     _load_playback_cache,
     _playback_cache_path,
     _save_playback_cache,
@@ -380,7 +380,7 @@ class TestCacheSchemaVersion:
         # Phase 2.5 took the schema 3 -> 4 (retired KDTree indices). Phase 3 takes it
         # 4 -> 5 (depth). Pinned once, here, so a bump that forgets to extend
         # ``required_keys`` in the same change is caught by the tests below.
-        assert _CACHE_SCHEMA_VERSION == 5
+        assert PLAYBACK_CACHE_SCHEMA_VERSION == 5
 
     def test_a_v4_cache_is_not_reused(self, env):
         """A depth-free v4 cache must be rejected, not silently served."""
@@ -425,7 +425,7 @@ class TestCacheSchemaVersion:
 
         cache_path = _playback_cache_path(env["csv_path"])
         payload = dict(np.load(cache_path, allow_pickle=True))
-        assert int(payload["cache_schema_version"]) == _CACHE_SCHEMA_VERSION
+        assert int(payload["cache_schema_version"]) == PLAYBACK_CACHE_SCHEMA_VERSION
         del payload["cp_frame_depth_data"]
         del payload["cp_frame_depth_offsets"]
         np.savez_compressed(cache_path, **payload)

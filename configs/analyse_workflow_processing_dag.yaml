@@ -51,6 +51,16 @@ tasks:
     options:
       force_processing: false
       neuron_mode: iff
+      # Exponent of the per-contact-point depth weighting. A contact point is
+      # credited with its frame's IFF in proportion to (its penetration depth /
+      # the deepest penetration in that same frame) ** depth_weight_alpha, and
+      # the per-vertex mean divides by the summed weight, not the frame count.
+      # 0.0 reproduces the unweighted maps exactly (every weight becomes 1.0);
+      # 1.0 is the shipped setting. Required -- no level of the call chain has a
+      # default, so removing this key raises instead of assuming a value. The
+      # value is recorded in single_touch_rf_summary.json, so changing it makes
+      # the stage out-of-date and two runs distinguishable on disk.
+      depth_weight_alpha: 1.0
       # Where the per-vertex contact-depth-field parquet sidecars live. Contact
       # points take their vertex identity from these sidecars, joined on frame_index.
       # The session merged root is the directory of the aggregated session CSV the DAG

@@ -86,9 +86,17 @@ A single touch is a short window during which the experimenter strokes or taps o
 ([`pipelines/rf_single_touch_pipeline.py:38`](../../src/analysis/receptive_field_mapping/pipelines/rf_single_touch_pipeline.py))
 reduces it to a **sparse per-vertex map**: for each frame it adds the IFF at the touched
 vertices (`np.add.at` for the running mean, `np.maximum.at` for the max), divides by the
-contact count, and drops vertices where the neuron signal was NaN. Every touch becomes a
-short list of `(vertex_index, mean_IFF)` pairs, stored in `single_touch_rf_maps_mean.npz`
+summed contact weight, and drops vertices where the neuron signal was NaN. Every touch becomes
+a short list of `(vertex_index, mean_IFF)` pairs, stored in `single_touch_rf_maps_mean.npz`
 (and `_max.npz`).
+
+Each contact point's credit is scaled by **how deeply the skin was indented there**, relative to
+the deepest point of that same frame, raised to `depth_weight_alpha`
+(`tasks.spatial_map_single_touch.options.depth_weight_alpha`). The mean is weighted; the max is
+not, because a weighted maximum has no meaning. At `alpha = 0` every weight is `1.0` and the
+divisor is the plain contact count, which is the unweighted map. Both `.npz` files also carry
+`rf_weight_sum` and Kish `rf_n_eff` per vertex — a confidence channel for display code, which
+never alters the estimate.
 
 ![Single touch](figures/03_single_touch.png)
 
@@ -113,14 +121,14 @@ responds strongly only when the finger crosses one particular patch of skin — 
 the receptive field.*
 
 The reduction (`_compute_touch_rf`, mean branch) is then just bookkeeping over those frames:
-each contacted vertex accumulates the IFF of every frame that touches it (`Σ`), counts those
-frames, and divides.
+each contacted vertex accumulates `w · IFF` over every frame that touches it, sums the weights,
+and divides.
 
 ![Grouping and averaging](figures/03b_grouping_averaging.png)
 
-*Left: `Σ IFF` per vertex. Middle: how many of the 200 frames touched each vertex. Right:
-`mean = Σ / count` — the 576-value sparse map (the same one shown above). The bright core is
-where the high-IFF frame 5 landed.*
+*Left: `Σ w·IFF` per vertex. Middle: `Σ w` — evidence, not a frame count (it reduces to the frame
+count at `alpha = 0`). Right: `mean = Σ w·IFF / Σ w` — the 576-value sparse map (the same one shown
+above). The bright core is where the high-IFF frame 5 landed.*
 
 ### This touch's attributes
 
@@ -307,12 +315,16 @@ generated panels (raw input, single touch). Rebuild them after re-running the pi
 ```bash
 conda activate social-touch-analysis
 python scripts/generate_rf_workflow_doc_figures.py      # stage figures 01–07
-python scripts/generate_rf_single_touch_detail.py       # Stage-1 deep dive 03a–03c
+python scripts/generate_rf_single_touch_detail.py --depth-weight-alpha 1.0   # Stage-1 deep dive 03a–03c
 python scripts/generate_rf_boundary_detail.py           # Stage-3 deep dive 05a–05c
 ```
 
 The scripts read the analysed outputs for `2022-06-17_ST16-02` under the project data
 root and write `docs/receptive_field_workflow/figures/*.png`. They fail loudly if any
-expected source artifact is missing. To rebuild the slide deck
+expected source artifact is missing. Pass `--depth-weight-alpha` the same value as
+`tasks.spatial_map_single_touch.options.depth_weight_alpha` in
+`configs/analyse_workflow_processing_dag.yaml`: the deep-dive script calls the pipeline's
+own `_compute_touch_rf`, so a different alpha would draw a map the saved `.npz` does not
+contain. It is required precisely so that value is never assumed. To rebuild the slide deck
 (`rf_workflow_walkthrough.pptx`) from the figures, run
 `python scripts/generate_rf_workflow_pptx.py`.

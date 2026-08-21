@@ -38,7 +38,7 @@ from analysis.receptive_field_mapping.data.contact_depth_field_io import (  # no
 )
 from analysis.receptive_field_mapping.data.touch_playback_data import (  # noqa: E402
     TouchEvent,
-    _CACHE_SCHEMA_VERSION,
+    PLAYBACK_CACHE_SCHEMA_VERSION,
     _playback_cache_path,
     load_playback_data,
 )
@@ -517,7 +517,7 @@ class TestCacheCarriesTheSidecarAnswer:
         # Asserted as an inequality, not a literal: this test's claim is that the
         # schema has moved past 3 and stays past it, which no later bump invalidates.
         # The exact current version is pinned once, in tests/test_touch_playback_depth.py.
-        assert _CACHE_SCHEMA_VERSION > 3
+        assert PLAYBACK_CACHE_SCHEMA_VERSION > 3
         _write_sidecar(env["blocks_dir"], frame_index=[1], vertex_id=[30])
         _write_series_csv(
             env["csv_path"], [{"cell": _cell([0.0]), "frame_index": 1}]

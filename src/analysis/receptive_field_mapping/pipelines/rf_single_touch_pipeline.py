@@ -36,6 +36,7 @@ from analysis.receptive_field_mapping.data.vertex_accumulator import (
 )
 from analysis.receptive_field_mapping.data.vertex_weights import vertex_weights
 from analysis.receptive_field_mapping.data.touch_playback_data import (
+    PLAYBACK_CACHE_SCHEMA_VERSION,
     PlaybackData,
     TouchEvent,
     load_playback_data,
@@ -470,6 +471,19 @@ def run_single_touch_rf_mapping(
                     'neuron_mode': neuron_mode,
                     'n_touches': total_touches,
                     'n_vertices': n_vertices,
+                    # The exponent that produced the weighted means in this run.
+                    # Recorded here so two runs at different alphas are
+                    # distinguishable on disk, and so a config change makes the
+                    # sentinel disagree with the config that would produce it.
+                    'depth_weight_alpha': float(depth_weight_alpha),
+                    # Which playback-cache layout the vertex identities and depths
+                    # behind these maps were read through. A cache written under an
+                    # older layout is rejected rather than reused, so a summary
+                    # naming a superseded version identifies maps that predate a
+                    # loader change.
+                    'playback_cache_schema_version': int(
+                        PLAYBACK_CACHE_SCHEMA_VERSION
+                    ),
                     # Which depth-field sidecar supplied each block's vertex
                     # identities, and the coordinate space each one *declared* in its
                     # parquet metadata (never inferred from the directory name). A

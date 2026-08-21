@@ -7,22 +7,32 @@ a median-footprint ``stroke_proximal`` -- and shows, step by step, how the raw
 
 * ``03a_touch_frames.png``       -- the touch's contact frames (contacts sweep
                                     across the arm; colour = that frame's IFF).
-* ``03b_grouping_averaging.png`` -- the reduction itself: Σ IFF, contact count,
-                                    and mean = Σ / count (reproduces
-                                    ``_compute_touch_rf``, mean branch only).
+* ``03b_grouping_averaging.png`` -- the reduction itself: Σ w·IFF, Σ w, and
+                                    mean = Σ w·IFF / Σ w.
 * ``03c_attributes.png``         -- this touch's stimulus / kinematic / mechanical
                                     / neural attributes.
 
-Frame reduction reproduces ``rf_single_touch_pipeline._compute_touch_rf`` exactly
-(iterate every 1 kHz frame, ``val_sum += IFF``, ``count += 1``, ``mean = sum/count``).
+Panel 03b does **not** re-implement the reduction: it *calls*
+``rf_single_touch_pipeline._compute_touch_rf`` and plots what that returns, so the
+figure and ``single_touch_rf_maps_mean.npz`` cannot disagree. It previously kept
+its own inline copy of the mean branch, which stopped matching the saved map the
+moment depth weighting landed. ``Σ w·IFF`` is recovered as ``mean × weight_sum``
+rather than accumulated a second time, for the same reason.
+
+``--depth-weight-alpha`` is **required**: it is the exponent of the per-contact-point
+depth weighting and has no default anywhere in the call chain. Pass the same value
+as ``tasks.spatial_map_single_touch.options.depth_weight_alpha`` in
+``configs/analyse_workflow_processing_dag.yaml`` to draw the maps that stage saved;
+``0.0`` draws the unweighted maps.
 
 Run from an activated ``social-touch-analysis`` env:
 
-    python scripts/generate_rf_single_touch_detail.py
+    python scripts/generate_rf_single_touch_detail.py --depth-weight-alpha 1.0
 """
 
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 
 import matplotlib
@@ -37,6 +47,9 @@ from _vendor.path_tools import get_project_data_root
 from analysis.receptive_field_mapping.data.rf_data_loader import resolve_forearm_ply
 from analysis.receptive_field_mapping.data.rf_extraction_io import load_rf_camera_rotation
 from analysis.receptive_field_mapping.data.touch_playback_data import load_playback_data
+from analysis.receptive_field_mapping.pipelines.rf_single_touch_pipeline import (
+    _compute_touch_rf,
+)
 
 SESSION = "2022-06-17_ST16-02"
 BLOCK, TRIAL, TOUCH = 3, 7, 81  # touch #166 in the population ordering
@@ -124,33 +137,37 @@ def generate_frames(ev, forearm_xyz, R) -> None:
     print(f"[gen ] 03a_touch_frames.png  ({ncol} frames)")
 
 
-def generate_grouping_averaging(ev, forearm_xyz, R) -> None:
-    """Reproduce _compute_touch_rf (mean branch) and show Σ / count / mean."""
-    n_vertices = len(forearm_xyz)
-    val_sum = np.zeros(n_vertices)
-    count = np.zeros(n_vertices)
-    for fi in range(len(ev.frame_vertex_indices)):
-        verts = ev.frame_vertex_indices[fi]
-        if len(verts) == 0:
-            continue
-        np.add.at(val_sum, verts, ev.frame_iff[fi])
-        np.add.at(count, verts, 1.0)
+def generate_grouping_averaging(ev, forearm_xyz, R, depth_weight_alpha: float) -> None:
+    """Plot the pipeline's own reduction: Σ w·IFF, Σ w, and their ratio.
 
-    contacted = np.where(count > 0)[0]
-    mean = val_sum[contacted] / count[contacted]
-    valid = ~np.isnan(mean)
-    contacted = contacted[valid]
-    mean = mean[valid]
-    sum_c = val_sum[contacted]
-    cnt_c = count[contacted]
+    Calls ``_compute_touch_rf`` — the single function the DAG stage uses — rather
+    than reproducing it, so this figure is the saved ``.npz`` drawn, not a second
+    implementation that can drift away from it.
+    """
+    maps = _compute_touch_rf(ev, len(forearm_xyz), "iff", depth_weight_alpha)
+    if not maps.mean_pairs:
+        raise ValueError(
+            "generate_rf_single_touch_detail: _compute_touch_rf returned no "
+            f"contacted vertices for touch ({BLOCK},{TRIAL},{TOUCH})."
+        )
+
+    # All four lists of a TouchRFMaps cover the same vertices in the same order,
+    # so they zip positionally.
+    contacted = np.array([i for i, _ in maps.mean_pairs], dtype=np.int64)
+    mean = np.array([v for _, v in maps.mean_pairs], dtype=np.float64)
+    wsum_c = np.array([v for _, v in maps.weight_sum_pairs], dtype=np.float64)
+    # Σ w·IFF is the numerator the estimator already divided by Σ w. Recovering it
+    # by multiplication keeps the figure a view of the pipeline's arithmetic; a
+    # second accumulation loop here is what made this script stale before.
+    sum_c = mean * wsum_c
 
     bg2d = _project(forearm_xyz, R)
     p2d = _project(forearm_xyz[contacted], R)
 
     panels = [
-        ("Σ IFF  (val_sum)", sum_c, "summed IFF (Hz)"),
-        ("contact count", cnt_c, "frames touching vertex"),
-        ("mean = Σ / count", mean, "mean IFF (Hz)"),
+        ("Σ w·IFF  (weighted sum)", sum_c, "summed w·IFF (Hz)"),
+        ("Σ w  (weight sum)", wsum_c, "summed contact weight"),
+        ("mean = Σ w·IFF / Σ w", mean, "mean IFF (Hz)"),
     ]
     fig, axes = plt.subplots(1, 3, figsize=(13.5, 4.6))
     for ax, (title, vals, clabel) in zip(axes, panels):
@@ -161,9 +178,9 @@ def generate_grouping_averaging(ev, forearm_xyz, R) -> None:
         cb.set_label(clabel, fontsize=9)
 
     fig.suptitle(
-        f"Reducing the touch: every contacted vertex accumulates IFF across the "
-        f"{int(cnt_c.max())} frames it is touched, then Σ ÷ count → {len(contacted)} "
-        f"per-vertex mean values",
+        f"Reducing the touch (depth_weight_alpha = {depth_weight_alpha:g}): every "
+        f"contacted vertex accumulates w·IFF over the frames that touch it, then "
+        f"Σ w·IFF ÷ Σ w → {len(contacted)} per-vertex mean values",
         fontsize=13,
     )
     fig.tight_layout()
@@ -171,7 +188,7 @@ def generate_grouping_averaging(ev, forearm_xyz, R) -> None:
     fig.savefig(out, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"[gen ] 03b_grouping_averaging.png  ({len(contacted)} vertices, "
-          f"max count {int(cnt_c.max())})")
+          f"max Σw {wsum_c.max():.2f}, alpha={depth_weight_alpha:g})")
 
 
 def _fmt(v, unit=""):
@@ -250,7 +267,26 @@ def generate_attributes(csv_path: Path) -> None:
     print("[gen ] 03c_attributes.png")
 
 
-def main() -> None:
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Deep-dive figures for the single-touch reduction stage.",
+    )
+    parser.add_argument(
+        "--depth-weight-alpha",
+        type=float,
+        required=True,
+        help=(
+            "Exponent of the per-contact-point depth weighting, as in "
+            "tasks.spatial_map_single_touch.options.depth_weight_alpha. Required: "
+            "no level of the call chain supplies a default, and a figure drawn at a "
+            "different alpha from the saved maps would misrepresent them. 0.0 draws "
+            "the unweighted maps."
+        ),
+    )
+    return parser.parse_args()
+
+
+def main(depth_weight_alpha: float) -> None:
     data_root = Path(get_project_data_root())
     analysed = _require(data_root / "4_analysed")
     csv_path = _require(analysed / "touch_compute_series" / f"{SESSION}_series_augmented.csv")
@@ -286,10 +322,10 @@ def main() -> None:
 
     FIG.mkdir(parents=True, exist_ok=True)
     generate_frames(ev, forearm_xyz, R)
-    generate_grouping_averaging(ev, forearm_xyz, R)
+    generate_grouping_averaging(ev, forearm_xyz, R, depth_weight_alpha)
     generate_attributes(csv_path)
     print(f"\nDone. Figures written to {FIG}")
 
 
 if __name__ == "__main__":
-    main()
+    main(_parse_args().depth_weight_alpha)

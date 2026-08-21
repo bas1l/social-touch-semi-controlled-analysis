@@ -160,6 +160,8 @@ _OPTION_GROUP_OF: dict[str, str] = {
     "iff_metric": "neuron",
     "response_metric": "neuron",
     # preprocessing & methods (shared across boundary methods, method-agnostic)
+    "depth_weight_alpha": "method",
+    "contact_depth_field": "method",
     "min_overlap_pct": "method",
     "median_filter_size": "method",
     "use_tuned_params": "method",
