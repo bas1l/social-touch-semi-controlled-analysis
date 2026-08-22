@@ -10,6 +10,19 @@ GESTURE_TYPES`` etc.
 """
 
 from .session_discovery import collect_unique_session_dirs, discover_input_items
+from .execution_events import (
+    SENTINEL_PREFIX,
+    ConsoleLine,
+    RunFinished,
+    TaskFinished,
+    TaskStarted,
+    TaskStatus,
+    decode_event,
+    encode_event,
+)
+from .dag_plan import DagPlan, DagTask
+from .dag_execution import RunOutcome, execute_dag, format_run_summary
+from .task_registry import TaskMeta, get_task_meta, load_registry
 from .stage_runner import run_pipeline_stages
 from .shared_constants import (
     GESTURE_TYPES,
@@ -29,6 +42,22 @@ __all__ = [
     "collect_unique_session_dirs",
     "discover_input_items",
     "run_pipeline_stages",
+    "SENTINEL_PREFIX",
+    "ConsoleLine",
+    "RunFinished",
+    "TaskFinished",
+    "TaskStarted",
+    "TaskStatus",
+    "decode_event",
+    "encode_event",
+    "DagPlan",
+    "DagTask",
+    "RunOutcome",
+    "execute_dag",
+    "format_run_summary",
+    "TaskMeta",
+    "get_task_meta",
+    "load_registry",
     "GESTURE_TYPES",
     "TOUCH_ID_COLS",
     "TOUCH_ID_COLS_WITH_SESSION",

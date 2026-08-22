@@ -22,27 +22,52 @@ from PyQt5.QtWidgets import (
     QPushButton,
     QSplitter,
     QStatusBar,
+    QTabWidget,
     QToolBar,
     QVBoxLayout,
     QWidget,
 )
 
+from analysis.pipeline.execution_events import (
+    ConsoleLine,
+    RunFinished,
+    TaskFinished,
+    TaskStarted,
+    TaskStatus,
+)
 from utils.gui.analysis_runner_gui.console_widget import ConsoleWidget
 from utils.gui.analysis_runner_gui.kinect_directory_selector import SessionConfigSelector
 from utils.gui.analysis_runner_gui.runner_config import WorkflowEntry
 from utils.gui.analysis_runner_gui.prefect_server_manager import PrefectServerManager
 from utils.gui.analysis_runner_gui.process_output_reader import ProcessOutputReader
+from utils.gui.analysis_runner_gui.process_tree import (
+    kill_process_tree,
+    popen_group_kwargs,
+)
 from utils.gui.analysis_runner_gui.run_log_file import RunLogFile
+from utils.gui.analysis_runner_gui.status_channel import parse_status_line
+from utils.gui.analysis_runner_gui.task_detail_panel import TaskDetailPanel
 from utils.gui.analysis_runner_gui.task_panel import TaskPanel
 from utils.gui.analysis_runner_gui.workflow_selector import WorkflowSelector
 from utils.pipeline.dag_config_model import DagConfigModel
 
 
 class AnalysisRunnerGUI(QMainWindow):
-    """Three-column GUI: workflow selector (left), tasks (center), kinect dirs (right)."""
+    """Three-column GUI: workflow selector (left), DAG (centre), tabs (right).
+
+    The right-hand column is a tab stack holding the session-config tree and
+    the per-task options editor, so the DAG owns the whole height of the centre
+    column.
+    """
 
     _WORKFLOW_PANEL_WIDTH = 200
-    _SESSION_PANEL_WIDTH = 200
+    #: Initial width of the tabbed right-hand column.  Wider than the session
+    #: tree alone needed, because the options editor now shares it.
+    _RIGHT_PANEL_WIDTH = 320
+
+    #: Tab order in the right-hand column.
+    _TAB_SESSIONS = 0
+    _TAB_TASK_OPTIONS = 1
 
     def __init__(
         self,
@@ -61,6 +86,9 @@ class AnalysisRunnerGUI(QMainWindow):
         self._reader: ProcessOutputReader | None = None
         self._log_file: RunLogFile | None = None
         self._aborting: bool = False
+        self._run_finished: RunFinished | None = None
+        self._status_channel_broken: bool = False
+        self._suppress_options_tab_raise: bool = False
 
         self.setWindowTitle("AnalysisRunnerGUI")
         self.resize(1100, 700)
@@ -107,13 +135,19 @@ class AnalysisRunnerGUI(QMainWindow):
         self._task_panel = TaskPanel()
         self._splitter.addWidget(self._task_panel)
 
-        # --- Right column: session config selector (25%) ---
+        # --- Right column: tabbed sessions + per-task options ---
+        # The options editor lives here rather than under the DAG so the graph
+        # keeps the full height of the centre column.
         self._kinect_selector = SessionConfigSelector(self._configs_dir)
-        self._splitter.addWidget(self._kinect_selector)
+        self._detail_panel = TaskDetailPanel()
+        self._right_tabs = QTabWidget()
+        self._right_tabs.addTab(self._kinect_selector, "Sessions")
+        self._right_tabs.addTab(self._detail_panel, "Task Options")
+        self._splitter.addWidget(self._right_tabs)
 
-        self._splitter.setStretchFactor(0, 0)  # workflow selector — no extra stretch, stays at content width
-        self._splitter.setStretchFactor(1, 2)  # task panel        (1/2)
-        self._splitter.setStretchFactor(2, 1)  # kinect selector   (1/4)
+        self._splitter.setStretchFactor(0, 0)   # workflow selector — stays at content width
+        self._splitter.setStretchFactor(1, 12)  # DAG panel
+        self._splitter.setStretchFactor(2, 5)   # tabbed right column
 
         # --- Console panel ---
         self._console = ConsoleWidget()
@@ -138,6 +172,12 @@ class AnalysisRunnerGUI(QMainWindow):
         self._workflow_selector.workflow_changed.connect(self._load_workflow)
         self._kinect_selector.selection_changed.connect(self._on_kinect_changed)
         self._task_panel.task_changed.connect(self._mark_dirty)
+        # The centre column reports *which* task is selected; this window owns
+        # the model and decides where the options are rendered.
+        self._task_panel.task_selected.connect(self._on_task_selected)
+        # The options editor is a sibling of the task panel now, so its edits
+        # reach the dirty flag directly instead of bubbling through TaskPanel.
+        self._detail_panel.task_changed.connect(self._mark_dirty)
 
     def _build_run_bar(self) -> QWidget:
         bar = QWidget()
@@ -193,10 +233,18 @@ class AnalysisRunnerGUI(QMainWindow):
             QMessageBox.critical(self, "Load Error", str(exc))
             return
         has_sessions = self._model.has_session_configs()
-        self._kinect_selector.setVisible(has_sessions)
+        self._right_tabs.setTabVisible(self._TAB_SESSIONS, has_sessions)
         if has_sessions:
             self._kinect_selector.populate(self._model)
-        self._task_panel.populate(self._model)
+        # populate() re-selects the first task, which re-points the options
+        # editor at the new DAG.  The tab must not follow: loading a workflow
+        # is not the user asking for options, and on launch it would bury the
+        # session tree before the user has seen it.
+        self._suppress_options_tab_raise = True
+        try:
+            self._task_panel.populate(self._model)
+        finally:
+            self._suppress_options_tab_raise = False
         self._save_action.setEnabled(True)
         self._save_as_action.setEnabled(True)
         self._update_title()
@@ -214,6 +262,25 @@ class AnalysisRunnerGUI(QMainWindow):
             return
         self._workflow_selector.select_entry(default)
         self._load_workflow(default)
+
+    # ------------------------------------------------------------------
+    # Task selection
+    # ------------------------------------------------------------------
+
+    def _on_task_selected(self, task_name: str) -> None:
+        """Render *task_name*'s options and bring them into view.
+
+        Raising the tab is deliberate: a click on a graph node that silently
+        updated a hidden tab would look like the click did nothing.  It is
+        suppressed only while a workflow is being loaded, where the selection
+        is the panel's own doing rather than the user's.
+        """
+        assert self._model is not None, (
+            f"task {task_name!r} selected with no DAG config loaded"
+        )
+        self._detail_panel.show_task(self._model, task_name)
+        if not self._suppress_options_tab_raise:
+            self._right_tabs.setCurrentIndex(self._TAB_TASK_OPTIONS)
 
     # ------------------------------------------------------------------
     # Dirty-state management
@@ -285,15 +352,19 @@ class AnalysisRunnerGUI(QMainWindow):
             w = self._splitter.width()
             h = self._vsplitter.height()
             if w > 0 and h > 0:
-                center = max(w - self._WORKFLOW_PANEL_WIDTH - self._SESSION_PANEL_WIDTH, 0)
-                self._splitter.setSizes([self._WORKFLOW_PANEL_WIDTH, center, self._SESSION_PANEL_WIDTH])
+                center = max(w - self._WORKFLOW_PANEL_WIDTH - self._RIGHT_PANEL_WIDTH, 0)
+                self._splitter.setSizes(
+                    [self._WORKFLOW_PANEL_WIDTH, center, self._RIGHT_PANEL_WIDTH]
+                )
                 self._vsplitter.setSizes([int(h * 0.7), int(h * 0.3)])
                 self._initial_sizes_applied = True
 
     def closeEvent(self, event) -> None:  # noqa: N802
         if self._process is not None:
+            # Kill the tree, not just the direct child: a Prefect flow
+            # subprocess must never outlive the window that started it.
             self._aborting = True
-            self._process.terminate()
+            kill_process_tree(self._process)
             self._process.wait()
             self._process = None
             if self._poll_timer is not None:
@@ -342,11 +413,61 @@ class AnalysisRunnerGUI(QMainWindow):
             self._run_label.setStyleSheet("")
             self._run_button.setEnabled(True)
 
+    def _enabled_bypassed_tasks(self) -> list[str]:
+        """Tasks this run will bypass, in config order.
+
+        A disabled task's ``bypass`` is inert — the ladder never reaches row 3
+        for it — so it is deliberately not listed.
+        """
+        if self._model is None:
+            return []
+        return [
+            name
+            for name in self._model.get_task_names()
+            if self._model.is_task_enabled(name) and self._model.is_task_bypassed(name)
+        ]
+
+    def _confirm_bypasses(self) -> bool:
+        """Ask before a run that bypasses anything; True means "go ahead".
+
+        ``bypass`` persists in the YAML, so the flag that unblocked yesterday's
+        re-run is still set today.  This modal is the first of the three
+        mitigations for that — the console banner and the violet node are the
+        other two — and it says outright that *nothing* is checked, because a
+        bypass is an assertion by the user about the disk that the pipeline
+        neither tests nor can test.  Cancel is the default and the escape
+        button: the safe answer must be the one a reflexive Enter produces.
+        """
+        bypassed = self._enabled_bypassed_tasks()
+        if not bypassed:
+            return True
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("Bypassed Tasks")
+        box.setText(f"{len(bypassed)} enabled task(s) will be BYPASSED in this run.")
+        box.setInformativeText(
+            "A bypassed task is marked completed so its dependents can run, but "
+            "it does not run and nothing about it is checked — no file, no "
+            "folder, no timestamp. Downstream tasks will read whatever is "
+            "already on disk, however old, partial or unrelated it is.\n\n"
+            "Tasks to be bypassed:\n"
+            + "\n".join(f"  • {name}" for name in bypassed)
+        )
+        box.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
+        box.setDefaultButton(QMessageBox.Cancel)
+        box.setEscapeButton(QMessageBox.Cancel)
+        return box.exec_() == QMessageBox.Ok
+
     def _on_run(self) -> None:
         if self._current_entry is None:
             return
         if self._model:
             self._on_save()
+        # Ordering: validate, then confirm, and only then clear the statuses.
+        # Cancelling here must leave the previous run's report on the graph.
+        if not self._confirm_bypasses():
+            self.statusBar().showMessage("Run cancelled — bypassed tasks unconfirmed", 5000)
+            return
         if not self._server_manager.is_running():
             self.statusBar().showMessage("Restarting Prefect server…")
             self._server_manager.start()
@@ -360,17 +481,28 @@ class AnalysisRunnerGUI(QMainWindow):
             cmd += ["--dag-config", str(self._current_entry.dag_config)]
         env = self._server_manager.get_env() if self._server_manager.is_running() else None
         self._aborting = False
+        self._run_finished = None
+        self._status_channel_broken = False
         self._console.clear()
+        self._task_panel.clear_task_statuses()
         self._log_file = self._open_run_log(project_root, cmd)
+        # The child is put in its own process group / session so that aborting
+        # the run can address the whole tree — it spawns Prefect flow
+        # subprocesses that ``terminate()`` would leave orphaned.
         self._process = subprocess.Popen(
             cmd,
             cwd=str(project_root),
             env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
+            **popen_group_kwargs(),
         )
         self._reader = ProcessOutputReader(self._process)
-        self._reader.line_received.connect(self._console.append_line)
+        # Full lines go through the status-channel filter first; tqdm frames
+        # never carry sentinels, so they keep their direct route.  Both kinds
+        # are logged verbatim, sentinels included, so a run log can be replayed
+        # into the graph later.
+        self._reader.line_received.connect(self._on_output_line)
         self._reader.cr_line_received.connect(self._console.replace_last_line)
         self._reader.line_received.connect(self._log_file.write_line)
         self._reader.cr_line_received.connect(self._log_file.write_cr)
@@ -405,6 +537,79 @@ class AnalysisRunnerGUI(QMainWindow):
         )
         return RunLogFile(log_path, header)
 
+    # ------------------------------------------------------------------
+    # Status channel
+    # ------------------------------------------------------------------
+
+    def _on_output_line(self, line: str) -> None:
+        """Route one child-process line to the graph or to the console.
+
+        Sentinel lines are *consumed* here: they carry no information for a
+        human reader and would drown the console.  They still reach the run log
+        verbatim through the reader's other connection.
+        """
+        try:
+            event = parse_status_line(line)
+        except ValueError as exc:
+            # A malformed sentinel is a producer bug, and a dropped terminal
+            # status would leave a node stuck pending.  Report it loudly, mark
+            # the run as errored, and carry on consuming output: raising out of
+            # a Qt slot mid-run would destroy the very console backlog needed
+            # to diagnose it.
+            self._status_channel_broken = True
+            self._console.append_line(f"!! MALFORMED STATUS EVENT: {exc}")
+            return
+        if event is None:
+            self._console.append_line(line)
+            return
+        self._apply_event(event)
+
+    def _apply_event(self, event: object) -> None:
+        """Reflect one decoded execution event in the UI."""
+        if isinstance(event, TaskStarted):
+            self._task_panel.set_task_status(event.name, TaskStatus.RUNNING)
+            return
+        if isinstance(event, TaskFinished):
+            self._task_panel.set_task_status(event.name, event.status)
+            return
+        if isinstance(event, RunFinished):
+            self._run_finished = event
+            return
+        if isinstance(event, ConsoleLine):
+            self._console.append_line(event.text)
+            return
+        raise TypeError(f"unhandled DAG event: {event!r}")
+
+    # ------------------------------------------------------------------
+    # Run outcome
+    # ------------------------------------------------------------------
+
+    def _outcome_message(self, retcode: int) -> str:
+        """Status-bar wording for a finished run.
+
+        The run's own ``RunFinished`` event is authoritative because it names
+        the failed tasks; the exit code is the fallback for a run that died
+        before reporting one (a crash, a kill, an older child script).
+        """
+        event = self._run_finished
+        if event is None:
+            label = "Finished" if retcode == 0 else "Failed"
+            return f"{label} (exit code {retcode})"
+        if event.aborted:
+            return "Aborted"
+        if event.failed:
+            return f"Failed — {len(event.failed)} task(s) failed"
+        return "Finished"
+
+    def _write_failure_summary(self) -> None:
+        """Name the failed tasks in the console, once, at the end of a run."""
+        event = self._run_finished
+        if event is None or not event.failed:
+            return
+        self._console.append_line(
+            f"!! {len(event.failed)} task(s) failed: " + ", ".join(event.failed)
+        )
+
     def _poll_process(self) -> None:
         if self._process is None:
             return
@@ -422,21 +627,24 @@ class AnalysisRunnerGUI(QMainWindow):
             self._log_file.close()
             self._log_file = None
         if self._aborting:
-            self.statusBar().showMessage(f"Aborted — log: {log_path}")
+            outcome = "Aborted"
         else:
-            label = "Finished" if retcode == 0 else "Failed"
-            self.statusBar().showMessage(f"{label} (exit code {retcode}) — log: {log_path}")
+            self._write_failure_summary()
+            outcome = self._outcome_message(retcode)
+        if self._status_channel_broken:
+            outcome += " (status channel error)"
+        self.statusBar().showMessage(f"{outcome} — log: {log_path}")
         self._run_button.setEnabled(True)
         self._process = None
 
     def _on_abort(self) -> None:
-        """Terminate the running subprocess; let the poll timer handle cleanup."""
+        """Kill the run's whole process tree; let the poll timer handle cleanup."""
         if self._process is None:
             return
         self._aborting = True
         self._abort_button.setVisible(False)
         self.statusBar().showMessage("Aborting …")
-        self._process.terminate()
+        kill_process_tree(self._process)
 
     def _confirm_discard(self) -> bool:
         reply = QMessageBox.question(

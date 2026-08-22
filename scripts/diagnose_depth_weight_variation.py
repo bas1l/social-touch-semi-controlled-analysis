@@ -55,8 +55,9 @@ separately, because including them would bias the answer in opposite directions:
 * **zero-weight vertices** — contacted at least once with a clamped (grazing)
   penetration, so ``min(w) == 0`` and the ratio is infinite.  These are counted
   and named rather than divided by: at ``alpha > 0`` a vertex whose weights are
-  *all* zero makes ``_compute_touch_rf`` raise, and one whose weights are only
-  *sometimes* zero is the most extreme variation there is.
+  *all* zero has no estimate at all — ``_compute_touch_rf`` excludes it from the
+  map and counts it — and one whose weights are only *sometimes* zero is the most
+  extreme variation there is.
 
 A coefficient of variation (std / mean of each vertex's weights) is reported
 beside the ratio because the ratio is a two-sample statistic — one deep frame and
@@ -79,7 +80,6 @@ Usage
         --prepared-csv "<db>/4_analysed/preparation/<session>_prepared.csv" \\
         [--depth-weight-alpha 1.0] \\
         [--blocks-stage-dir blocks_rf_centered] \\
-        [--block-csv-stem-suffix _pca-xyz] \\
         [--flat-ratio-threshold 1.05]
 
 Every path is an argument.  Nothing is discovered, defaulted or guessed.
@@ -281,7 +281,6 @@ def main() -> None:
     parser.add_argument("--prepared-csv", required=True, type=Path)
     parser.add_argument("--depth-weight-alpha", type=float, default=1.0)
     parser.add_argument("--blocks-stage-dir", default="blocks_rf_centered")
-    parser.add_argument("--block-csv-stem-suffix", default="_pca-xyz")
     parser.add_argument(
         "--flat-ratio-threshold",
         type=float,
@@ -309,7 +308,6 @@ def main() -> None:
         args.prepared_csv,
         forearm_ply,
         depth_blocks_dir=session_root / args.blocks_stage_dir,
-        block_csv_stem_suffix=args.block_csv_stem_suffix,
         session_id=args.session,
     )
 

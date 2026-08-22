@@ -134,6 +134,54 @@ class DagConfigModel:
         self._get_task(task_name)["enabled"] = enabled
         self._dirty = True
 
+    def is_task_bypassed(self, task_name: str) -> bool:
+        """Return the task's persisted ``bypass`` flag.
+
+        ``bypass`` is a *required* key on every task — a bypassed task is marked
+        completed without running or verifying anything, so an absent key must
+        not be read as "false".  An unreadable flag is a config error and raises,
+        matching :class:`~analysis.pipeline.dag_plan.DagPlan`, which rejects the
+        same config at load time rather than guessing.
+        """
+        task = self._get_task(task_name)
+        if "bypass" not in task:
+            raise KeyError(
+                f"Task '{task_name}' declares no 'bypass' key in {self._path}"
+            )
+        value = task["bypass"]
+        if not isinstance(value, bool):
+            raise TypeError(
+                f"Task '{task_name}' has non-boolean bypass {value!r} in {self._path}"
+            )
+        return value
+
+    def set_task_bypassed(self, task_name: str, bypass: bool) -> None:
+        """Persist the task's ``bypass`` flag, keeping it directly after ``enabled``.
+
+        The repo-wide task key order is ``category, enabled, bypass, options,
+        depends_on``.  A plain assignment appends a missing key at the end of the
+        map, so a first write is done with :meth:`CommentedMap.insert` at the
+        position after ``enabled`` instead.
+        """
+        task = self._get_task(task_name)
+        if "bypass" in task:
+            task["bypass"] = bypass
+            self._dirty = True
+            return
+        if not isinstance(task, CommentedMap):
+            raise TypeError(
+                f"Task '{task_name}' is a {type(task).__name__}, not a round-trip "
+                f"CommentedMap, so 'bypass' cannot be positioned after 'enabled'"
+            )
+        keys = list(task.keys())
+        if "enabled" not in keys:
+            raise KeyError(
+                f"Task '{task_name}' declares no 'enabled' key in {self._path}, "
+                f"so 'bypass' has no anchor to be inserted after"
+            )
+        task.insert(keys.index("enabled") + 1, "bypass", bypass)
+        self._dirty = True
+
     def get_task_options(self, task_name: str) -> dict[str, Any]:
         return dict(self._get_task(task_name).get("options", {}) or {})
 
@@ -229,8 +277,32 @@ class DagConfigModel:
         deps = self._get_task(task_name).get("depends_on", [])
         return list(deps) if deps else []
 
-    def get_task_description(self, task_name: str) -> str | None:
-        return self._get_task(task_name).get("description")
+    def set_task_dependencies(self, task_name: str, dependencies: list[str]) -> None:
+        """Overwrite the task's ``depends_on`` list, keeping its rendered style.
+
+        The shipped configs mix block-style and flow-style sequences, so the
+        replacement copies whichever style the existing value carried; a
+        flow-style ``depends_on: [a, b]`` stays on one logical line instead of
+        being silently re-rendered as a block list.
+
+        This is the model's mutation API for the DAG topology.  Nothing in the
+        GUI calls it on an ``enabled`` toggle: the declared topology describes
+        the DAG, not one run's choices, and rewriting it to express a per-run
+        decision is what ``bypass`` exists to avoid.
+        """
+        task = self._get_task(task_name)
+        if "depends_on" not in task:
+            raise KeyError(
+                f"Task '{task_name}' declares no 'depends_on' key in {self._path}"
+            )
+        existing = task["depends_on"]
+        seq = CommentedSeq(dependencies)
+        if isinstance(existing, CommentedSeq) and existing.fa.flow_style():
+            seq.fa.set_flow_style()
+        else:
+            seq.fa.set_block_style()
+        task["depends_on"] = seq
+        self._dirty = True
 
     # ------------------------------------------------------------------
     # Cluster groups — CRUD for stimulus_cluster_touches groups and downstream refs

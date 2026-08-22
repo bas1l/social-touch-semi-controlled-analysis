@@ -16,6 +16,13 @@ Both ``.npz`` files also carry the confidence channel — per-vertex ``weight_su
 and Kish ``n_eff`` — which display code consumes and which never alters the
 estimate.
 
+A contacted vertex with **no estimate** — every frame grazing, so ``sum(w) == 0``
+at ``depth_weight_alpha > 0``, or every contributing frame's neuron value NaN — is
+excluded from the maps and **counted**. The per-session totals are written into
+``single_touch_rf_summary.json`` next to ``depth_weight_alpha`` and printed at the
+end of the session, because an excluded vertex is otherwise indistinguishable from
+one that was never touched.
+
 Depends on: ``touch_prepare_sessions`` (reads ``<session>_prepared.csv``).
 """
 
@@ -30,6 +37,10 @@ from analysis.receptive_field_mapping.data.rf_data_loader import resolve_forearm
 from analysis.receptive_field_mapping.data.vertex_accumulator import (
     accumulate_vertex_values_into,
     empty_accumulator,
+)
+from analysis.receptive_field_mapping.data.vertex_estimate import (
+    count_no_estimate,
+    weighted_mean_or_nan,
 )
 from analysis.receptive_field_mapping.data.touch_frame_weights import (
     touch_frame_weights,
@@ -54,17 +65,30 @@ _VALID_NEURON_MODES = NEURON_MODES  # re-exported for backward compatibility
 
 
 class TouchRFMaps(NamedTuple):
-    """One touch's per-vertex results: two estimates and their confidence channel.
+    """One touch's per-vertex results, plus a count of what was left out.
 
     All four lists cover the **same vertices, in the same order**, so they can be
     zipped positionally. The confidence channel describes the evidence behind
     ``mean_pairs``; it never modifies it.
+
+    The two counts are not decoration. A vertex that was contacted but has no
+    estimate is *absent* from all four lists, and absence is indistinguishable
+    from "never touched" once the pairs are on disk. These counts are what makes
+    the exclusion visible; they are aggregated into
+    ``single_touch_rf_summary.json`` so a run's excluded vertices are readable
+    off the artifact rather than only off a log line.
     """
 
     mean_pairs: List[Tuple[int, float]]
     max_pairs: List[Tuple[int, float]]
     weight_sum_pairs: List[Tuple[int, float]]
     n_eff_pairs: List[Tuple[int, float]]
+    #: Contacted vertices dropped because every frame that touched them was
+    #: grazing, so their total weight is 0 and the weighted mean is 0/0.
+    n_no_estimate_zero_weight: int
+    #: Contacted vertices dropped because every contributing frame's neuron
+    #: value was NaN (e.g. the unit was not held during the touch window).
+    n_no_estimate_nan_value: int
 
 
 def _compute_touch_rf(
@@ -121,16 +145,35 @@ def _compute_touch_rf(
     Returns
     -------
     ``TouchRFMaps`` — mean, max, ``weight_sum`` and Kish ``n_eff`` as
-    ``(vertex_idx, value)`` pairs over the same vertices in the same order.
-    Vertices where all frames are NaN are excluded from all four lists.
+    ``(vertex_idx, value)`` pairs over the same vertices in the same order, plus
+    a count of the contacted vertices that were **excluded** and why.
+
+    Vertices with **no estimate** are excluded from all four lists. "No
+    estimate" is not "zero response" — nothing was measured to be zero, the
+    estimator is simply undefined there — and both causes are counted so the
+    exclusion is visible rather than silent:
+
+    * ``sum(w) == 0``: the vertex was contacted, but every frame that touched it
+      was grazing, so it carries **no penetration evidence** at this alpha and
+      the weighted mean is ``0/0``. It is *not* backfilled from the unweighted
+      mean: that would mix two different estimators inside one map. Unreachable
+      at ``depth_weight_alpha = 0``, where every weight is exactly ``1.0``.
+    * mean is NaN: every contributing frame's neuron value was NaN (e.g. the
+      unit was not held during the touch window — see ST13-03 blocks 5–8), so
+      there is a press but no neural measurement.
+
+    Both are the same statement — "this vertex has no number" — and both take
+    the same exit: absent from the map, present in the count.
 
     Raises
     ------
     ValueError
         A frame's depth array does not align with its vertex array, or a frame is
         entirely grazing (``d_max == 0``) — both raised by ``touch_frame_weights``,
-        the conversion this shares with the playback viewer; or a contacted vertex
-        ends with ``sum(w) == 0``.
+        the conversion this shares with the playback viewer. A *frame* in which
+        nothing pressed in is still an error, because it says the frame should
+        not have been recorded as a touch at all; a *vertex* that was only ever
+        grazed is a legitimate observation about one corner of a real press.
     """
     accum = empty_accumulator(n_vertices)
 
@@ -167,73 +210,76 @@ def _compute_touch_rf(
     weight_sq_sum = accum.weight_sq_sum
 
     if not touched:
-        return TouchRFMaps([], [], [], [])
+        return TouchRFMaps([], [], [], [], 0, 0)
 
     # The contacted set comes from the vertex lists, not from ``weight_sum > 0``.
     # Those two agree at alpha = 0 but part company above it: a vertex that was
     # genuinely contacted, but only ever grazingly, accumulates zero total weight.
-    # That is a 0/0 in the estimator and it must raise rather than reach the map
-    # as NaN — and it must be distinguishable from a vertex that was simply never
-    # touched, which is not an error at all.
+    # Both "never contacted" and "contacted but weightless" leave
+    # ``weight_sum == 0``, and only the second is something to report — so the
+    # contacted set has to be read off the vertex lists to keep them separable.
     contacted_indices = np.unique(np.concatenate(touched))
+    contacted_value_sum = val_sum[contacted_indices]
+    contacted_weight_sum = weight_sum[contacted_indices]
 
-    starved = contacted_indices[weight_sum[contacted_indices] <= 0.0]
-    if starved.size:
-        raise ValueError(
-            f"_compute_touch_rf: touch {_touch_label(touch)}: vertex/vertices "
-            f"{starved.tolist()[:10]} were contacted but accumulated a total "
-            f"weight of 0 at depth_weight_alpha={depth_weight_alpha!r}, so their "
-            f"weighted mean is 0/0. Every frame that touched them was grazing. "
-            f"There is no fallback to the unweighted mean: that would silently "
-            f"mix two different estimators in one map."
+    # One estimator, shared with ``gui.touch_playback_explorer``: the vertices
+    # this drops and the vertices the viewer paints grey are the same set by
+    # construction. NaN out of it means *no estimate* — never a measured zero.
+    mean_values = weighted_mean_or_nan(contacted_value_sum, contacted_weight_sum)
+    no_estimate_counts = count_no_estimate(contacted_value_sum, contacted_weight_sum)
+
+    # Two kinds of "no estimate", one exit. A zero-weight vertex has no
+    # penetration evidence at this alpha; a NaN-mean vertex has no neural
+    # measurement. Neither is backfilled — falling back to the unweighted mean
+    # would put two different estimators in one map — and neither reaches the
+    # output as ``0.0`` or ``NaN`` pretending to be a measurement. They are
+    # dropped and counted, and the count travels out in ``TouchRFMaps`` and into
+    # ``single_touch_rf_summary.json``.
+    #
+    # The same mask is applied to max, ``weight_sum`` and ``n_eff``: if the mean
+    # does not exist the vertex is not in the map at all, and all four lists stay
+    # vertex-aligned. It also keeps ``n_eff``'s divisor positive — ``weight_sq_sum``
+    # is 0 exactly where ``weight_sum`` is.
+    estimated = ~np.isnan(mean_values)
+    if not estimated.any():
+        return TouchRFMaps(
+            [], [], [], [],
+            no_estimate_counts.zero_weight,
+            no_estimate_counts.nan_value,
         )
-
-    mean_values = val_sum[contacted_indices] / weight_sum[contacted_indices]
-    max_values = val_max[contacted_indices]
-    weight_sum_values = weight_sum[contacted_indices]
+    kept_indices = contacted_indices[estimated]
+    mean_values = mean_values[estimated]
+    max_values = val_max[kept_indices]
+    weight_sum_values = weight_sum[kept_indices]
     # Kish effective sample size. Well defined wherever ``weight_sum > 0``,
     # because a positive weight has a positive square. Flat weights give
     # ``n_eff`` equal to the number of contributing frames however small those
     # weights are — being shallow costs no evidence, only being *inconsistently*
     # shallow does.
-    n_eff_values = (weight_sum_values * weight_sum_values) / weight_sq_sum[contacted_indices]
-
-    # Drop vertices whose mean is NaN. NaN propagates through ``np.add.at`` once
-    # any frame's ``neuron_values`` is NaN (e.g. unit not held during the touch
-    # window — see ST13-03 blocks 5–8). Keeping NaN pairs would yield invisible
-    # heatmaps but a non-zero vertex count, masking the "no neural data" state.
-    # The same NaN mask is applied to max values: if mean is NaN then all frames
-    # at that vertex were NaN, so max is also meaningless. The confidence channel
-    # is masked with it too, so all four lists stay vertex-aligned.
-    valid = ~np.isnan(mean_values)
-    if not valid.any():
-        return TouchRFMaps([], [], [], [])
-    contacted_indices = contacted_indices[valid]
-    mean_values = mean_values[valid]
-    max_values = max_values[valid]
-    weight_sum_values = weight_sum_values[valid]
-    n_eff_values = n_eff_values[valid]
+    n_eff_values = (weight_sum_values * weight_sum_values) / weight_sq_sum[kept_indices]
     return TouchRFMaps(
-        mean_pairs=[(int(i), float(v)) for i, v in zip(contacted_indices, mean_values)],
-        max_pairs=[(int(i), float(v)) for i, v in zip(contacted_indices, max_values)],
+        mean_pairs=[(int(i), float(v)) for i, v in zip(kept_indices, mean_values)],
+        max_pairs=[(int(i), float(v)) for i, v in zip(kept_indices, max_values)],
         weight_sum_pairs=[
-            (int(i), float(v)) for i, v in zip(contacted_indices, weight_sum_values)
+            (int(i), float(v)) for i, v in zip(kept_indices, weight_sum_values)
         ],
-        n_eff_pairs=[(int(i), float(v)) for i, v in zip(contacted_indices, n_eff_values)],
+        n_eff_pairs=[(int(i), float(v)) for i, v in zip(kept_indices, n_eff_values)],
+        n_no_estimate_zero_weight=no_estimate_counts.zero_weight,
+        n_no_estimate_nan_value=no_estimate_counts.nan_value,
     )
 
 
-# Config keys that say where a session's contact-depth-field sidecars live. Both are
+# Config key that says where a session's contact-depth-field sidecars live. It is
 # required: contact points take their vertex identity from those sidecars, so there is
-# no run without them and no default that could quietly pick the wrong stage.
+# no run without it and no default that could quietly pick the wrong stage. The sidecar
+# basename is derived from the CSV's own ``source_block_file`` column and nothing else.
 _BLOCKS_STAGE_DIR_KEY = "blocks_stage_dir"
-_BLOCK_CSV_STEM_SUFFIX_KEY = "block_csv_stem_suffix"
 
 
-def _require_depth_field_config(contact_depth_field: Optional[dict]) -> Tuple[str, str]:
-    """Validate the ``contact_depth_field`` option block and return its two values.
+def _require_depth_field_config(contact_depth_field: Optional[dict]) -> str:
+    """Validate the ``contact_depth_field`` option block and return its value.
 
-    Raises ``ValueError`` when the block is absent or either key is missing. There is
+    Raises ``ValueError`` when the block is absent or the key is missing. There is
     deliberately no default: guessing a blocks stage would silently decide which
     vertices every contact point is credited to.
     """
@@ -242,23 +288,19 @@ def _require_depth_field_config(contact_depth_field: Optional[dict]) -> Tuple[st
             "run_single_touch_rf_mapping: 'contact_depth_field' options block is "
             f"required, got {contact_depth_field!r}. Add it under "
             "tasks.spatial_map_single_touch.options in the processing DAG config with "
-            f"the keys {_BLOCKS_STAGE_DIR_KEY!r} and {_BLOCK_CSV_STEM_SUFFIX_KEY!r}."
+            f"the key {_BLOCKS_STAGE_DIR_KEY!r}."
         )
-    missing = [
-        key for key in (_BLOCKS_STAGE_DIR_KEY, _BLOCK_CSV_STEM_SUFFIX_KEY)
-        if key not in contact_depth_field
-    ]
-    if missing:
+    if _BLOCKS_STAGE_DIR_KEY not in contact_depth_field:
         raise ValueError(
-            f"run_single_touch_rf_mapping: 'contact_depth_field' is missing key(s) "
-            f"{missing}. Present keys: {sorted(contact_depth_field)}."
+            f"run_single_touch_rf_mapping: 'contact_depth_field' is missing key "
+            f"{_BLOCKS_STAGE_DIR_KEY!r}. Present keys: {sorted(contact_depth_field)}."
         )
     blocks_stage_dir = str(contact_depth_field[_BLOCKS_STAGE_DIR_KEY])
     if not blocks_stage_dir:
         raise ValueError(
             f"run_single_touch_rf_mapping: {_BLOCKS_STAGE_DIR_KEY!r} is empty."
         )
-    return blocks_stage_dir, str(contact_depth_field[_BLOCK_CSV_STEM_SUFFIX_KEY])
+    return blocks_stage_dir
 
 
 def run_single_touch_rf_mapping(
@@ -304,8 +346,8 @@ def run_single_touch_rf_mapping(
         since prepared CSVs are a hard dependency.
     contact_depth_field:
         Options block naming the blocks stage subdirectory holding the depth-field
-        parquet sidecars and the stem suffix that stage uses. Required — contact
-        points take their vertex identity from those sidecars.
+        parquet sidecars. Required — contact points take their vertex identity from
+        those sidecars.
 
     Returns
     -------
@@ -323,9 +365,7 @@ def run_single_touch_rf_mapping(
             "this task depends on touch_prepare_sessions output."
         )
 
-    blocks_stage_dir, block_csv_stem_suffix = _require_depth_field_config(
-        contact_depth_field
-    )
+    blocks_stage_dir = _require_depth_field_config(contact_depth_field)
 
     preparation_dir = Path(preparation_dir)
     if not preparation_dir.exists():
@@ -386,7 +426,6 @@ def run_single_touch_rf_mapping(
             series_csv_path=prepared_csv,
             forearm_ply_path=forearm_ply,
             depth_blocks_dir=depth_blocks_dir,
-            block_csv_stem_suffix=block_csv_stem_suffix,
             session_id=session_id,
         )
 
@@ -400,6 +439,13 @@ def run_single_touch_rf_mapping(
         rf_n_eff: dict = {}
         incremental_id = 0
         total_touches = 0
+        # Contacted vertices that reached no estimate, summed over touches. A
+        # vertex excluded from one touch's map is invisible in the artifact —
+        # absent looks exactly like never-touched — so the exclusion is carried
+        # out here and written to the sentinel rather than being dropped.
+        no_estimate_zero_weight = 0
+        no_estimate_nan_value = 0
+        touches_with_zero_weight_vertices = 0
 
         for block_id in playback.block_order_ids:
             for trial_id in playback.trial_ids_by_block[block_id]:
@@ -413,12 +459,38 @@ def run_single_touch_rf_mapping(
                     rf_data_max[incremental_id] = maps.max_pairs
                     rf_weight_sum[incremental_id] = maps.weight_sum_pairs
                     rf_n_eff[incremental_id] = maps.n_eff_pairs
+                    no_estimate_zero_weight += maps.n_no_estimate_zero_weight
+                    no_estimate_nan_value += maps.n_no_estimate_nan_value
+                    if maps.n_no_estimate_zero_weight:
+                        touches_with_zero_weight_vertices += 1
+                        logger.warning(
+                            "[Single-Touch RF] %s: touch %s — %d contacted "
+                            "vertex/vertices excluded from the mean map: every "
+                            "frame that touched them was grazing, so their total "
+                            "weight is 0 at depth_weight_alpha=%r and the weighted "
+                            "mean is 0/0. They are dropped, not backfilled from "
+                            "the unweighted mean.",
+                            session_id,
+                            _touch_label(touch),
+                            maps.n_no_estimate_zero_weight,
+                            depth_weight_alpha,
+                        )
                     incremental_id += 1
                     total_touches += 1
 
         print(
             f"[Single-Touch RF] {session_id}: {total_touches} touches processed, "
             f"{n_vertices} vertices in mesh."
+        )
+        print(
+            f"[Single-Touch RF] {session_id}: no estimate at "
+            f"{no_estimate_zero_weight + no_estimate_nan_value} contacted "
+            f"vertex-touches "
+            f"({no_estimate_zero_weight} all-grazing at "
+            f"depth_weight_alpha={depth_weight_alpha!r}, across "
+            f"{touches_with_zero_weight_vertices} touches; "
+            f"{no_estimate_nan_value} with no neural value). Excluded from the "
+            f"maps, never backfilled."
         )
 
         # --- Save .npz outputs (one per IFF metric) ---
@@ -456,6 +528,28 @@ def run_single_touch_rf_mapping(
                     # distinguishable on disk, and so a config change makes the
                     # sentinel disagree with the config that would produce it.
                     'depth_weight_alpha': float(depth_weight_alpha),
+                    # Contacted vertices that reached **no estimate** and were
+                    # therefore left out of the maps, summed over every touch in
+                    # the session. It sits next to ``depth_weight_alpha``
+                    # because ``zero_total_weight`` is a function of it: at
+                    # alpha = 0 every weight is exactly 1.0 and the count is
+                    # necessarily 0, and it grows as alpha concentrates credit
+                    # on the deepest contact. Counted rather than raised: a
+                    # vertex whose every contact was grazing has no penetration
+                    # evidence, so the weighted estimator is undefined there —
+                    # "no estimate" is the answer, not "stop". Never backfilled
+                    # from the unweighted mean; that would put two estimators in
+                    # one map.
+                    'no_estimate_vertices': {
+                        'zero_total_weight': int(no_estimate_zero_weight),
+                        'nan_neuron_value': int(no_estimate_nan_value),
+                        'total': int(
+                            no_estimate_zero_weight + no_estimate_nan_value
+                        ),
+                        'touches_with_zero_total_weight': int(
+                            touches_with_zero_weight_vertices
+                        ),
+                    },
                     # Which playback-cache layout the vertex identities and depths
                     # behind these maps were read through. A cache written under an
                     # older layout is rejected rather than reused, so a summary
@@ -472,7 +566,6 @@ def run_single_touch_rf_mapping(
                     # than being absorbed.
                     'contact_depth_field': {
                         'blocks_dir': str(depth_blocks_dir),
-                        'block_csv_stem_suffix': block_csv_stem_suffix,
                         'blocks': [
                             {
                                 'source_block_file': pv.source_block_file,

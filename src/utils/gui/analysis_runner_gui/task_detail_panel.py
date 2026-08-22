@@ -34,6 +34,7 @@ from utils.gui.analysis_runner_gui.radar_group_dialog import RadarGroupDialog
 from utils.gui.analysis_runner_gui.yaml_edit_dialog import YamlEditDialog
 from utils.pipeline.dag_config_model import DagConfigModel
 
+from analysis.pipeline.task_registry import get_task_meta
 from analysis.receptive_field_mapping.boundary import registry as boundary_registry
 
 _COMPLEX_FG = QColor("#336699")
@@ -416,6 +417,22 @@ class TaskDetailPanel(QWidget):
         )
         outer.addWidget(self._header)
 
+        # Pinned description, built once here rather than per task.  Built in
+        # show_task it would be destroyed by the clear loop below and skipped
+        # entirely by the option-less early return, so the one task that most
+        # needs explaining -- the one with no options -- would show nothing.
+        # Selectable so a task id or an output filename can be copied out.
+        self._description = QLabel()
+        self._description.setWordWrap(True)
+        self._description.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._description.setStyleSheet(
+            "padding: 6px 8px;"
+            "color: #444444;"
+            "background: #f6f6f6;"
+            "border-bottom: 1px solid #d8d8d8;"
+        )
+        outer.addWidget(self._description)
+
         # Scroll area for options
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -434,10 +451,16 @@ class TaskDetailPanel(QWidget):
     # ------------------------------------------------------------------
 
     def show_task(self, model: DagConfigModel, task_name: str) -> None:
-        """Clear the panel and rebuild for *task_name*."""
+        """Clear the panel and rebuild for *task_name*.
+
+        The wording comes from the task registry, which is the single owner of
+        every task's label and description; an unregistered task raises there
+        rather than being papered over with a placeholder.
+        """
         self._model = model
         self._task_name = task_name
         self._header.setText(task_name)
+        self._description.setText(get_task_meta(task_name).description)
 
         # Clear option sections — keep only the trailing stretch
         while self._layout.count() > 1:

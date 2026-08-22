@@ -63,7 +63,9 @@ from analysis.receptive_field_mapping.data.touch_playback_data import (
 from analysis.receptive_field_mapping.data.vertex_weights import vertex_weights
 from analysis.receptive_field_mapping.gui.touch_playback_explorer import (
     TouchPlaybackExplorer,
+    contacted_vertices,
     mean_heatmap_scalars,
+    no_estimate_summary,
     replay_touch_frames,
 )
 from analysis.receptive_field_mapping.pipelines import rf_single_touch_pipeline as pipe
@@ -191,8 +193,9 @@ def _grazing_touch() -> TouchEvent:
 
     * ``alpha = 0``: ``0.0 ** 0.0 == 1.0`` exactly, so v3 still weighs 1 and is
       credited exactly as the unweighted map credits it.
-    * ``alpha > 0``: v3's weights are all 0, its ``sum(w)`` is 0, and the
-      estimator raises rather than emitting ``0/0``.
+    * ``alpha > 0``: v3's weights are all 0, its ``sum(w)`` is 0, and it has **no
+      estimate** — the estimator drops it and counts it rather than emitting
+      ``0/0`` or backfilling from the unweighted mean.
 
     Both halves are asserted below; the second is what makes the first a
     statement about IEEE arithmetic rather than an accident.
@@ -248,16 +251,35 @@ class TestClampedGrazingContactsAtAlphaZero:
         # frames — 20 Hz, exactly as the unweighted estimator gives it.
         assert dict(maps.mean_pairs)[2] == 20.0
 
-    def test_the_same_vertex_raises_above_alpha_zero(self):
+    @pytest.mark.parametrize("alpha", [0.5, 1.0, 2.0])
+    def test_the_same_vertex_has_no_estimate_above_alpha_zero(self, alpha):
         """``alpha = 0`` is the *only* exponent at which grazing is harmless.
 
-        Above it the vertex accumulates zero total weight, and the estimator
-        must say so rather than fall back to the unweighted mean — mixing two
-        estimators in one map is the failure this raise exists to prevent.
+        Above it the vertex accumulates zero total weight and the weighted
+        estimator is undefined there — no penetration evidence, so no number.
+        It is dropped from all four lists and counted; it is **not** backfilled
+        from the unweighted mean, because mixing two estimators in one map is
+        the failure this policy exists to prevent, and it does **not** halt the
+        run, because "no estimate" is a fact about one vertex rather than a
+        broken input.
         """
         touch = _grazing_touch()
-        with pytest.raises(ValueError, match="accumulated a total"):
-            _compute_touch_rf(touch, 3, "iff", 1.0)
+        maps = _compute_touch_rf(touch, 3, "iff", alpha)
+        assert [i for i, _ in maps.mean_pairs] == [0, 1]
+        assert maps.n_no_estimate_zero_weight == 1
+        assert maps.n_no_estimate_nan_value == 0
+
+    def test_nothing_is_excluded_at_alpha_zero(self):
+        """The invariant the exclusion must never touch.
+
+        At ``alpha = 0`` every weight is exactly ``1.0``, so a contacted vertex
+        cannot reach ``sum(w) == 0`` and the zero-weight count is necessarily 0
+        — on the fixture built specifically to produce one above 0.
+        """
+        maps = _compute_touch_rf(_grazing_touch(), 3, "iff", 0.0)
+        assert [i for i, _ in maps.mean_pairs] == [0, 1, 2]
+        assert maps.n_no_estimate_zero_weight == 0
+        assert maps.n_no_estimate_nan_value == 0
 
 
 # ----------------------------------------------------------------------
@@ -265,9 +287,9 @@ class TestClampedGrazingContactsAtAlphaZero:
 # ----------------------------------------------------------------------
 
 def _fake_playback(n_vertices: int, touches, sidecar: str) -> PlaybackData:
-    """A ``PlaybackData`` over *touches*, spread across two (block, trial) keys.
+    """A ``PlaybackData`` over *touches*, one (block, trial) key each.
 
-    Two keys rather than one so ``touch_id_map`` is non-trivial: the stage
+    Several keys rather than one so ``touch_id_map`` is non-trivial: the stage
     numbers touches in block/trial iteration order, and a single-entry map would
     not notice if that ordering moved.
     """
@@ -298,13 +320,15 @@ def _legacy_backed_compute(touch, n_vertices, neuron_mode, depth_weight_alpha):
 
     The confidence channel did not exist before the weighting, so it is returned
     empty and is not part of the comparison: the parity claim is about
-    ``rf_data``, the array the maps themselves live in.
+    ``rf_data``, the array the maps themselves live in. The no-estimate counts
+    are returned as ``0`` for the same reason, and because the legacy estimator
+    could not produce a zero-weight vertex: it had no weights.
     """
     assert depth_weight_alpha == 0.0, (
         "the legacy estimator has no alpha; this shim is only valid at 0.0"
     )
     mean_pairs, max_pairs = _legacy_compute_touch_rf(touch, n_vertices, neuron_mode)
-    return TouchRFMaps(mean_pairs, max_pairs, [], [])
+    return TouchRFMaps(mean_pairs, max_pairs, [], [], 0, 0)
 
 
 @pytest.fixture
@@ -330,7 +354,15 @@ def rf_stage(tmp_path, monkeypatch):
     sidecar = str(merged_root / "blocks_rf_centered" / "block-order-02.parquet")
 
     n_vertices = fixtures.NAN_AND_DUPLICATE_N_VERTICES
-    touches = [fixtures.worked_example_touch(), fixtures.nan_and_duplicate_touch()]
+    # The grazing touch is in the stage fixture on purpose: it is the only one
+    # that produces a contacted vertex with zero total weight above alpha = 0, so
+    # without it the sentinel's ``no_estimate_vertices`` block could only ever be
+    # pinned at 0 and a counter that never counted would pass.
+    touches = [
+        fixtures.worked_example_touch(),
+        fixtures.nan_and_duplicate_touch(),
+        _grazing_touch(),
+    ]
 
     monkeypatch.setattr(pipe, "resolve_forearm_ply", lambda *_a, **_k: ply)
     monkeypatch.setattr(
@@ -351,7 +383,6 @@ def rf_stage(tmp_path, monkeypatch):
             preparation_dir=preparation_dir,
             contact_depth_field={
                 "blocks_stage_dir": "blocks_rf_centered",
-                "block_csv_stem_suffix": "_pca-xyz",
             },
         )
         if legacy:
@@ -421,6 +452,39 @@ class TestSavedMapsAreByteIdenticalAtAlphaZero:
         """
         assert rf_stage(0.0, "recorded")["summary"]["depth_weight_alpha"] == 0.0
 
+    def test_the_sentinel_reports_no_excluded_vertices_at_alpha_zero(self, rf_stage):
+        """The invariant, read off the artifact.
+
+        At ``alpha = 0`` every weight is exactly ``1.0``, so no contacted vertex
+        can reach ``sum(w) == 0`` — including the grazing touch, which is in this
+        fixture precisely because it produces one above 0. The count is therefore
+        necessarily 0, which is what makes "the exclusion policy cannot move an
+        alpha = 0 map" a checked fact rather than an argument.
+        """
+        summary = rf_stage(0.0, "no_estimate_alpha0")["summary"]
+        block = summary["no_estimate_vertices"]
+        assert block["zero_total_weight"] == 0
+        assert block["touches_with_zero_total_weight"] == 0
+        assert block["total"] == block["nan_neuron_value"]
+
+    def test_the_sentinel_counts_the_vertices_excluded_at_alpha_one(self, rf_stage):
+        """Excluded *and reported* — the exclusion is not silent.
+
+        A vertex dropped from the map is indistinguishable from one never touched
+        once the pairs are on disk, so the sentinel carries the count next to the
+        ``depth_weight_alpha`` that produced it. The grazing touch contributes
+        exactly one zero-weight vertex (v2, grazing in both its frames).
+        """
+        summary = rf_stage(1.0, "no_estimate_alpha1")["summary"]
+        block = summary["no_estimate_vertices"]
+        assert block["zero_total_weight"] == 1
+        assert block["touches_with_zero_total_weight"] == 1
+        assert block["total"] == (
+            block["zero_total_weight"] + block["nan_neuron_value"]
+        )
+        # It sits alongside the exponent because it is a function of it.
+        assert summary["depth_weight_alpha"] == 1.0
+
     def test_alpha_one_actually_moves_the_map(self, rf_stage):
         """The negative control.
 
@@ -454,13 +518,17 @@ class TestPlaybackViewerAgreesWithTheSavedMap:
     divergence it guards against is invisible: the window would simply draw a
     plausible, wrong map.
 
-    One documented difference remains, and it is a presentation choice rather
-    than a numeric one: ``_compute_touch_rf`` *drops* vertices whose mean is NaN
-    (so a "no neural data" touch reports zero vertices instead of an invisible
-    heatmap), while the viewer leaves them NaN in the scalar array and paints
-    them grey. The comparison below is therefore over the vertices the saved map
-    contains; the NaN fixture is included so that difference is exercised rather
-    than avoided.
+    One difference of *representation* remains, and it is a presentation choice
+    rather than a numeric one: a vertex with **no estimate** is *dropped* by
+    ``_compute_touch_rf`` (so a "no neural data" touch reports zero vertices
+    instead of an invisible heatmap), while the viewer leaves it NaN in the
+    scalar array and paints it grey. The value comparisons below are therefore
+    over the vertices the saved map contains. Which vertices those are is not
+    left to chance:
+    ``test_the_viewer_and_the_estimator_agree_on_which_vertices_have_no_estimate``
+    pins that the grey set and the omitted set are identical, at every alpha and
+    for both causes of "no estimate" — the NaN fixture and the grazing fixture
+    are both included so each cause is exercised rather than avoided.
     """
 
     @pytest.mark.parametrize("alpha", [0.0, 0.5, 1.0, 2.0])
@@ -497,6 +565,66 @@ class TestPlaybackViewerAgreesWithTheSavedMap:
         _assert_exactly_equal(
             f"weight_sum alpha={alpha}", iff_accum.weight_sum[idx], saved
         )
+
+    @pytest.mark.parametrize("alpha", [0.0, 0.5, 1.0, 2.0])
+    @pytest.mark.parametrize(
+        "name,make_touch,n_verts",
+        _TOUCHES + [("grazing", _grazing_touch, 3)],
+    )
+    def test_the_viewer_and_the_estimator_agree_on_which_vertices_have_no_estimate(
+        self, name, make_touch, n_verts, alpha
+    ):
+        """Same touch, same alpha: the grey vertices and the missing rows match.
+
+        This is the claim the two sides used to fail. The estimator *raised* on a
+        contacted vertex whose weights all came out zero while the viewer quietly
+        painted it grey, so a session the screen rendered without complaint was a
+        session the pipeline refused. Both now call the same predicate, and this
+        pins the consequence: over the contacted vertices, "NaN on screen" and
+        "absent from the saved map" are the same set — including the grazing
+        fixture, which is the only one that produces a zero-weight vertex.
+        """
+        touch = make_touch()
+        n_frames = len(touch.frame_iff)
+
+        iff_accum, _ = replay_touch_frames(touch, n_frames, n_verts, alpha)
+        drawn = mean_heatmap_scalars(iff_accum.value_sum, iff_accum.weight_sum)
+
+        contacted = contacted_vertices(touch, n_frames)
+        grey_on_screen = set(contacted[np.isnan(drawn[contacted])].tolist())
+
+        maps = _compute_touch_rf(touch, n_verts, "iff", alpha)
+        in_the_file = {i for i, _ in maps.mean_pairs}
+        missing_from_the_file = set(contacted.tolist()) - in_the_file
+
+        assert grey_on_screen == missing_from_the_file, (
+            f"{name} alpha={alpha}: the viewer paints {sorted(grey_on_screen)} "
+            f"grey but the saved map omits {sorted(missing_from_the_file)}"
+        )
+        # Painted grey, and *counted* — the exclusion is reported on both sides,
+        # split the same way, so neither is silent about it.
+        counts = no_estimate_summary(
+            iff_accum.value_sum, iff_accum.weight_sum, touch, n_frames
+        )
+        assert counts.zero_weight == maps.n_no_estimate_zero_weight
+        assert counts.nan_value == maps.n_no_estimate_nan_value
+        assert counts.total == len(missing_from_the_file)
+
+    @pytest.mark.parametrize("alpha", [0.5, 1.0, 2.0])
+    def test_a_grazing_only_vertex_is_grey_and_never_a_low_value(self, alpha):
+        """The failure this replaces: painting "no evidence" as "weak response".
+
+        v2 of the grazing fixture accumulates zero weight above ``alpha = 0``. A
+        fallback to the unweighted mean would have put 20 Hz on it and a
+        ``0/0 -> 0.0`` would have put a cold-but-real value on it; both would read
+        as a measured response at the edge of the receptive field. It must be
+        NaN, which the plotter paints grey.
+        """
+        touch = _grazing_touch()
+        iff_accum, _ = replay_touch_frames(touch, len(touch.frame_iff), 3, alpha)
+        drawn = mean_heatmap_scalars(iff_accum.value_sum, iff_accum.weight_sum)
+        assert np.isnan(drawn[2])
+        assert not np.isnan(drawn[0]) and not np.isnan(drawn[1])
 
     def test_the_window_cannot_be_opened_without_an_alpha(self):
         """No default, at the window boundary too.

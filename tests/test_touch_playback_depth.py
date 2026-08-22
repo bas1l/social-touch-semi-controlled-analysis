@@ -46,6 +46,7 @@ from analysis.receptive_field_mapping.data.touch_playback_data import (  # noqa:
 )
 
 from test_touch_playback_vertex_source import (  # noqa: E402
+    BLOCK_FILE,
     _cell,
     _load,
     _write_sidecar,
@@ -478,12 +479,35 @@ class TestCacheSchemaVersion:
 
 
 # ---------------------------------------------------------------------------
-# 3.3 — duplicate (frame_index, vertex_id) raises. Assert, do not reduce.
+# 3.3 (superseded) — a duplicate (frame_index, vertex_id) is carried, not rejected
 # ---------------------------------------------------------------------------
 
-class TestDuplicateFrameVertexPairsRaise:
+class TestDuplicateFrameVertexPairsAreCarried:
+    """A ``vertex_id`` repeated inside one frame loads, and both rows survive.
 
-    def test_duplicate_vertex_id_in_one_frame_raises(self, env):
+    The loader used to raise here, on the stated premise that duplicates "cancel
+    between numerator and denominator only while every depth weight is 1". The
+    premise is false. A frame's IFF is a single **scalar**, shared by every contact
+    point of that frame, so a vertex hit twice at weights ``w1`` and ``w2`` adds
+    ``IFF_f * w1 + IFF_f * w2 == IFF_f * (w1 + w2)`` to the numerator and
+    ``w1 + w2`` to the denominator: ``IFF_f`` factors out for *any* weights, not
+    only for ones.
+
+    Real data trips the case benignly. XY dedup runs in ``blocks_deduped``, *before*
+    ``vertex_id`` is assigned in ``blocks_projected``, so it guarantees distinct
+    positions and not distinct vertices — two points further apart than
+    ``dedup_epsilon`` still snap to one vertex where the mesh is coarser than
+    epsilon.
+
+    Only transport is checked here: both rows arrive, in file order, each with its
+    own depth, and nothing is deduplicated or collapsed deepest-wins. The arithmetic
+    consequence — the vertex is credited at the summed weight ``w1 + w2``, and its
+    weighted mean is exactly that of a single row of weight ``w1 + w2`` — is pinned
+    with hand-computed numbers in ``tests/test_vertex_weights.py``
+    (``TestADuplicatedVertexIsCreditedAtTheSummedWeight``).
+    """
+
+    def test_a_duplicated_vertex_id_in_one_frame_loads(self, env):
         _write_sidecar(
             env["blocks_dir"],
             frame_index=[1, 1, 1],
@@ -493,29 +517,47 @@ class TestDuplicateFrameVertexPairsRaise:
         _write_series_csv(
             env["csv_path"], [{"cell": _cell([0.0, 1.0, 2.0]), "frame_index": 1}]
         )
-        with pytest.raises(ValueError, match="duplicate"):
-            _load(env["tmp_path"], env["csv_path"], env["ply_path"], env["blocks_dir"])
+        touch = _touch(_load(env["tmp_path"], env["csv_path"], env["ply_path"], env["blocks_dir"]))
+        np.testing.assert_array_equal(touch.frame_vertex_indices[0], [30, 31, 30])
+        np.testing.assert_array_equal(touch.frame_depths[0], [-1.0, -2.0, -3.0])
 
-    def test_the_message_names_the_frame_and_the_vertex(self, env):
+    def test_each_duplicate_row_keeps_its_own_depth(self, env):
+        # A "take the deeper" reduction — the one the producer's own viewer uses —
+        # would return a single row carrying -9.0 and silently discard a measurement.
         _write_sidecar(
             env["blocks_dir"],
-            frame_index=[42, 42, 42],
-            vertex_id=[7, 7, 7],
-            depths=[-1.0, -2.0, -3.0],
+            frame_index=[1, 1],
+            vertex_id=[30, 30],
+            depths=[-1.0, -9.0],
         )
         _write_series_csv(
-            env["csv_path"], [{"cell": _cell([0.0, 1.0, 2.0]), "frame_index": 42}]
+            env["csv_path"], [{"cell": _cell([0.0, 1.0]), "frame_index": 1}]
         )
-        with pytest.raises(ValueError) as exc:
-            _load(env["tmp_path"], env["csv_path"], env["ply_path"], env["blocks_dir"])
-        message = str(exc.value)
-        assert "frame_index=42" in message
-        assert "[7]" in message
-        assert ".parquet" in message
+        touch = _touch(_load(env["tmp_path"], env["csv_path"], env["ply_path"], env["blocks_dir"]))
+        assert len(touch.frame_vertex_indices[0]) == 2
+        np.testing.assert_array_equal(touch.frame_vertex_indices[0], [30, 30])
+        np.testing.assert_array_equal(touch.frame_depths[0], [-1.0, -9.0])
 
-    def test_the_same_vertex_in_two_different_frames_is_fine(self, env):
-        # Uniqueness is per frame, not per block: a vertex touched in consecutive
-        # frames is the normal case and must not raise.
+    def test_a_duplicate_survives_the_cache_round_trip(self, env):
+        # The second load is a cache hit; the duplicated row must still be there.
+        _write_sidecar(
+            env["blocks_dir"],
+            frame_index=[3, 3, 3],
+            vertex_id=[12, 12, 5],
+            depths=[-2.0, -6.0, -0.5],
+        )
+        _write_series_csv(
+            env["csv_path"], [{"cell": _cell([0.0, 1.0, 2.0]), "frame_index": 3}]
+        )
+        _load(env["tmp_path"], env["csv_path"], env["ply_path"], env["blocks_dir"])
+        assert _playback_cache_path(env["csv_path"]).exists()
+        touch = _touch(_load(env["tmp_path"], env["csv_path"], env["ply_path"], env["blocks_dir"]))
+        np.testing.assert_array_equal(touch.frame_vertex_indices[0], [12, 12, 5])
+        np.testing.assert_array_equal(touch.frame_depths[0], [-2.0, -6.0, -0.5])
+
+    def test_the_same_vertex_in_two_different_frames_stays_in_its_own_frame(self, env):
+        # The ordinary case: a vertex touched in consecutive frames. Each frame keeps
+        # its own row, so the two depths do not merge.
         _write_sidecar(
             env["blocks_dir"],
             frame_index=[1, 2],
@@ -533,9 +575,10 @@ class TestDuplicateFrameVertexPairsRaise:
         np.testing.assert_array_equal(touch.frame_depths[0], [-1.0])
         np.testing.assert_array_equal(touch.frame_depths[1], [-5.0])
 
-    def test_duplicates_are_not_reduced_to_one_row(self, env):
-        # Guard against a future "fix" that dedups instead of raising: the deepest-wins
-        # reduction the producer's own viewer uses would silently change the answer.
+    def test_the_per_frame_count_guard_still_applies_to_duplicated_rows(self, env):
+        # Removing the uniqueness check did not weaken the guard that makes ordered
+        # correspondence safe: two sidecar rows for one CSV point still raises,
+        # duplicated vertex or not.
         _write_sidecar(
             env["blocks_dir"],
             frame_index=[1, 1],
@@ -543,14 +586,18 @@ class TestDuplicateFrameVertexPairsRaise:
             depths=[-1.0, -9.0],
         )
         _write_series_csv(
-            env["csv_path"], [{"cell": _cell([0.0, 1.0]), "frame_index": 1}]
+            env["csv_path"], [{"cell": _cell([0.0]), "frame_index": 1}]
         )
-        with pytest.raises(ValueError, match="asserted, never reduced"):
+        with pytest.raises(ValueError, match="count mismatch"):
             _load(env["tmp_path"], env["csv_path"], env["ply_path"], env["blocks_dir"])
 
 
 # ---------------------------------------------------------------------------
 # 3.5 — NaN depth raises with file / frame / vertex context
+#
+# This guard is unrelated to the removed uniqueness check and must stay: NaN is the
+# only remaining form of absence at the loader boundary, and it must not become a
+# zero weight indistinguishable from a grazing touch.
 # ---------------------------------------------------------------------------
 
 class TestNanDepthRaises:
@@ -585,7 +632,22 @@ class TestNanDepthRaises:
         assert "[4]" in message                  # vertex_id
         assert "[1]" in message                  # position within the frame
         assert ".parquet" in message             # file
-        assert "_merged_data.csv" in message     # the block it came from
+        assert BLOCK_FILE in message             # the block it came from
+
+    def test_nan_on_a_duplicated_row_still_raises(self, env):
+        # The duplicate is now carried through, so it must not carry a NaN past the
+        # boundary with it: the NaN guard runs on every row, duplicated or not.
+        _write_sidecar(
+            env["blocks_dir"],
+            frame_index=[9, 9],
+            vertex_id=[8, 8],
+            depths=[-1.0, float("nan")],
+        )
+        _write_series_csv(
+            env["csv_path"], [{"cell": _cell([0.0, 1.0]), "frame_index": 9}]
+        )
+        with pytest.raises(ValueError, match="NaN"):
+            _load(env["tmp_path"], env["csv_path"], env["ply_path"], env["blocks_dir"])
 
     def test_zero_depth_is_not_absent(self, env):
         # A grazing contact measured at exactly 0.0 mm is a real measurement and must

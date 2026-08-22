@@ -75,7 +75,6 @@ Usage
         [--out-png     "reports/depth_weight_delta_vs_distance.png"] \\
         [--depth-weight-alpha 1.0] [--baseline-alpha 0.0] \\
         [--blocks-stage-dir blocks_rf_centered] \\
-        [--block-csv-stem-suffix _pca-xyz] \\
         [--neuron-mode iff] [--n-bins 10]
 
 Every path is an argument.  Nothing is discovered, defaulted or guessed.
@@ -243,7 +242,6 @@ def main() -> None:
     parser.add_argument("--depth-weight-alpha", type=float, default=1.0)
     parser.add_argument("--baseline-alpha", type=float, default=0.0)
     parser.add_argument("--blocks-stage-dir", default="blocks_rf_centered")
-    parser.add_argument("--block-csv-stem-suffix", default="_pca-xyz")
     parser.add_argument("--neuron-mode", default="iff", choices=("iff", "spike"))
     parser.add_argument("--n-bins", type=int, default=10)
     args = parser.parse_args()
@@ -268,7 +266,6 @@ def main() -> None:
         args.prepared_csv,
         forearm_ply,
         depth_blocks_dir=session_root / args.blocks_stage_dir,
-        block_csv_stem_suffix=args.block_csv_stem_suffix,
         session_id=args.session,
     )
     forearm_vertices = playback.session_data.forearm_vertices

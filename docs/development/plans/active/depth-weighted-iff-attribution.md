@@ -103,8 +103,20 @@ the viewer windows draw a different map from the one written to disk.
 - [ ] Exactly **one** function in the codebase computes a per-vertex weighted mean; the other eight
       call sites delegate to it.
 - [x] A characterization test pins each of the nine former call sites' output across the merge.
-- [ ] `d_max == 0`, `sum(w) == 0`, and NaN depth each raise a typed error with file/frame/vertex
-      context. No NaN reaches an output array.
+- [ ] `d_max == 0` and NaN depth each raise a typed error with file/frame/vertex context. No NaN
+      reaches an output array.
+- [x] A contacted vertex with `sum(w) == 0` is **excluded from the map and counted**, not raised on.
+      **Revised 2026-08-21, after real data** (`2022-06-15_ST14-02`, block 2 / trial 6 /
+      single_touch 32, vertex 2252). The original criterion said "raise", and the reasoning behind
+      it — never `0/0 -> NaN` into the map, never fall back to the uniform mean — is *still correct
+      and still enforced*. What was wrong was the severity. A vertex whose every contact was grazing
+      has **zero penetration evidence**, so the weighted estimator is genuinely undefined there; the
+      answer is "no estimate", not "stop the session". Raising made one undefined vertex block a
+      whole run. The vertex is now dropped from all four lists (never emitted as `0.0`, never as
+      `NaN`, never backfilled) and the count is surfaced per touch in `TouchRFMaps` and aggregated
+      into `single_touch_rf_summary.json` under `no_estimate_vertices`, next to
+      `depth_weight_alpha`. Excluding-and-reporting is not a fallback; excluding-and-saying-nothing
+      would be.
 - [ ] `weight_sum` and `n_eff` are emitted per vertex and present in the saved artifacts.
 - [x] `depth_weight_alpha` appears in `single_touch_rf_summary.json`, so a config change invalidates
       the stage and two runs are distinguishable on disk. The sentinel also carries
@@ -268,10 +280,21 @@ away without removing the coupling.
    the nerve rate (`:481-483`) while IFF is never averaged down, so each Kinect frame is credited
    about 33 times, weighted by how long it was held. Depth weights multiply on top of this. Not
    introduced here, but it must be known before interpreting any change in the result.
-4. **Duplicate `(frame_index, vertex_id)` pairs.** The contract says possible; the design says not.
-   Duplicates are currently harmless because they double numerator and denominator equally — a
-   cancellation that only holds while the weight is 1. **Assert, do not reduce**: check uniqueness
-   per frame where weights are built and raise on violation.
+4. **Duplicate `(frame_index, vertex_id)` pairs — struck; this was never a hazard.** As originally
+   written: "The contract says possible; the design says not. Duplicates are currently harmless
+   because they double numerator and denominator equally — a cancellation that only holds while the
+   weight is 1. **Assert, do not reduce**: check uniqueness per frame where weights are built and
+   raise on violation." That was implemented (task 3.3), it fired on real data
+   (2022-06-15_ST14-02, block-order-01, `frame_index` 163, `vertex_id` 6254 twice among 156 rows),
+   and its premise is **false**. IFF is a per-frame *scalar* shared by every contact point of the
+   frame, so a vertex hit at weights `w1`, `w2` gains `IFF_f*w1 + IFF_f*w2 == IFF_f*(w1+w2)` in the
+   numerator and `w1+w2` in the denominator: `IFF_f` factors out at **any** weights. The check was
+   removed, and nothing replaced it — the rows are summed by `np.add.at`, which is transport rather
+   than reduction. The duplicates arise benignly: XY dedup runs in `blocks_deduped`, before
+   `vertex_id` is assigned in `blocks_projected`, so it guarantees distinct positions, not distinct
+   vertices. Consequence, and intended: such a vertex carries weight `w1 + w2 > 1` for that frame,
+   consistent with the deliberate absence of per-frame normalisation. The weighted **mean** equals
+   that of one row of weight `w1 + w2`; `n_eff` does not, and is entitled to differ.
 5. **`_CACHE_SCHEMA_VERSION` mismatch currently returns `None` and silently recomputes**
    (`:235`). Do not extend that pattern to the depth path. Bump the version **and** extend
    `required_keys` in the same change, or a stale cache passes the version check while lacking
@@ -545,9 +568,17 @@ storage and validation.
       same loop.
 - [x] 3.2 — Read `signed_depth_mm` off the rows already located in 2.5.5. There is no second join
       and no `.get(vertex_id, ...)` anywhere.
-- [x] 3.3 — Assert `(frame_index, vertex_id)` uniqueness per frame and raise on violation
+- [~] 3.3 — ~~Assert `(frame_index, vertex_id)` uniqueness per frame and raise on violation
       (hazard 4). **Assert, do not reduce** — the cancellation that makes duplicates harmless today
-      only holds while every weight is 1.
+      only holds while every weight is 1.~~ **Implemented, then reverted.** The assertion blocked
+      real runs, and its premise was wrong: IFF is a per-frame scalar, so it factors out of both
+      numerator and denominator at *any* weights, not only at 1 (hazard 4, struck). The check was
+      deleted; the duplicate rows are summed by the accumulator, and nothing lenient replaced it.
+      The other loader guards — per-frame count agreement, `vertex_id` bounds, NaN depth — are
+      untouched. The arithmetic claim that replaced the raise is pinned with hand-computed numbers
+      in `tests/test_vertex_weights.py::TestADuplicatedVertexIsCreditedAtTheSummedWeight`, and the
+      transport claim in
+      `tests/test_touch_playback_depth.py::TestDuplicateFrameVertexPairsAreCarried`.
 - [x] 3.4 — Store depth **per contact-frame**, not per dedup group. Hazard 1 is unchanged by the
       corrected join and is still the most dangerous item in this plan: two frames with identical
       `contact_points` text can carry different depths, and `_save_playback_cache` dedups groups by
@@ -607,7 +638,8 @@ storage and validation.
 
 **Files Modified:**
 - `src/analysis/receptive_field_mapping/data/touch_playback_data.py` — `_FrameRows`,
-  `_BlockVertexSource.rows_for_frame` (uniqueness + NaN assertions), `TouchEvent.frame_depths`,
+  `_BlockVertexSource.rows_for_frame` (bounds + NaN assertions; the uniqueness assertion was
+  later removed — hazard 4, struck), `TouchEvent.frame_depths`,
   cache v4 to v5 with per-contact-frame depth storage and its shape checks
 - `src/analysis/receptive_field_mapping/data/contact_depth_field_io.py` — `SIGNED_DEPTH_COLUMN`
 - `src/analysis/receptive_field_mapping/data/__init__.py` — re-export
@@ -634,8 +666,12 @@ storage and validation.
 - [x] 4.3 — Rename `contact_count` to `weight_sum` in `_compute_touch_rf` (`:66`, `:87-92`).
 - [x] 4.4 — Pass real weights into the shared accumulator. `neuron_values[fi]` is currently a
       **scalar** broadcast over the frame's vertices; with weights it becomes a `(K_i,)` array.
-- [x] 4.5 — Guard `sum(w) == 0` per vertex with an explicit policy and raise. Never `0/0 -> NaN`
-      into the map, and never fall back to the uniform mean.
+- [x] 4.5 — Guard `sum(w) == 0` per vertex with an explicit policy. Never `0/0 -> NaN` into the
+      map, and never fall back to the uniform mean. **The policy is exclude-and-count, not raise**
+      (revised 2026-08-21 — see the Success Criteria entry). Implemented first as a raise; that
+      fired on `2022-06-15_ST14-02` block 2 / trial 6 / single_touch 32, vertex 2252, and blocked
+      the run. Both prohibitions above survive the revision unchanged — the excluded vertex reaches
+      no output array and borrows no value from the unweighted estimator.
 - [x] 4.6 — Leave `val_max` unweighted; document why in the docstring.
 - [x] 4.7 — Emit `weight_sum` and `n_eff = (sum w)^2 / sum(w^2)` per vertex into the returned
       structure and the saved `.npz`.
@@ -669,9 +705,10 @@ storage and validation.
 - **The contacted set is taken from the vertex lists, not from `weight_sum > 0`.** Those
   two agree at `alpha = 0` and part company above it, and 4.5 depends on the difference:
   *never contacted* and *contacted but weightless* both leave `weight_sum == 0`, and only
-  the second is an error. Reading the contacted set off `np.unique(concatenate(...))`
+  the second is something to report. Reading the contacted set off `np.unique(concatenate(...))`
   keeps them separable and is identical to `np.where(weight_sum > 0)[0]` at `alpha = 0`,
-  so parity is unaffected.
+  so parity is unaffected. (Originally "only the second is an error" — see the revision
+  under 4.5.)
 - **`alpha < 0` raises.** Not asked for by the plan, but a negative exponent inverts the
   meaning of the weight (it would credit the *shallowest* contact most) and sends a
   clamped grazing point to infinity. Alpha must also be finite and a real number; `bool`
@@ -918,9 +955,11 @@ storage and validation.
   weights are exactly 1" rather than "the answer came out the same".
 - **6.2 is tested for the contrast, not just the case.** `alpha = 0` is the *only* exponent at
   which a permanently-grazing vertex is harmless: at `alpha > 0` it accumulates zero weight and
-  `_compute_touch_rf` raises. The fixture (`_grazing_touch`) asserts both halves — the grazing
-  vertex reports its unweighted 20 Hz at `alpha = 0`, and the same touch raises at `alpha = 1`.
-  Asserting only the first would leave `0.0 ** 0.0 == 1.0` looking like an accident.
+  `_compute_touch_rf` has **no estimate** for it. The fixture (`_grazing_touch`) asserts both
+  halves — the grazing vertex reports its unweighted 20 Hz at `alpha = 0`, and at `alpha` in
+  {0.5, 1, 2} the same touch drops it and counts it. Asserting only the first would leave
+  `0.0 ** 0.0 == 1.0` looking like an accident. (The second half read "the same touch raises at
+  `alpha = 1`" until 2026-08-21 — see the revision under 4.5.)
 - **6.3 and 6.4 are shipped as scripts and are UNRUN on real data.** This work was forbidden to
   read the experimental database, so both were validated on synthetic fixtures only — including a
   deliberately flat-depth fixture that drives `diagnose_depth_weight_variation` to its FALSIFIED
@@ -1011,6 +1050,12 @@ storage and validation.
 - `scripts/diagnose_depth_weight_delta_vs_distance.py` — new (6.4), **unrun on real data**
 - `src/analysis/receptive_field_mapping/data/touch_frame_weights.py` — new; the single
   depth -> weight conversion, shared by the pipeline and the viewer
+- `src/analysis/receptive_field_mapping/data/vertex_estimate.py` — new (2026-08-21, with the 4.5
+  revision); the single `value_sum / weight_sum` estimator and the single definition of "no
+  estimate", shared by the pipeline and the viewer. Added because the two had in fact diverged:
+  the pipeline raised on a zero-weight vertex while the viewer painted it grey, so the Touch
+  Playback Explorer rendered sessions the stage refused
+- `tests/test_vertex_estimate.py` — new (2026-08-21); the exclusion policy itself
 - `src/analysis/receptive_field_mapping/data/__init__.py` — re-exports
 - `src/analysis/receptive_field_mapping/pipelines/rf_single_touch_pipeline.py` — delegates to
   `touch_frame_weights`; `_touch_label` moved there
@@ -1040,7 +1085,19 @@ storage and validation.
 - [x] `vertex_weights`: negative (grazing) depths clamp to 0 and never subtract from `sum(w)`.
 - [x] Accumulator: hand-computed weighted mean, not a self-comparison — a wrong weighting still
       returns a plausible Hz value.
-- [x] Accumulator: `sum(w) == 0` for a vertex raises.
+- [x] Accumulator: `sum(w) == 0` for a vertex is excluded from all four lists and counted
+      (`n_no_estimate_zero_weight`), hand-computed. Was "raises" until 2026-08-21.
+- [x] A vertex with **some** grazing and **some** penetrating frames still gets an ordinary weighted
+      mean — only an *all*-grazing vertex is excluded. The grazing frames contribute 0 to both the
+      numerator and the denominator, so they cannot dilute it.
+- [x] The viewer and the estimator agree on **which** vertices have no estimate, for the same
+      synthetic touch at the same alpha, for both causes (all-grazing and all-NaN).
+- [x] A vertex hit **twice in one frame** is credited with that frame's IFF at the summed weight
+      `w1 + w2` (above 1, and that is intended), and its weighted mean is *identical* to that of a
+      single row of weight `w1 + w2` — hand-computed at `alpha = 1`, with the collapsed reference
+      built by handing the accumulator explicit weights rather than by re-running the estimator.
+      The Kish `n_eff` deliberately does **not** match the collapsed form; the equivalence is a
+      statement about the mean only.
 - [x] `n_eff`: flat weights give `n_eff` approximately `N`; one dominant frame gives `n_eff`
       approximately 1.
 
@@ -1081,11 +1138,24 @@ storage and validation.
       stage.
 
 ### Edge Cases
-- [x] A frame where every vertex is grazing (`d_max = 0`) raises with frame context.
+- [x] A frame where every vertex is grazing (`d_max = 0`) raises with frame context. A *frame* in
+      which nothing pressed in says the frame should not have been recorded as a touch; a *vertex*
+      that was only ever grazed is a legitimate observation about one corner of a real press. That
+      asymmetry is why one raises and the other does not.
+- [x] A vertex contacted only in grazing frames (`sum(w) = 0` at `alpha > 0`) is excluded from the
+      map and counted, at every alpha above 0, and is **unreachable at `alpha = 0`** where every
+      weight is exactly `1.0`. Pinned on the artifact too: the sentinel's
+      `no_estimate_vertices.zero_total_weight` is 0 at `alpha = 0` and 1 at `alpha = 1` on the same
+      stage fixture.
 - [x] A vertex contacted in exactly one frame gives a value identical to today, any alpha (the
       weight cancels).
 - [x] All-identical depths across a patch gives weights all 1.0 and output identical to today.
-- [x] Duplicate `(frame_index, vertex_id)` in a frame raises (assert, do not reduce).
+- [x] Duplicate `(frame_index, vertex_id)` in a frame is **carried through, not rejected and not
+      reduced**: both rows keep their own depth, the vertex is credited with the frame's IFF at the
+      summed weight `w1 + w2` (which may exceed 1), and its weighted mean is identical to that of a
+      single row of weight `w1 + w2` — hand-computed, at `alpha = 1`, in
+      `TestADuplicatedVertexIsCreditedAtTheSummedWeight`. Supersedes the original item, "raises
+      (assert, do not reduce)", whose premise was false (hazard 4, struck).
 - [ ] A frame whose parsed contact-point count differs from its sidecar row count raises with the
       parquet path, the `frame_index`, and both counts (2.5.6).
 - [ ] A malformed contact-point triplet raises in `parse_contact_points` rather than being dropped
@@ -1156,7 +1226,7 @@ storage and validation.
 | Depth is near-uniform across patches, so the feature does nothing | Med | Med | Phase 6.3 diagnostic measures this directly and can falsify the premise cheaply |
 | Change is dominated by the ~33x frame re-emission rather than spatial structure (hazard 3) | Med | **High** | Phase 6.4 predicts centre-vs-periphery; a uniform shift is the failure signature and halts the work |
 | Merging nine untested call sites regresses a GUI view | Med | Med | Characterization tests written **before** the merge (2.1); merge is behaviour-neutral by construction |
-| `sum(w)` near zero amplifies noise on a barely-grazed vertex | Med | Med | Explicit raise on `sum(w) == 0`; `n_eff` emitted so thin evidence is visible rather than rendered as an ordinary value |
+| `sum(w)` near zero amplifies noise on a barely-grazed vertex | Med | Med | Explicit policy on `sum(w) == 0`: **excluded from the map and counted** into `single_touch_rf_summary.json` (was "explicit raise" until 2026-08-21, when it fired on real data and blocked a run — an undefined vertex is not a broken input); `n_eff` emitted so thin evidence is visible rather than rendered as an ordinary value |
 | Upstream nearest-vertex assignment is approximate, and weighting amplifies mis-assignment | Med | Med | **Fixed for the playback path** in 2.5.5: `vertex_id` comes off the sidecar row, so attribution there is exact rather than nearest-neighbour. The two *other* KDTree sites (`rf_explorer_data.py:345`, `touch_population_data.py:686`) remain out of scope and still approximate; 2.5.7 records how far the corrected map moved |
 | New GUI option breaks the task detail panel render | Low | Low | 5.4 adds the key to `_OPTION_GROUP_OF`; manual verification covers it |
 

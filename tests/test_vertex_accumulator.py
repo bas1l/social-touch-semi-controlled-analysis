@@ -225,7 +225,8 @@ class TestSite1SingleTouchPipeline:
         touch = make_touch()
         # alpha = 0 is the baseline: every weight is exactly 1.0 and the
         # weighted code path must reproduce the pre-merge arrays byte for byte.
-        got_mean, got_max, _, _ = _compute_touch_rf(touch, n_verts, neuron_mode, 0.0)
+        maps = _compute_touch_rf(touch, n_verts, neuron_mode, 0.0)
+        got_mean, got_max = maps.mean_pairs, maps.max_pairs
         want_mean, want_max = _legacy_compute_touch_rf(touch, n_verts, neuron_mode)
         _assert_exactly_equal(f"{name}/{neuron_mode} mean_pairs", got_mean, want_mean)
         _assert_exactly_equal(f"{name}/{neuron_mode} max_pairs", got_max, want_max)

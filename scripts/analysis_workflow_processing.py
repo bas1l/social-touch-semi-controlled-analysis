@@ -4,6 +4,7 @@
 # analysis_workflow_viewers.py.
 import argparse
 import logging
+import sys
 from multiprocessing import Queue, freeze_support
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -100,7 +101,12 @@ from analysis.pipeline.output_dirs import (
     TOUCH_SUMMARIZE_BLOCKS,
 )
 
-from analysis.pipeline import collect_unique_session_dirs, discover_input_items, run_pipeline_stages
+from analysis.pipeline import (
+    collect_unique_session_dirs,
+    discover_input_items,
+    format_run_summary,
+    run_pipeline_stages,
+)
 from analysis.pipeline.shared_constants import single_touch_npz_filename
 
 # --- Module-level helpers ---
@@ -1808,7 +1814,14 @@ def spatial_set_camera_flow(
 
 # --- Dispatch ---
 
-def main():
+def main() -> int:
+    """Run the processing DAG and return the process exit code.
+
+    ``0`` means no task failed; ``1`` means at least one did.  A task skipped
+    for a declared reason — disabled, unmet dependency, input guard, bypass —
+    is not a failure.  The caller is ``sys.exit(main())``, so a run that
+    swallowed a failure can no longer report success.
+    """
     freeze_support()
     parser = argparse.ArgumentParser(
         description=(
@@ -1846,21 +1859,25 @@ def main():
 
     if not session_map:
         logging.warning("No valid session directories found. Exiting.")
-        return
+        return 0
 
     items_to_process = discover_input_items(session_map)
 
     if not items_to_process:
         logging.warning("No input files found. Exiting.")
-        return
+        return 0
 
     pipeline_stages = _build_pipeline_stages(dag_handler, items_to_process)
     task_names = [s["name"] for s in pipeline_stages]
     monitor = PipelineMonitor(report_path=report_file_path, stages=task_names, data_queue=Queue())
 
     logging.info(f"Starting analysis for {len(items_to_process)} collected items.")
-    run_pipeline_stages(pipeline_stages, dag_handler, monitor, items_to_process, "batch_run_processing")
+    outcome = run_pipeline_stages(
+        pipeline_stages, dag_handler, monitor, items_to_process, "batch_run_processing"
+    )
+    print(format_run_summary(outcome), flush=True)
     logging.info("Batch analysis finished.")
+    return outcome.exit_code
 
 
 def boundary_method_node_name(method_name: str) -> str:
@@ -2319,4 +2336,4 @@ def _build_pipeline_stages(dag_handler: DagConfigHandler, items_to_process) -> l
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

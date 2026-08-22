@@ -3,6 +3,7 @@
 # Viewer flows and dispatch are defined here; no dependency on analysis_workflow_processing.py.
 import argparse
 import logging
+import sys
 from pathlib import Path
 from multiprocessing import Queue, freeze_support
 from typing import List, Optional, Tuple
@@ -27,6 +28,7 @@ from analysis.touch_analytics.gui import launch_preparation_viewer
 from analysis.pipeline import (
     collect_unique_session_dirs,
     discover_input_items,
+    format_run_summary,
     run_pipeline_stages,
 )
 
@@ -302,7 +304,13 @@ def explore_rf_surface_flow(
     launch_rf_surface_viewer(input_items, neuron_mode=neuron_mode, iff_metric=iff_metric)
 
 
-def main():
+def main() -> int:
+    """Run the viewers DAG and return the process exit code.
+
+    ``0`` means no task failed; ``1`` means at least one did.  A task skipped
+    for a declared reason — disabled, unmet dependency, input guard, bypass —
+    is not a failure.  The caller is ``sys.exit(main())``.
+    """
     freeze_support()
     parser = argparse.ArgumentParser(
         description=(
@@ -338,13 +346,13 @@ def main():
 
     if not session_map:
         logging.warning("No valid session directories found. Exiting.")
-        return
+        return 0
 
     items_to_process = discover_input_items(session_map)
 
     if not items_to_process:
         logging.warning("No input files found. Exiting.")
-        return
+        return 0
 
     task_names = [
         "explore_precompute_caches",
@@ -425,10 +433,13 @@ def main():
         },
     ]
 
-    run_pipeline_stages(pipeline_stages, dag_handler, monitor, items_to_process, "batch_run_viewers")
-
+    outcome = run_pipeline_stages(
+        pipeline_stages, dag_handler, monitor, items_to_process, "batch_run_viewers"
+    )
+    print(format_run_summary(outcome), flush=True)
     logging.info("Batch viewer run finished.")
+    return outcome.exit_code
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -23,7 +23,6 @@ Usage
         --merged-root  "<db>/3_merged" \\
         --prepared-csv "<db>/4_analysed/preparation/<session>_prepared.csv" \\
         [--blocks-stage-dir blocks_rf_centered] \\
-        [--block-csv-stem-suffix _pca-xyz] \\
         [--neuron-mode iff]
 
 Every path is an argument. Nothing is discovered, defaulted or guessed.
@@ -92,7 +91,6 @@ def main() -> None:
     parser.add_argument("--merged-root", required=True, type=Path)
     parser.add_argument("--prepared-csv", required=True, type=Path)
     parser.add_argument("--blocks-stage-dir", default="blocks_rf_centered")
-    parser.add_argument("--block-csv-stem-suffix", default="_pca-xyz")
     parser.add_argument("--neuron-mode", default="iff", choices=("iff", "spike"))
     args = parser.parse_args()
 
@@ -107,7 +105,6 @@ def main() -> None:
         args.prepared_csv,
         forearm_ply,
         depth_blocks_dir=session_root / args.blocks_stage_dir,
-        block_csv_stem_suffix=args.block_csv_stem_suffix,
         session_id=args.session,
     )
     forearm_vertices = playback.session_data.forearm_vertices

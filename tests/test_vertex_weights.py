@@ -25,7 +25,14 @@ import rf_accumulator_fixtures as fixtures
 from analysis.receptive_field_mapping.data.contact_depth_field_io import (
     penetration_from_signed_mm,
 )
+from analysis.receptive_field_mapping.data.touch_frame_weights import (
+    touch_frame_weights,
+)
 from analysis.receptive_field_mapping.data.touch_playback_data import TouchEvent
+from analysis.receptive_field_mapping.data.vertex_accumulator import (
+    accumulate_vertex_values_into,
+    empty_accumulator,
+)
 from analysis.receptive_field_mapping.data.vertex_weights import vertex_weights
 from analysis.receptive_field_mapping.pipelines.rf_single_touch_pipeline import (
     _compute_touch_rf,
@@ -577,24 +584,70 @@ class TestEstimatorGuards:
                 "iff",
             )
 
-    def test_a_contacted_vertex_with_zero_total_weight_raises(self):
-        """Vertex 1 grazes in the only frame that touches it.
+    def test_a_contacted_vertex_with_zero_total_weight_is_excluded_and_counted(self):
+        """Vertex 1 grazes in **both** frames that touch it.
 
-        ``sum(w) == 0`` is a 0/0 in the estimator. It must raise: a NaN in the
-        map would render as an invisible vertex with a non-zero contact count,
-        and falling back to the unweighted mean would mix two estimators in one
-        picture.
+        Frame 0: depths ``(-2.0, +0.4)`` -> penetrations ``(2.0, -0.4)``, clamped
+        to ``(2.0, 0.0)``, ``d_max = 2.0``, weights ``(1.0, 0.0)``.
+        Frame 1: depths ``(-3.0, 0.0)`` -> penetrations ``(3.0, 0.0)``,
+        ``d_max = 3.0``, weights ``(1.0, 0.0)``.
+        So ``sum(w)`` is ``2.0`` at v0 and exactly ``0.0`` at v1.
+
+        ``sum(w) == 0`` is a 0/0: the vertex carries **no penetration evidence**
+        at this alpha, so the weighted estimator is undefined there. The answer
+        is "no estimate", not "stop" — the run originally raised here and that
+        blocked real sessions. It is excluded from all four lists (never
+        emitted as ``0.0`` or ``NaN``, never backfilled from the unweighted mean,
+        which would mix two estimators in one picture) and it is **counted**, so
+        the exclusion is visible in the artifact rather than silent.
+
+        v0 is unaffected: ``(1.0*50 + 1.0*100) / 2.0 == 75.0``.
         """
         touch = _touch(
             frame_vertices=[[0, 1], [0, 1]],
             frame_signed_depths=[[-2.0, 0.4], [-3.0, 0.0]],
             frame_iff=[50.0, 100.0],
         )
-        with pytest.raises(ValueError, match="total weight of 0"):
-            _compute_touch_rf(touch, 2, "iff", 1.0)
+        maps = _compute_touch_rf(touch, 2, "iff", 1.0)
+        assert [i for i, _ in maps.mean_pairs] == [0]
+        assert dict(maps.mean_pairs)[0] == 75.0
+        assert [i for i, _ in maps.max_pairs] == [0]
+        assert [i for i, _ in maps.weight_sum_pairs] == [0]
+        assert [i for i, _ in maps.n_eff_pairs] == [0]
+        assert maps.n_no_estimate_zero_weight == 1
+        assert maps.n_no_estimate_nan_value == 0
+
+    def test_a_partly_grazing_vertex_still_gets_a_normal_weighted_mean(self):
+        """Only an **all**-grazing vertex is excluded. One deep frame is enough.
+
+        v1 grazes in frame 0 (weight 0) and is the deepest point of frame 1
+        (weight 1.0), so ``sum(w) = 1.0`` and its mean is the plain 100 Hz of the
+        one frame that pressed in — the grazing frame contributes 0 to both the
+        numerator and the denominator and therefore cannot dilute it.
+        v0: weights ``(1.0, 1.0/3.0)``, mean ``(50 + 100/3) / (4/3) = 62.5``.
+        """
+        touch = _touch(
+            frame_vertices=[[0, 1], [0, 1]],
+            frame_signed_depths=[[-2.0, 0.4], [-1.0, -3.0]],
+            frame_iff=[50.0, 100.0],
+        )
+        maps = _compute_touch_rf(touch, 2, "iff", 1.0)
+        got = dict(maps.mean_pairs)
+        assert sorted(got) == [0, 1]
+        assert got[1] == 100.0
+        assert got[0] == pytest.approx(62.5, rel=1e-12)
+        assert dict(maps.weight_sum_pairs)[1] == 1.0
+        assert maps.n_no_estimate_zero_weight == 0
+        assert maps.n_no_estimate_nan_value == 0
 
     def test_the_same_vertex_is_fine_at_alpha_zero(self):
-        """A grazing vertex is not an error — it is only weightless above 0."""
+        """A grazing vertex is only weightless above 0 — and never at 0.
+
+        This is the invariant the exclusion cannot touch: at ``alpha = 0`` every
+        weight is exactly ``1.0`` (``0.0 ** 0.0 == 1.0``), so a contacted vertex
+        can never reach ``sum(w) == 0`` and nothing is ever excluded for that
+        reason.
+        """
         touch = _touch(
             frame_vertices=[[0, 1], [0, 1]],
             frame_signed_depths=[[-2.0, 0.4], [-3.0, 0.0]],
@@ -649,13 +702,19 @@ class TestEstimatorGuards:
             _compute_touch_rf(touch, 3, "iff", 1.0)
 
     def test_a_touch_with_no_contact_points_returns_four_empty_lists(self):
+        """No contact points means nothing to exclude, so both counts are 0.
+
+        Zero excluded is the honest answer here: the touch contacted no vertex,
+        so no vertex failed to get an estimate. It is *not* the same fact as
+        "every contacted vertex was grazing", which the counts report as > 0.
+        """
         touch = _touch(
             frame_vertices=[[], []],
             frame_signed_depths=[[], []],
             frame_iff=[50.0, 100.0],
         )
         maps = _compute_touch_rf(touch, 4, "iff", 1.0)
-        assert maps == ([], [], [], [])
+        assert maps == ([], [], [], [], 0, 0)
 
 
 class TestUniformDepthReproducesTodaysMap:
@@ -677,6 +736,158 @@ class TestUniformDepthReproducesTodaysMap:
         got = dict(_compute_touch_rf(touch, 5, "iff", alpha).mean_pairs)
         want = dict(_compute_touch_rf(touch, 5, "iff", 0.0).mean_pairs)
         assert got == want
+
+
+class TestADuplicatedVertexIsCreditedAtTheSummedWeight:
+    """Two contact points of one frame landing on one vertex sum their weights.
+
+    The loader used to reject a repeated ``(frame_index, vertex_id)``, on the stated
+    premise that duplicates "cancel between numerator and denominator only while
+    every depth weight is 1". That premise is false, and this class is what replaced
+    the guard. A frame's IFF is one **scalar**, shared by every contact point of that
+    frame, so for a vertex hit twice at weights ``w1``, ``w2``::
+
+        numerator   += IFF_f * w1 + IFF_f * w2 == IFF_f * (w1 + w2)
+        denominator += w1 + w2
+
+    ``IFF_f`` factors out for *any* weights. The load-bearing claim below is the
+    consequence: the per-vertex weighted mean is **identical** — bit for bit, not to
+    a tolerance — to the mean obtained by replacing the two rows with a single row of
+    weight ``w1 + w2``.
+
+    The fixture, and every expected number, computed by hand at ``alpha = 1``:
+
+    ==========  =======  ===================  ====================  =========
+    frame       IFF Hz   penetration mm       weights (d/d_max)     duplicate
+    ==========  =======  ===================  ====================  =========
+    0           40       v2 3, v5 4, v2 3     0.75, 1.00, 0.75      v2 twice
+    1           120      v2 1, v5 2           0.50, 1.00            --
+    ==========  =======  ===================  ====================  =========
+
+    * v2 weight in frame 0 = 0.75 + 0.75 = **1.5**, i.e. *above* 1. Intended: the
+      weighting deliberately does not normalise per frame, so a frame's total weight
+      already scales with how much of the patch it covers, and a vertex that caught
+      two contact points genuinely had more finger on it.
+    * v2 mean = (40*0.75 + 40*0.75 + 120*0.5) / (0.75 + 0.75 + 0.5)
+      = (30 + 30 + 60) / 2.0 = 120 / 2.0 = **60.0 Hz**, which is exactly
+      (40*1.5 + 120*0.5) / (1.5 + 0.5) — the collapsed form.
+    * v5 mean = (40*1.0 + 120*1.0) / 2.0 = 160 / 2.0 = **80.0 Hz**.
+    * v2 Kish n_eff = 2.0**2 / (0.75**2 + 0.75**2 + 0.5**2) = 4 / 1.375 = **32/11**
+      = 2.909..., which the collapsed form does **not** reproduce (4 / 2.5 = 1.6).
+      The equivalence is a statement about the *mean* only: two rows really are two
+      contributions, and the evidence channel is entitled to say so.
+
+    Every value in the fixture is a dyadic rational, so all of this arithmetic is
+    exact in binary floating point and the equality assertions carry no tolerance.
+    """
+
+    ALPHA = 1.0
+    N_VERTS = 6
+
+    @pytest.fixture()
+    def touch(self):
+        return _touch(
+            frame_vertices=[[2, 5, 2], [2, 5]],
+            frame_signed_depths=[[-3.0, -4.0, -3.0], [-1.0, -2.0]],
+            frame_iff=[40.0, 120.0],
+        )
+
+    def test_the_frame_weights_are_the_hand_computed_ones(self, touch):
+        np.testing.assert_array_equal(
+            touch_frame_weights(touch, 0, self.ALPHA), [0.75, 1.0, 0.75]
+        )
+        np.testing.assert_array_equal(
+            touch_frame_weights(touch, 1, self.ALPHA), [0.5, 1.0]
+        )
+
+    def test_the_duplicated_vertex_carries_more_than_unit_weight_in_that_frame(
+        self, touch
+    ):
+        weights = touch_frame_weights(touch, 0, self.ALPHA)
+        # Positions 0 and 2 of frame 0 are both vertex 2.
+        assert weights[0] + weights[2] == 1.5
+        assert weights[0] + weights[2] > 1.0
+
+    def test_the_weighted_means_are_the_hand_computed_ones(self, touch):
+        mean = dict(_compute_touch_rf(touch, self.N_VERTS, "iff", self.ALPHA).mean_pairs)
+        assert sorted(mean) == [2, 5]
+        assert mean[2] == 60.0
+        assert mean[5] == 80.0
+
+    def test_the_weight_sum_counts_both_rows(self, touch):
+        weight_sum = dict(
+            _compute_touch_rf(touch, self.N_VERTS, "iff", self.ALPHA).weight_sum_pairs
+        )
+        # v2: 0.75 + 0.75 + 0.5 ; v5: 1.0 + 1.0
+        assert weight_sum[2] == 2.0
+        assert weight_sum[5] == 2.0
+
+    def test_the_mean_equals_one_row_of_the_summed_weight(self, touch):
+        """The load-bearing claim: collapsing the two rows changes nothing.
+
+        The reference is built by handing the accumulator the *collapsed* batch
+        explicitly — v2 once, at weight ``w1 + w2 = 1.5`` — so it is not the
+        implementation compared against itself, and its answer is the hand-computed
+        60.0 / 80.0 above.
+        """
+        got = dict(_compute_touch_rf(touch, self.N_VERTS, "iff", self.ALPHA).mean_pairs)
+
+        collapsed = empty_accumulator(self.N_VERTS)
+        accumulate_vertex_values_into(
+            collapsed,
+            np.array([2, 5], dtype=np.int64),
+            40.0,
+            np.array([1.5, 1.0], dtype=np.float64),
+        )
+        accumulate_vertex_values_into(
+            collapsed,
+            np.array([2, 5], dtype=np.int64),
+            120.0,
+            np.array([0.5, 1.0], dtype=np.float64),
+        )
+        want = {
+            v: collapsed.value_sum[v] / collapsed.weight_sum[v] for v in (2, 5)
+        }
+        assert want[2] == 60.0
+        assert want[5] == 80.0
+        assert got[2] == want[2]
+        assert got[5] == want[5]
+
+    def test_n_eff_does_distinguish_the_two_rows(self, touch):
+        n_eff = dict(
+            _compute_touch_rf(touch, self.N_VERTS, "iff", self.ALPHA).n_eff_pairs
+        )
+        # 4 / (0.75**2 + 0.75**2 + 0.5**2) = 4 / 1.375 = 32/11
+        assert n_eff[2] == pytest.approx(32.0 / 11.0, rel=1e-15)
+        # The collapsed form would give 4 / (1.5**2 + 0.5**2) = 1.6. The mean is
+        # invariant; the evidence count is not, and must not silently claim to be.
+        assert n_eff[2] != pytest.approx(1.6, rel=1e-9)
+        assert n_eff[5] == 2.0
+
+    def test_the_max_map_ignores_weights_entirely(self, touch):
+        max_map = dict(
+            _compute_touch_rf(touch, self.N_VERTS, "iff", self.ALPHA).max_pairs
+        )
+        # Unweighted, so the duplicate cannot move it: both vertices saw 120 Hz.
+        assert max_map[2] == 120.0
+        assert max_map[5] == 120.0
+
+    @pytest.mark.parametrize("alpha", ALL_ALPHAS)
+    def test_the_scalar_iff_factors_out_at_every_alpha(self, alpha):
+        """A vertex hit twice in the *only* frame that touches it reports that IFF.
+
+        Whatever the two weights are, the mean is ``IFF * (w1 + w2) / (w1 + w2)``.
+        This is the algebraic statement the removed guard denied, swept over the
+        whole alpha dial rather than pinned at one point.
+        """
+        touch = _touch(
+            frame_vertices=[[1, 3, 1]],
+            frame_signed_depths=[[-0.5, -2.0, -1.25]],
+            frame_iff=[37.5],
+        )
+        mean = dict(_compute_touch_rf(touch, 4, "iff", alpha).mean_pairs)
+        assert mean[1] == pytest.approx(37.5, rel=1e-15)
+        assert mean[3] == pytest.approx(37.5, rel=1e-15)
 
 
 class TestSignConvention:
