@@ -2,7 +2,8 @@
 
 **Date:** 2026-08-21
 **Author:** Basil Duvernoy
-**Status:** In Progress
+**Status:** Completed
+**Completed:** 2026-08-22 13:00
 **Base Branch:** `feature/depth-weighted-iff-attribution`
 **Branch:** `feature/gui-dag-observability`
 
