@@ -1,8 +1,14 @@
 """Touch Playback Explorer GUI — dual 3D view for per-touch animation.
 
 Presents two side-by-side PyVista 3D forearm views:
-  - Left:  current-frame contact points as red spheres on the forearm point
-           cloud (PLY vertex colours when available, grey otherwise)
+  - Left:  current-frame contact points on the forearm point cloud (PLY vertex
+           colours when available, grey otherwise), coloured by **penetration
+           depth in millimetres** on a ``cool`` colourmap with its own
+           colourbar.  The scale is fixed for the whole of the selected touch,
+           so pressing harder mid-stroke visibly brightens the patch, and it is
+           computed straight from ``TouchEvent.frame_depths`` — the raw input to
+           the depth weighting, never its output, so it is identical at every
+           ``depth_weight_alpha``.
   - Right: heatmap accumulating from touch start (jet colormap, NaN=grey);
            mode toggleable between spike density and mean IFF (Hz).  Grey means
            **no estimate** — never contacted, contacted only grazingly (zero
@@ -43,8 +49,14 @@ from PyQt5.QtWidgets import (
 )
 from pyvistaqt import QtInteractor
 
+from analysis.receptive_field_mapping.data.contact_depth_field_io import (
+    penetration_from_signed_mm,
+)
 from analysis.receptive_field_mapping.data.touch_playback_data import PlaybackData, TouchEvent
-from analysis.receptive_field_mapping.data.touch_frame_weights import touch_frame_weights
+from analysis.receptive_field_mapping.data.touch_frame_weights import (
+    touch_frame_weights,
+    touch_label,
+)
 from analysis.receptive_field_mapping.data.vertex_accumulator import (
     AccumResult,
     accumulate_vertex_values_into,
@@ -199,6 +211,209 @@ def no_estimate_summary(
     return count_no_estimate(value_sum[idx], weight_sum[idx])
 
 
+# ----------------------------------------------------------------------
+# Left panel — penetration-depth colouring
+#
+# The left panel answers a different question from the right one: *how deeply
+# was the skin pressed at this instant*, in millimetres, straight off
+# ``TouchEvent.frame_depths``. It is the **raw input** to the depth weighting,
+# never its output, so nothing below takes ``depth_weight_alpha`` and nothing
+# below may ever be given one — the patch must look identical at alpha 0 and
+# alpha 1, which is the cleanest statement of what this panel is. The right
+# panel's weighting, accumulation and estimator are untouched by any of it.
+#
+# Two rules the functions here enforce rather than assume:
+#
+# * ``penetration_from_signed_mm`` is the single documented negation point in
+#   the codebase. It is called once, here, and ``-x`` is never spelled again.
+# * The colour scale is fixed **per touch**, not per frame. A per-frame scale
+#   would pin every frame's deepest point to full brightness, so pressing
+#   harder mid-stroke would change nothing on screen — destroying exactly the
+#   comparison the panel exists to make.
+# ----------------------------------------------------------------------
+
+# The left panel's colormap. Deliberately NOT the right panel's ``inferno``:
+# the two panels show different physical quantities (mm of indentation vs Hz of
+# firing) and must not be readable as one. ``cool`` is a cyan -> magenta ramp
+# that shares no hue with inferno's black/red/orange/yellow, stays fully
+# saturated at both ends so every contact point remains legible against the
+# black background, and is far enough from the desaturated pale-pink forearm
+# cloud that the patch reads as a patch. Its top end (magenta) is the deepest
+# indentation, so a harder press visibly brightens the patch.
+DEPTH_CMAP: str = "cool"
+
+# Scalar-bar title for the left panel. **Constant across touches** on purpose:
+# PyVista keys its scalar bars by title, so a title that varied with the data
+# would leave a stale bar behind on every selection change. The below-zero
+# convention is stated in the toolbar label instead (``depth_scale_text``),
+# which is free to change.
+DEPTH_SCALAR_BAR_TITLE: str = "Penetration (mm)"
+
+# Name of the point-data array carrying penetration on the left-panel contact
+# cloud. Distinct from the right panel's "heatmap" so a mesh can never be handed
+# to the wrong plotter and silently coloured by the wrong quantity.
+DEPTH_SCALARS_NAME: str = "penetration_mm"
+
+
+def frame_penetration_mm(touch: TouchEvent, frame_idx: int) -> np.ndarray:
+    """Return frame *frame_idx*'s ``(K_i,)`` penetration depths in millimetres.
+
+    Positive means pressed into the skin. The conversion from the stored
+    ``signed_depth_mm`` goes through ``penetration_from_signed_mm``, the single
+    documented negation point; this module does not own a second one.
+
+    The returned array is aligned element-for-element with
+    ``touch.frame_contact_pts[frame_idx]``, which is what makes it usable as
+    per-point scalars on the left panel's contact cloud.
+
+    Raises ``ValueError`` when the frame's depth array does not align with its
+    vertex array or with its contact-point array. There is no fallback to flat
+    colour: a desynchronised depth channel would paint every point the wrong
+    depth and still look entirely plausible.
+    """
+    verts = np.asarray(touch.frame_vertex_indices[frame_idx])
+    pts = np.asarray(touch.frame_contact_pts[frame_idx])
+    signed = np.asarray(touch.frame_depths[frame_idx])
+    if signed.shape[0] != verts.shape[0]:
+        raise ValueError(
+            f"frame_penetration_mm: touch {touch_label(touch)} frame {frame_idx} "
+            f"has {verts.shape[0]} contact vertices but {signed.shape[0]} depths. "
+            f"Both are read off the same sidecar rows in the same loop, so a "
+            f"mismatch means the two channels have desynchronised upstream."
+        )
+    if pts.shape[0] != signed.shape[0]:
+        raise ValueError(
+            f"frame_penetration_mm: touch {touch_label(touch)} frame {frame_idx} "
+            f"plots {pts.shape[0]} contact point(s) but carries {signed.shape[0]} "
+            f"depth(s). The left panel colours those points by those depths, so "
+            f"they must be the same length."
+        )
+    return penetration_from_signed_mm(signed)
+
+
+def touch_penetration_clim(touch: TouchEvent) -> Tuple[float, float]:
+    """Return the ``(min, max)`` penetration in mm over **every** frame of *touch*.
+
+    This is the left panel's colour range, computed once per touch and held fixed
+    for all of its frames, so that a frame pressed twice as deep as another looks
+    twice as deep. Recomputed only when the Session / Block / Trial / Touch
+    selection changes.
+
+    The lower bound is **not clamped at zero**. Grazing contacts sit just above
+    the surface and carry a small *negative* penetration; they are real data, and
+    clipping them would quietly assert that the touch pressed in everywhere it
+    registered. When the minimum is negative the colourbar shows a negative
+    millimetre value and ``depth_scale_text`` says what it means.
+
+    A touch whose every contact point sits at one identical depth yields a
+    zero-width range. That is left as it is rather than padded: a flat patch is
+    the truthful rendering of a perfectly uniform press, and widening the range
+    would invent a gradient that the data does not contain.
+
+    Raises ``ValueError`` when the touch's per-frame lists disagree in length,
+    when any depth is non-finite, or when the touch has no contact point in any
+    frame at all — a touch that carries no depth has no scale, and painting it a
+    flat colour instead would hide the fact that the depth channel is missing.
+    """
+    n_frames = len(touch.frame_depths)
+    if n_frames != len(touch.frame_vertex_indices) or n_frames != len(
+        touch.frame_contact_pts
+    ):
+        raise ValueError(
+            f"touch_penetration_clim: touch {touch_label(touch)} has "
+            f"{len(touch.frame_contact_pts)} contact-point frame(s), "
+            f"{len(touch.frame_vertex_indices)} vertex frame(s) and {n_frames} "
+            f"depth frame(s); all three are per-frame lists and must be the same "
+            f"length."
+        )
+
+    lo = np.inf
+    hi = -np.inf
+    n_points = 0
+    for frame_idx in range(n_frames):
+        pen = frame_penetration_mm(touch, frame_idx)
+        if pen.size == 0:
+            continue
+        if not np.isfinite(pen).all():
+            bad = np.flatnonzero(~np.isfinite(pen))
+            raise ValueError(
+                f"touch_penetration_clim: touch {touch_label(touch)} frame "
+                f"{frame_idx} holds non-finite penetration at position(s) "
+                f"{bad.tolist()[:10]} of {pen.size}. Missing depth is rejected at "
+                f"the loader boundary; by here it would silently widen or destroy "
+                f"the colour scale of every other frame."
+            )
+        lo = min(lo, float(pen.min()))
+        hi = max(hi, float(pen.max()))
+        n_points += int(pen.size)
+
+    if n_points == 0:
+        raise ValueError(
+            f"touch_penetration_clim: touch {touch_label(touch)} has no contact "
+            f"point in any of its {n_frames} frame(s), so it carries no "
+            f"penetration depth and has no colour scale. This is not a touch to "
+            f"paint flat — it is a touch whose depth channel is absent."
+        )
+    return (lo, hi)
+
+
+def depth_scale_text(clim: Tuple[float, float]) -> str:
+    """One-line toolbar summary of the left panel's fixed per-touch depth scale.
+
+    Spells the range in millimetres, and when the touch contains grazing contact
+    says so in words — the colourbar's negative tick is honest but terse, and a
+    reader must not have to infer that below zero means *not pressed in*.
+    """
+    lo, hi = clim
+    text = f"Depth: {lo:.3g} to {hi:.3g} mm"
+    if lo < 0.0:
+        text += "  (<0 = not pressed in)"
+    return text
+
+
+def add_contact_patch(
+    plotter,
+    cloud: pv.PolyData,
+    clim: Tuple[float, float],
+    *,
+    point_size: int = 8,
+) -> None:
+    """Draw *cloud* as the left panel's contact patch, coloured by penetration.
+
+    *cloud* must already carry the ``DEPTH_SCALARS_NAME`` point array in
+    millimetres; *clim* is the touch-wide range from :func:`touch_penetration_clim`.
+    Written once and used by both the interactive left plotter and the off-screen
+    left plotter of the video export, so an exported frame cannot be coloured
+    differently from the frame on screen.
+
+    The mapper's scalar range is re-asserted after the mesh is added. PyVista
+    shares one scalar bar between every mapper registered under the same title
+    and **widens** that bar to the union of their ranges; the previous touch's
+    actor is removed before the new bar is built, so the union does not in fact
+    arise today, but a per-touch scale that silently grew across a session would
+    be invisible on screen and is worth one assignment to make impossible.
+    """
+    actor = plotter.add_mesh(
+        cloud,
+        scalars=DEPTH_SCALARS_NAME,
+        cmap=DEPTH_CMAP,
+        clim=clim,
+        nan_color="black",
+        point_size=point_size,
+        render_points_as_spheres=point_size > 1,
+        show_scalar_bar=True,
+        scalar_bar_args={
+            "title": DEPTH_SCALAR_BAR_TITLE,
+            "n_labels": 5,
+            "color": "white",
+            "fmt": "%.3g",
+        },
+        name="contacts",
+        copy_mesh=False,
+    )
+    actor.mapper.scalar_range = clim
+
+
 class TouchPlaybackExplorer(QMainWindow):
     """QMainWindow with dual 3D views for animating per-touch contact + spike data.
 
@@ -254,6 +469,12 @@ class TouchPlaybackExplorer(QMainWindow):
         n_verts = len(self._data.session_data.forearm_vertices)
         self._iff_accum = empty_accumulator(n_verts)
         self._spike_accum = empty_accumulator(n_verts)
+
+        # Left-panel penetration-depth colour range, in millimetres. Fixed for
+        # the whole of the selected touch and recomputed in _load_touch() — i.e.
+        # exactly when the Session / Block / Trial / Touch selection changes.
+        # ``None`` only before the first touch is loaded.
+        self._depth_clim: Optional[Tuple[float, float]] = None
 
         # Heatmap mode: "spike" or "iff" (default).
         self._heatmap_mode: str = "iff"
@@ -410,6 +631,24 @@ class TouchPlaybackExplorer(QMainWindow):
         )
         toolbar.addWidget(self._no_estimate_label)
 
+        toolbar.addSeparator()
+
+        # Left-panel depth scale readout. The colourbar carries the numbers; this
+        # says in words what a negative bottom tick means, because "below zero"
+        # on a depth bar is exactly the reading a viewer would otherwise get
+        # backwards.
+        self._depth_scale_label = QLabel("Depth: —")
+        self._depth_scale_label.setFixedWidth(260)
+        self._depth_scale_label.setToolTip(
+            "Penetration-depth colour range of the LEFT panel, fixed for the "
+            "whole of the selected touch so that frames can be compared with "
+            "each other. Positive millimetres are pressed into the skin; a "
+            "negative minimum means the touch contains grazing contact that "
+            "never pressed in, and it is shown rather than clipped. This scale "
+            "is the raw depth channel and does not depend on depth_weight_alpha."
+        )
+        toolbar.addWidget(self._depth_scale_label)
+
     # ------------------------------------------------------------------
     # Combo cascade helpers
     # ------------------------------------------------------------------
@@ -561,9 +800,18 @@ class TouchPlaybackExplorer(QMainWindow):
     # ------------------------------------------------------------------
 
     def _load_touch(self, touch: TouchEvent) -> None:
-        """Set the current touch and reset all per-touch state."""
+        """Set the current touch and reset all per-touch state.
+
+        This is the single funnel every Session / Block / Trial / Touch change
+        goes through, so it is where the left panel's penetration-depth colour
+        scale is computed and cached: once per touch, over **all** of its frames,
+        and then held fixed while those frames play. It raises rather than
+        degrading if the touch carries no depth — see ``touch_penetration_clim``.
+        """
         self._current_touch = touch
         self._current_frame = 0
+        self._depth_clim = touch_penetration_clim(touch)
+        self._depth_scale_label.setText(depth_scale_text(self._depth_clim))
         n_frames = len(touch.frame_spikes)
         self._frame_label.setText(f"Frame: 0 / {n_frames}")
 
@@ -758,26 +1006,29 @@ class TouchPlaybackExplorer(QMainWindow):
         self._slider_value_label.setText(f"{frame_idx + 1} / {n_frames}")
         self._frame_slider.blockSignals(False)
 
-        # ---- Left view: contact points ----
+        # ---- Left view: contact points, coloured by penetration depth ----
+        if self._depth_clim is None:
+            raise RuntimeError(
+                "TouchPlaybackExplorer._render_frame: no penetration colour scale "
+                "is cached. _load_touch() computes it for every touch and is the "
+                "only way a touch becomes current, so reaching here means a touch "
+                "was set behind its back."
+            )
         pts = self._current_touch.frame_contact_pts[frame_idx]
         if len(pts) > 0:
             contact_cloud = pv.PolyData(np.asarray(pts, dtype=np.float64))
-            self._plotter_left.add_mesh(
-                contact_cloud,
-                color="red",
-                point_size=8,
-                render_points_as_spheres=True,
-                name="contacts",
+            contact_cloud[DEPTH_SCALARS_NAME] = frame_penetration_mm(
+                self._current_touch, frame_idx
             )
+            add_contact_patch(self._plotter_left, contact_cloud, self._depth_clim)
         else:
-            # No valid contacts this frame — replace with an invisible dummy
-            # so the named actor is cleared from the previous frame.
+            # No valid contacts this frame — replace with a single NaN-valued
+            # dummy so the named actor (and its colourbar) is cleared from the
+            # previous frame without the scale itself disappearing.
             empty = pv.PolyData(np.zeros((1, 3), dtype=np.float64))
-            self._plotter_left.add_mesh(
-                empty,
-                color="red",
-                point_size=1,
-                name="contacts",
+            empty[DEPTH_SCALARS_NAME] = np.array([np.nan], dtype=np.float64)
+            add_contact_patch(
+                self._plotter_left, empty, self._depth_clim, point_size=1
             )
 
         # ---- Right view: accumulate spike + IFF heatmap (incremental, O(K)) ----
@@ -1115,23 +1366,28 @@ class TouchPlaybackExplorer(QMainWindow):
                 spike_accum = empty_accumulator(n_verts)
                 cloud_right["heatmap"] = np.full(n_verts, np.nan, dtype=np.float64)
 
+                # Per-touch depth scale, exactly as on screen: one range for all
+                # of this touch's frames, recomputed when the touch changes. An
+                # exported video whose left panel used a different scale from the
+                # window would be worse than no export at all.
+                depth_clim = touch_penetration_clim(touch)
+
                 n_frames = len(touch.frame_spikes)
                 for fi in range(n_frames):
                     if progress.wasCanceled():
                         cancelled = True
                         break
 
-                    # Left: contact points.
+                    # Left: contact points, coloured by penetration depth.
                     pts = touch.frame_contact_pts[fi]
                     if len(pts) > 0:
                         contact_cloud = pv.PolyData(np.asarray(pts, dtype=np.float64))
-                        pl_left.add_mesh(
-                            contact_cloud, color="red", point_size=8,
-                            render_points_as_spheres=True, name="contacts",
-                        )
+                        contact_cloud[DEPTH_SCALARS_NAME] = frame_penetration_mm(touch, fi)
+                        add_contact_patch(pl_left, contact_cloud, depth_clim)
                     else:
                         empty = pv.PolyData(np.zeros((1, 3), dtype=np.float64))
-                        pl_left.add_mesh(empty, color="red", point_size=1, name="contacts")
+                        empty[DEPTH_SCALARS_NAME] = np.array([np.nan], dtype=np.float64)
+                        add_contact_patch(pl_left, empty, depth_clim, point_size=1)
 
                     # Right: accumulate heatmap.
                     accumulate_touch_frame(
